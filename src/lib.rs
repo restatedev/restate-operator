@@ -15,9 +15,6 @@ pub enum Error {
 
     #[error("A namespace cannot be created for this name as one already exists")]
     NameConflict,
-
-    #[error("StatefulSet PVC request bytes do not conform to expectations")]
-    MalformedStorageRequest,
 }
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 

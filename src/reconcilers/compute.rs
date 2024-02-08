@@ -9,16 +9,17 @@ use k8s_openapi::api::core::v1::{
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
-use kube::api::{DeleteParams, ListParams, PropagationPolicy};
-use kube::runtime::events::{Event, EventType, Recorder};
+use kube::api::{DeleteParams, Preconditions, PropagationPolicy};
+use kube::core::PartialObjectMeta;
+use kube::runtime::reflector::{ObjectRef, Store};
 use kube::{
     api::{Patch, PatchParams},
-    Api, Client, ResourceExt,
+    Api, ResourceExt,
 };
 use tracing::debug;
 
-use crate::reconcilers::{label_selector, label_selector_string, object_meta, resource_labels};
-use crate::{Error, RestateClusterCompute, RestateClusterSpec, RestateClusterStorage};
+use crate::reconcilers::{label_selector, object_meta, resource_labels};
+use crate::{Context, Error, RestateClusterCompute, RestateClusterSpec, RestateClusterStorage};
 
 fn restate_service_account(
     oref: &OwnerReference,
@@ -65,7 +66,7 @@ fn restate_service(oref: &OwnerReference) -> Service {
                     ..Default::default()
                 },
             ]),
-            cluster_ip: None, // headless service
+            cluster_ip: Some("None".into()), // headless service
             ..Default::default()
         }),
         status: None,
@@ -116,7 +117,7 @@ fn restate_statefulset(
             service_name: "restate".into(),
             template: PodTemplateSpec {
                 metadata: Some(ObjectMeta {
-                    labels: resource_labels(&oref.name),
+                    labels: Some(resource_labels(&oref.name)),
                     ..Default::default()
                 }),
                 spec: Some(PodSpec {
@@ -187,7 +188,7 @@ fn restate_statefulset(
             volume_claim_templates: Some(vec![PersistentVolumeClaim {
                 metadata: ObjectMeta {
                     name: Some("storage".into()),
-                    labels: resource_labels(&oref.name),
+                    labels: Some(resource_labels(&oref.name)),
                     ..Default::default()
                 },
                 spec: Some(PersistentVolumeClaimSpec {
@@ -215,16 +216,15 @@ fn restate_pvc_resources(storage: &RestateClusterStorage) -> VolumeResourceRequi
 }
 
 pub async fn reconcile_compute(
-    client: Client,
-    recorder: &Recorder,
+    ctx: &Context,
     namespace: &str,
     oref: &OwnerReference,
     spec: &RestateClusterSpec,
 ) -> Result<(), Error> {
-    let ss_api: Api<StatefulSet> = Api::namespaced(client.clone(), namespace);
-    let pvc_api: Api<PersistentVolumeClaim> = Api::namespaced(client.clone(), namespace);
-    let svc_api: Api<Service> = Api::namespaced(client.clone(), namespace);
-    let svcacc_api: Api<ServiceAccount> = Api::namespaced(client, namespace);
+    let ss_api: Api<StatefulSet> = Api::namespaced(ctx.client.clone(), namespace);
+    let pvc_api: Api<PersistentVolumeClaim> = Api::namespaced(ctx.client.clone(), namespace);
+    let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), namespace);
+    let svcacc_api: Api<ServiceAccount> = Api::namespaced(ctx.client.clone(), namespace);
 
     apply_service_account(
         namespace,
@@ -240,7 +240,16 @@ pub async fn reconcile_compute(
 
     apply_service(namespace, &svc_api, restate_service(oref)).await?;
 
-    resize_statefulset_storage(recorder, namespace, oref, &ss_api, &pvc_api, &spec.storage).await?;
+    resize_statefulset_storage(
+        namespace,
+        oref,
+        &ss_api,
+        &ctx.ss_store,
+        &pvc_api,
+        &ctx.pvc_meta_store,
+        &spec.storage,
+    )
+    .await?;
 
     apply_stateful_set(
         namespace,
@@ -254,7 +263,7 @@ pub async fn reconcile_compute(
 
 async fn apply_service(namespace: &str, ss_api: &Api<Service>, ss: Service) -> Result<(), Error> {
     let name = ss.metadata.name.as_ref().unwrap();
-    let params: PatchParams = PatchParams::apply("restate-cloud").force();
+    let params: PatchParams = PatchParams::apply("restate-operator").force();
     debug!("Applying Service {} in namespace {}", name, namespace);
     ss_api.patch(name, &params, &Patch::Apply(&ss)).await?;
     Ok(())
@@ -266,7 +275,7 @@ async fn apply_service_account(
     svcacc: ServiceAccount,
 ) -> Result<(), Error> {
     let name = svcacc.metadata.name.as_ref().unwrap();
-    let params: PatchParams = PatchParams::apply("restate-cloud").force();
+    let params: PatchParams = PatchParams::apply("restate-operator").force();
     debug!(
         "Applying ServiceAccount {} in namespace {}",
         name, namespace
@@ -278,22 +287,28 @@ async fn apply_service_account(
 }
 
 async fn resize_statefulset_storage(
-    recorder: &Recorder,
     namespace: &str,
     oref: &OwnerReference,
     ss_api: &Api<StatefulSet>,
+    ss_store: &Store<StatefulSet>,
     pvc_api: &Api<PersistentVolumeClaim>,
+    pvc_meta_store: &Store<PartialObjectMeta<PersistentVolumeClaim>>,
     storage: &RestateClusterStorage,
 ) -> Result<(), Error> {
-    // ensure all existing pvcs have the right size set
-    let pvcs = pvc_api
-        .list_metadata(&ListParams {
-            label_selector: Some(label_selector_string(label_selector(&oref.name))),
-            ..Default::default()
-        })
-        .await?;
+    let params: PatchParams = PatchParams::apply("restate-operator").force();
+    let resources = Some(restate_pvc_resources(storage));
 
-    let params: PatchParams = PatchParams::apply("restate-cloud");
+    // ensure all existing pvcs have the right size set
+    // first, filter the pvc meta store for our label selector
+    let pvcs = pvc_meta_store.state().into_iter().filter(|pvc_meta| {
+        for (k, v) in resource_labels(&oref.name) {
+            if pvc_meta.labels().get(&k) != Some(&v) {
+                return false;
+            }
+        }
+        true
+    });
+
     for pvc in pvcs {
         let name = pvc.name_any();
         debug!(
@@ -306,9 +321,12 @@ async fn resize_statefulset_storage(
                 &name,
                 &params,
                 &Patch::Apply(PersistentVolumeClaim {
-                    metadata: pvc.metadata,
+                    metadata: ObjectMeta {
+                        name: Some(name.clone()),
+                        ..Default::default()
+                    },
                     spec: Some(PersistentVolumeClaimSpec {
-                        resources: Some(restate_pvc_resources(storage)),
+                        resources: resources.clone(),
                         ..Default::default()
                     }),
                     status: None,
@@ -317,51 +335,43 @@ async fn resize_statefulset_storage(
             .await?;
     }
 
-    let existing = match ss_api.get_opt(RESTATE_STATEFULSET_NAME).await? {
+    let existing = match ss_store.get(&ObjectRef::new(RESTATE_STATEFULSET_NAME).within(namespace)) {
         Some(existing) => existing,
-        None => return Ok(()), // no existing statefulset; maybe first run or we deleted it on a previous reconciliation
+        // no statefulset in cache; possibilities:
+        // 1. first run and it hasn't ever been created => do nothing
+        // 3. we deleted it in a previous reconciliation, and the cache reflects this => do nothing
+        // 2. it has just been created, but cache doesn't have it yet. we'll reconcile again when it enters cache => do nothing
+        None => return Ok(()),
     };
 
-    let existing_request = match existing
+    let existing_resources = existing
         .spec
         .as_ref()
         .and_then(|spec| spec.volume_claim_templates.as_ref())
         .and_then(|templates| templates.first())
         .and_then(|storage| storage.spec.as_ref())
-        .and_then(|spec| spec.resources.as_ref())
-        .and_then(|resources| resources.requests.as_ref())
-        .and_then(|requests| requests.get("storage"))
-        .and_then(|storage| storage.0.parse::<i64>().ok()) // we always set this field as a number (bytes), and its immutable, so its fair to say its still a number
-    {
-        Some(existing_request) => existing_request,
-        None => {
-            // the statefulset must have a storage request
-            recorder
-                .publish(Event {
-                    type_: EventType::Warning,
-                    reason: "FailedReconcile".into(),
-                    note: Some(Error::MalformedStorageRequest.to_string()),
-                    action: "ResizeStatefulSet".into(),
-                    secondary: None,
-                })
-                .await?;
-            return Err(Error::MalformedStorageRequest)
-        },
-    };
+        .and_then(|spec| spec.resources.as_ref());
 
-    if existing_request == storage.storage_request_bytes {
+    if existing_resources == resources.as_ref() {
         return Ok(()); // nothing to do
     }
 
     // expansion case - we would have failed when updating the pvcs if this was a contraction
     // we have already updated the pvcs, we just need to delete and recreate the statefulset
     // we *must* delete with an orphan propagation policy; this means the deletion will *not* cascade down
-    // to the pods that this statefulset owns
+    // to the pods that this statefulset owns.
+    // recreation will happen later in the reconcile loop
     ss_api
         .delete(
             RESTATE_STATEFULSET_NAME,
             &DeleteParams {
                 propagation_policy: Some(PropagationPolicy::Orphan),
+                preconditions: Some(Preconditions {
+                    // resources are immutable; but if someone deleted and recreated it with different resources,
+                    // we don't want to delete it, hence the uid precondition
+                    uid: existing.uid(),
+                    resource_version: None,
+                }),
                 ..Default::default()
             },
         )
@@ -376,7 +386,7 @@ async fn apply_stateful_set(
     ss: StatefulSet,
 ) -> Result<(), Error> {
     let name = ss.metadata.name.as_ref().unwrap();
-    let params: PatchParams = PatchParams::apply("restate-cloud").force();
+    let params: PatchParams = PatchParams::apply("restate-operator").force();
     debug!("Applying Stateful Set {} in namespace {}", name, namespace);
     ss_api.patch(name, &params, &Patch::Apply(&ss)).await?;
     Ok(())
