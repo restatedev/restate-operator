@@ -30,7 +30,7 @@ telemetry = ["tonic", "opentelemetry-otlp"]
 actix-web = "4.4.0"
 futures = "0.3.28"
 tokio = { version = "1.32.0", features = ["macros", "rt-multi-thread"] }
-k8s-openapi = { version = "0.21.0", features = ["latest"] }
+k8s-openapi = { version = "0.21.0", features = ["latest", "schemars"] }
 kube = { version = "0.88.1", features = ["runtime", "client", "derive"] }
 schemars = { version = "0.8.12", features = ["chrono"] }
 serde = { version = "1.0.185", features = ["derive"] }
@@ -46,6 +46,7 @@ opentelemetry-otlp = { version = "0.13.0", features = ["tokio"], optional = true
 tonic = { version = "0.9", optional = true }
 thiserror = "1.0.47"
 anyhow = "1.0.75"
+itertools = "0.12.1"
 
 [dev-dependencies]
 assert-json-diff = "2.0.2"

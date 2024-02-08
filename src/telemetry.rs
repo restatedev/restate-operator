@@ -15,8 +15,8 @@ pub fn get_trace_id() -> TraceId {
 
 #[cfg(feature = "telemetry")]
 async fn init_tracer() -> opentelemetry::sdk::trace::Tracer {
-    let otlp_endpoint =
-        std::env::var("OPENTELEMETRY_ENDPOINT_URL").expect("Need a otel tracing collector configured");
+    let otlp_endpoint = std::env::var("OPENTELEMETRY_ENDPOINT_URL")
+        .expect("Need a otel tracing collector configured");
 
     let channel = tonic::transport::Channel::from_shared(otlp_endpoint)
         .unwrap()
@@ -26,11 +26,15 @@ async fn init_tracer() -> opentelemetry::sdk::trace::Tracer {
 
     opentelemetry_otlp::new_pipeline()
         .tracing()
-        .with_exporter(opentelemetry_otlp::new_exporter().tonic().with_channel(channel))
+        .with_exporter(
+            opentelemetry_otlp::new_exporter()
+                .tonic()
+                .with_channel(channel),
+        )
         .with_trace_config(opentelemetry::sdk::trace::config().with_resource(
             opentelemetry::sdk::Resource::new(vec![opentelemetry::KeyValue::new(
                 "service.name",
-                "doc-controller",
+                "restate-operator",
             )]),
         ))
         .install_batch(opentelemetry::runtime::Tokio)
@@ -49,7 +53,10 @@ pub async fn init() {
 
     // Decide on layers
     #[cfg(feature = "telemetry")]
-    let collector = Registry::default().with(telemetry).with(logger).with(env_filter);
+    let collector = Registry::default()
+        .with(telemetry)
+        .with(logger)
+        .with(env_filter);
     #[cfg(not(feature = "telemetry"))]
     let collector = Registry::default().with(logger).with(env_filter);
 

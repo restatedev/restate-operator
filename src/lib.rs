@@ -13,8 +13,11 @@ pub enum Error {
     // so boxing this error to break cycles
     FinalizerError(#[from] Box<kube::runtime::finalizer::Error<Error>>),
 
-    #[error("IllegalDocument")]
-    IllegalDocument,
+    #[error("A namespace cannot be created for this name as one already exists")]
+    NameConflict,
+
+    #[error("StatefulSet PVC request bytes do not conform to expectations")]
+    MalformedStorageRequest,
 }
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -37,6 +40,3 @@ pub use metrics::Metrics;
 
 /// Reconcilers
 mod reconcilers;
-
-#[cfg(test)]
-pub mod fixtures;

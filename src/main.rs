@@ -1,8 +1,8 @@
 use actix_web::{
     get, middleware, web::Data, App, HttpRequest, HttpResponse, HttpServer, Responder,
 };
-pub use kube_controllers::{self, telemetry, State};
 use prometheus::{Encoder, TextEncoder};
+pub use restate_operator::{self, telemetry, State};
 
 #[get("/metrics")]
 async fn metrics(c: Data<State>, _req: HttpRequest) -> impl Responder {
@@ -30,7 +30,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Initiatilize Kubernetes controller state
     let state = State::default();
-    let controller = kube_controllers::run(state.clone());
+    let controller = restate_operator::run(state.clone());
+    tokio::pin!(controller);
 
     // Start web server
     let server = HttpServer::new(move || {
@@ -42,9 +43,12 @@ async fn main() -> anyhow::Result<()> {
             .service(metrics)
     })
     .bind("0.0.0.0:8080")?
-    .shutdown_timeout(5);
+    .shutdown_timeout(5)
+    .run();
+
+    tokio::pin!(server);
 
     // Both runtimes implements graceful shutdown, so poll until both are done
-    tokio::join!(controller, server.run()).1?;
+    tokio::join!(controller, server).1?;
     Ok(())
 }

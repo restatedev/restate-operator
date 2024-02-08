@@ -2,6 +2,6 @@ use kube::CustomResourceExt;
 fn main() {
     print!(
         "{}",
-        serde_yaml::to_string(&kube_controllers::RestateCluster::crd()).unwrap()
+        serde_yaml::to_string(&restate_operator::RestateCluster::crd()).unwrap()
     )
 }

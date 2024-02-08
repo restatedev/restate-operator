@@ -1,7 +1,13 @@
-use crate::reconcilers::network_policies::reconcile_network_policies;
-use crate::{reconcilers, telemetry, Error, Metrics, Result};
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
+use k8s_openapi::api::apps::v1::StatefulSet;
+use k8s_openapi::api::core::v1::{
+    EnvVar, Namespace, ResourceRequirements, Service, ServiceAccount,
+};
+use k8s_openapi::api::networking::v1::{NetworkPolicy, NetworkPolicyPeer};
 use kube::{
     api::{Api, ListParams, Patch, PatchParams, ResourceExt},
     client::Client,
@@ -16,9 +22,13 @@ use kube::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::sync::Arc;
 use tokio::{sync::RwLock, time::Duration};
 use tracing::*;
+
+use crate::reconcilers::compute::reconcile_compute;
+use crate::reconcilers::network_policies::reconcile_network_policies;
+use crate::reconcilers::object_meta;
+use crate::{telemetry, Error, Metrics, Result};
 
 pub static RESTATE_CLUSTER_FINALIZER: &str = "clusters.restate.dev";
 
@@ -27,47 +37,88 @@ pub static RESTATE_CLUSTER_FINALIZER: &str = "clusters.restate.dev";
 /// This provides a hook for generating the CRD yaml (in crdgen.rs)
 #[derive(CustomResource, Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[cfg_attr(test, derive(Default))]
-#[kube(
-    kind = "RestateCluster",
-    group = "restate.dev",
-    version = "v1",
-    namespaced
-)]
+#[kube(kind = "RestateCluster", group = "restate.dev", version = "v1")]
 #[kube(status = "RestateClusterStatus", shortname = "rc")]
 pub struct RestateClusterSpec {
-    pub image: String,
-    pub replicas: i32,
+    pub storage: RestateClusterStorage,
+    pub compute: RestateClusterCompute,
+    pub security: Option<RestateClusterSecurity>,
 }
-/// The status object of `RestateCluster`
+
+/// Storage configuration
 #[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
-pub struct RestateClusterStatus {
-    /// Total number of available pods (ready for at least minReadySeconds) targeted by this statefulset.
-    pub available_replicas: Option<i32>,
-
-    /// Represents the latest available observations of a statefulset's current state.
-    pub conditions: Option<Vec<k8s_openapi::api::apps::v1::StatefulSetCondition>>,
-
-    /// currentReplicas is the number of Pods created by the StatefulSet controller from the StatefulSet version indicated by currentRevision.
-    pub current_replicas: Option<i32>,
-
-    /// currentRevision, if not empty, indicates the version of the StatefulSet used to generate Pods in the sequence \[0,currentReplicas).
-    pub current_revision: Option<String>,
-
-    /// observedGeneration is the most recent generation observed for this StatefulSet. It corresponds to the StatefulSet's generation, which is updated on mutation by the API Server.
-    pub observed_generation: Option<i64>,
-
-    /// readyReplicas is the number of pods created for this StatefulSet with a Ready Condition.
-    pub ready_replicas: Option<i32>,
-
-    /// replicas is the number of Pods created by the StatefulSet controller.
-    pub replicas: i32,
-
-    /// updateRevision, if not empty, indicates the version of the StatefulSet used to generate Pods in the sequence \[replicas-updatedReplicas,replicas)
-    pub update_revision: Option<String>,
-
-    /// updatedReplicas is the number of Pods created by the StatefulSet controller from the StatefulSet version indicated by updateRevision.
-    pub updated_replicas: Option<i32>,
+pub struct RestateClusterStorage {
+    /// storageClassName is the name of the StorageClass required by the claim. More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#class-1
+    /// this field is immutable
+    #[schemars(schema_with = "immutable_storage_class_name")]
+    pub storage_class_name: Option<String>,
+    /// storageRequestBytes is the amount of storage to request in volume claims. It is allowed to increase but not decrease.
+    #[schemars(schema_with = "expanding_volume_request")]
+    pub storage_request_bytes: i64,
 }
+
+fn immutable_storage_class_name(
+    _: &mut schemars::gen::SchemaGenerator,
+) -> schemars::schema::Schema {
+    serde_json::from_value(json!({
+        "type": "string",
+        "x-kubernetes-validations": [{
+            "rule": "self == oldSelf",
+            "message": "storageClassName is immutable"
+        }]
+    }))
+    .unwrap()
+}
+
+fn expanding_volume_request(_: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    serde_json::from_value(json!({
+        "type": "string",
+        "x-kubernetes-validations": [
+            {
+                "rule": "self >= oldSelf",
+                "message": "storageRequestBytes cannot be decreased"
+            },
+            {
+                "rule": "self > 268435456",
+                "message": "storageRequestBytes must be greater than 256MiB"
+            }
+        ]
+    }))
+    .unwrap()
+}
+
+/// Compute configuration
+#[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
+pub struct RestateClusterCompute {
+    /// replicas is the desired number of Restate nodes. If unspecified, defaults to 1.
+    pub replicas: Option<i32>,
+    /// Container image name. More info: https://kubernetes.io/docs/concepts/containers/images.
+    pub image: String,
+    /// Image pull policy. One of Always, Never, IfNotPresent. Defaults to Always if :latest tag is specified, or IfNotPresent otherwise. More info: https://kubernetes.io/docs/concepts/containers/images#updating-images
+    pub image_pull_policy: Option<String>,
+    /// List of environment variables to set in the container; these may override defaults
+    pub env: Option<Vec<EnvVar>>,
+    /// Compute Resources for the Restate container. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+    pub resources: Option<ResourceRequirements>,
+}
+
+/// Security configuration
+#[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
+pub struct RestateClusterSecurity {
+    pub service_account_annotations: Option<BTreeMap<String, String>>,
+    pub network_peers: Option<RestateClusterNetworkPeers>,
+}
+
+/// Network peers to allow access to restate ports
+#[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
+pub struct RestateClusterNetworkPeers {
+    pub ingress: Option<Vec<NetworkPolicyPeer>>,
+    pub admin: Option<Vec<NetworkPolicyPeer>>,
+    pub metrics: Option<Vec<NetworkPolicyPeer>>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
+pub struct RestateClusterStatus {}
 
 // Context for our reconciler
 #[derive(Clone)]
@@ -87,7 +138,7 @@ async fn reconcile(rc: Arc<RestateCluster>, ctx: Arc<Context>) -> Result<Action>
     let _timer = ctx.metrics.count_and_measure();
     ctx.diagnostics.write().await.last_event = Utc::now();
     let ns = rc.namespace().unwrap();
-    let rcs: Api<RestateCluster> = Api::namespaced(ctx.client.clone(), &ns);
+    let rcs: Api<RestateCluster> = Api::all(ctx.client.clone());
 
     info!("Reconciling RestateCluster \"{}\" in {}", rc.name_any(), ns);
     finalizer(&rcs, RESTATE_CLUSTER_FINALIZER, rc, |event| async {
@@ -110,25 +161,65 @@ impl RestateCluster {
     // Reconcile (for non-finalizer related changes)
     async fn reconcile(&self, ctx: Arc<Context>) -> Result<Action> {
         let client = ctx.client.clone();
-        let recorder = ctx.diagnostics.read().await.recorder(client.clone(), self);
         let ns = self.namespace().unwrap();
         let name = self.name_any();
-        let docs: Api<RestateCluster> = Api::namespaced(client, &ns);
+        let rcs: Api<RestateCluster> = Api::all(client.clone());
+        let nss: Api<Namespace> = Api::all(client.clone());
+        let recorder = ctx.diagnostics.read().await.recorder(client, self);
 
-        reconcile_network_policies(ctx.client.clone(), &ns).await?;
+        let oref = self.controller_owner_ref(&()).unwrap();
+
+        if let Some(ns) = nss.get_metadata_opt(&name).await? {
+            // check to see if extant namespace is managed by us
+            if !ns
+                .metadata
+                .owner_references
+                .map(|orefs| orefs.contains(&oref))
+                .unwrap_or(false)
+            {
+                recorder
+                    .publish(Event {
+                        type_: EventType::Warning,
+                        reason: "FailedReconcile".into(),
+                        note: Some(Error::NameConflict.to_string()),
+                        action: "CreateNamespace".into(),
+                        secondary: None,
+                    })
+                    .await?;
+                return Err(Error::NameConflict);
+            }
+        }
+
+        apply_namespace(
+            &nss,
+            Namespace {
+                metadata: object_meta(&oref, &name),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+        reconcile_network_policies(
+            ctx.client.clone(),
+            &ns,
+            &oref,
+            self.spec
+                .security
+                .as_ref()
+                .and_then(|s| s.network_peers.as_ref()),
+        )
+        .await?;
+
+        reconcile_compute(ctx.client.clone(), &recorder, &ns, &oref, &self.spec).await?;
 
         // always overwrite status object with what we saw
         let new_status = Patch::Apply(json!({
-            "apiVersion": "kube.rs/v1",
+            "apiVersion": "restate.dev/v1",
             "kind": "RestateCluster",
-            "status": RestateClusterStatus {
-            }
+            "status": RestateClusterStatus {}
         }));
-        let ps = PatchParams::apply("cntrlr").force();
-        let _o = docs
-            .patch_status(&name, &ps, &new_status)
-            .await
-            .map_err(Error::KubeError)?;
+        let ps = PatchParams::apply("restate-operator").force();
+        let _o = rcs.patch_status(&name, &ps, &new_status).await?;
 
         // If no events were received, check back every 5 minutes
         Ok(Action::requeue(Duration::from_secs(5 * 60)))
@@ -141,7 +232,7 @@ impl RestateCluster {
             .read()
             .await
             .recorder(ctx.client.clone(), self);
-        // Document doesn't have any real cleanup, so we just publish an event
+        // RestateCluster doesn't have any real cleanup, so we just publish an event
         recorder
             .publish(Event {
                 type_: EventType::Normal,
@@ -150,10 +241,17 @@ impl RestateCluster {
                 action: "Deleting".into(),
                 secondary: None,
             })
-            .await
-            .map_err(Error::KubeError)?;
+            .await?;
         Ok(Action::await_change())
     }
+}
+
+async fn apply_namespace(nss: &Api<Namespace>, ns: Namespace) -> std::result::Result<(), Error> {
+    let name = ns.metadata.name.as_ref().unwrap();
+    let params: PatchParams = PatchParams::apply("restate-operator").force();
+    debug!("Applying Namespace {}", name);
+    nss.patch(name, &params, &Patch::Apply(&ns)).await?;
+    Ok(())
 }
 
 /// Diagnostics to be exposed by the web server
@@ -164,14 +262,16 @@ pub struct Diagnostics {
     #[serde(skip)]
     pub reporter: Reporter,
 }
+
 impl Default for Diagnostics {
     fn default() -> Self {
         Self {
             last_event: Utc::now(),
-            reporter: "doc-controller".into(),
+            reporter: "restate-operator".into(),
         }
     }
 }
+
 impl Diagnostics {
     fn recorder(&self, client: Client, doc: &RestateCluster) -> Recorder {
         Recorder::new(client, self.reporter.clone(), doc.object_ref(&()))
@@ -214,119 +314,23 @@ pub async fn run(state: State) {
     let client = Client::try_default()
         .await
         .expect("failed to create kube Client");
-    let docs = Api::<RestateCluster>::all(client.clone());
-    if let Err(e) = docs.list(&ListParams::default().limit(1)).await {
+    let rc_api = Api::<RestateCluster>::all(client.clone());
+    let ss_api = Api::<StatefulSet>::all(client.clone());
+    let svc_api = Api::<Service>::all(client.clone());
+    let svcacc_api = Api::<ServiceAccount>::all(client.clone());
+    let np_api = Api::<NetworkPolicy>::all(client.clone());
+    if let Err(e) = rc_api.list(&ListParams::default().limit(1)).await {
         error!("CRD is not queryable; {e:?}. Is the CRD installed?");
-        info!("Installation: cargo run --bin crdgen | kubectl apply -f -");
         std::process::exit(1);
     }
-    Controller::new(docs, Config::default().any_semantic())
+    Controller::new(rc_api, Config::default().any_semantic())
         .shutdown_on_signal()
+        .owns(ss_api, Config::default())
+        .owns(svc_api, Config::default())
+        .owns(svcacc_api, Config::default())
+        .owns(np_api, Config::default())
         .run(reconcile, error_policy, state.to_context(client))
-        .filter_map(|x| async move { std::result::Result::ok(x) })
+        .filter_map(|x| async move { Result::ok(x) })
         .for_each(|_| futures::future::ready(()))
         .await;
-}
-
-// Mock tests relying on fixtures.rs and its primitive apiserver mocks
-#[cfg(test)]
-mod test {
-    use super::{error_policy, reconcile, Context, RestateCluster};
-    use crate::fixtures::{timeout_after_1s, Scenario};
-    use std::sync::Arc;
-
-    #[tokio::test]
-    async fn documents_without_finalizer_gets_a_finalizer() {
-        let (testctx, fakeserver, _) = Context::test();
-        let doc = RestateCluster::test();
-        let mocksrv = fakeserver.run(Scenario::FinalizerCreation(doc.clone()));
-        reconcile(Arc::new(doc), testctx).await.expect("reconciler");
-        timeout_after_1s(mocksrv).await;
-    }
-
-    #[tokio::test]
-    async fn finalized_doc_causes_status_patch() {
-        let (testctx, fakeserver, _) = Context::test();
-        let doc = RestateCluster::test().finalized();
-        let mocksrv = fakeserver.run(Scenario::StatusPatch(doc.clone()));
-        reconcile(Arc::new(doc), testctx).await.expect("reconciler");
-        timeout_after_1s(mocksrv).await;
-    }
-
-    #[tokio::test]
-    async fn finalized_doc_with_hide_causes_event_and_hide_patch() {
-        let (testctx, fakeserver, _) = Context::test();
-        let doc = RestateCluster::test().finalized().needs_hide();
-        let scenario = Scenario::EventPublishThenStatusPatch("HideRequested".into(), doc.clone());
-        let mocksrv = fakeserver.run(scenario);
-        reconcile(Arc::new(doc), testctx).await.expect("reconciler");
-        timeout_after_1s(mocksrv).await;
-    }
-
-    #[tokio::test]
-    async fn finalized_doc_with_delete_timestamp_causes_delete() {
-        let (testctx, fakeserver, _) = Context::test();
-        let doc = RestateCluster::test().finalized().needs_delete();
-        let mocksrv = fakeserver.run(Scenario::Cleanup("DeleteRequested".into(), doc.clone()));
-        reconcile(Arc::new(doc), testctx).await.expect("reconciler");
-        timeout_after_1s(mocksrv).await;
-    }
-
-    #[tokio::test]
-    async fn illegal_doc_reconcile_errors_which_bumps_failure_metric() {
-        let (testctx, fakeserver, _registry) = Context::test();
-        let doc = Arc::new(RestateCluster::illegal().finalized());
-        let mocksrv = fakeserver.run(Scenario::RadioSilence);
-        let res = reconcile(doc.clone(), testctx.clone()).await;
-        timeout_after_1s(mocksrv).await;
-        assert!(res.is_err(), "apply reconciler fails on illegal doc");
-        let err = res.unwrap_err();
-        assert!(err.to_string().contains("IllegalDocument"));
-        // calling error policy with the reconciler error should cause the correct metric to be set
-        error_policy(doc.clone(), &err, testctx.clone());
-        //dbg!("actual metrics: {}", registry.gather());
-        let failures = testctx
-            .metrics
-            .failures
-            .with_label_values(&["illegal", "finalizererror(applyfailed(illegaldocument))"])
-            .get();
-        assert_eq!(failures, 1);
-    }
-
-    // Integration test without mocks
-    use kube::api::{Api, ListParams, Patch, PatchParams};
-    #[tokio::test]
-    #[ignore = "uses k8s current-context"]
-    async fn integration_reconcile_should_set_status_and_send_event() {
-        let client = kube::Client::try_default().await.unwrap();
-        let ctx = super::State::default().to_context(client.clone());
-
-        // create a test doc
-        let doc = RestateCluster::test().finalized().needs_hide();
-        let docs: Api<RestateCluster> = Api::namespaced(client.clone(), "default");
-        let ssapply = PatchParams::apply("ctrltest");
-        let patch = Patch::Apply(doc.clone());
-        docs.patch("test", &ssapply, &patch).await.unwrap();
-
-        // reconcile it (as if it was just applied to the cluster like this)
-        reconcile(Arc::new(doc), ctx).await.unwrap();
-
-        // verify side-effects happened
-        let output = docs.get_status("test").await.unwrap();
-        assert!(output.status.is_some());
-        // verify hide event was found
-        let events: Api<k8s_openapi::api::core::v1::Event> = Api::all(client.clone());
-        let opts =
-            ListParams::default().fields("involvedObject.kind=Document,involvedObject.name=test");
-        let event = events
-            .list(&opts)
-            .await
-            .unwrap()
-            .into_iter()
-            .filter(|e| e.reason.as_deref() == Some("HideRequested"))
-            .last()
-            .unwrap();
-        dbg!("got ev: {:?}", &event);
-        assert_eq!(event.action.as_deref(), Some("Hiding"));
-    }
 }
