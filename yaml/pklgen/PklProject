@@ -1,0 +1,8 @@
+amends "pkl:Project"
+
+dependencies {
+  // use local dirs until https://github.com/apple/pkl-pantry/pull/12 merged
+  ["jsonschemacontrib"] = import("../../../../apple/pkl-pantry/packages/org.json_schema.contrib/PklProject")
+  ["jsonschema"] = import("../../../../apple/pkl-pantry/packages/org.json_schema/PklProject")
+  ["uri"] = import("../../../../apple/pkl-pantry/packages/pkl.experimental.uri/PklProject")
+}

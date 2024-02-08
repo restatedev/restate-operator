@@ -99,58 +99,27 @@ fn allow_public(oref: &OwnerReference) -> NetworkPolicy {
     }
 }
 
-fn allow_ingress(oref: &OwnerReference, peers: &[NetworkPolicyPeer]) -> NetworkPolicy {
+fn allow_access(
+    port_name: &str,
+    port: i32,
+    oref: &OwnerReference,
+    peers: Option<&[NetworkPolicyPeer]>,
+) -> NetworkPolicy {
     NetworkPolicy {
-        metadata: object_meta(oref, "allow-ingress-access"),
+        metadata: object_meta(oref, format!("allow-{port_name}-access")),
         spec: Some(NetworkPolicySpec {
             pod_selector: label_selector(&oref.name),
             policy_types: Some(vec!["Ingress".into()]),
-            ingress: Some(vec![NetworkPolicyIngressRule {
-                from: Some(peers.into()),
-                ports: Some(vec![NetworkPolicyPort {
-                    protocol: Some("TCP".into()),
-                    port: Some(IntOrString::Int(8080)),
-                    end_port: None,
-                }]),
-            }]),
-            ..Default::default()
-        }),
-    }
-}
-
-fn allow_admin(oref: &OwnerReference, peers: &[NetworkPolicyPeer]) -> NetworkPolicy {
-    NetworkPolicy {
-        metadata: object_meta(oref, "allow-admin-access"),
-        spec: Some(NetworkPolicySpec {
-            pod_selector: label_selector(&oref.name),
-            policy_types: Some(vec!["Ingress".into()]),
-            ingress: Some(vec![NetworkPolicyIngressRule {
-                from: Some(peers.into()),
-                ports: Some(vec![NetworkPolicyPort {
-                    protocol: Some("TCP".into()),
-                    port: Some(IntOrString::Int(9070)),
-                    end_port: None,
-                }]),
-            }]),
-            ..Default::default()
-        }),
-    }
-}
-
-fn allow_metrics(oref: &OwnerReference, peers: &[NetworkPolicyPeer]) -> NetworkPolicy {
-    NetworkPolicy {
-        metadata: object_meta(oref, "allow-metrics-access"),
-        spec: Some(NetworkPolicySpec {
-            pod_selector: label_selector(&oref.name),
-            policy_types: Some(vec!["Ingress".into()]),
-            ingress: Some(vec![NetworkPolicyIngressRule {
-                from: Some(peers.into()),
-                ports: Some(vec![NetworkPolicyPort {
-                    protocol: Some("TCP".into()),
-                    port: Some(IntOrString::Int(5122)),
-                    end_port: None,
-                }]),
-            }]),
+            ingress: peers.map(|peers| {
+                vec![NetworkPolicyIngressRule {
+                    from: Some(peers.into()),
+                    ports: Some(vec![NetworkPolicyPort {
+                        protocol: Some("TCP".into()),
+                        port: Some(IntOrString::Int(port)),
+                        end_port: None,
+                    }]),
+                }]
+            }),
             ..Default::default()
         }),
     }
@@ -168,34 +137,41 @@ pub async fn reconcile_network_policies(
     apply_network_policy(namespace, &np_api, allow_dns(oref)).await?;
     apply_network_policy(namespace, &np_api, allow_public(oref)).await?;
 
-    if let Some(network_peers) = network_peers {
-        if let Some(ingress) = &network_peers.ingress {
-            // only apply if there are peers; otherwise it would allow all
-            if !ingress.is_empty() {
-                apply_network_policy(namespace, &np_api, allow_ingress(oref, ingress)).await?
-            } else {
-                delete_network_policy(namespace, &np_api, "allow-ingress-access").await?
-            }
-        }
-        if let Some(admin) = &network_peers.admin {
-            if !admin.is_empty() {
-                apply_network_policy(namespace, &np_api, allow_admin(oref, admin)).await?
-            } else {
-                delete_network_policy(namespace, &np_api, "allow-admin-access").await?
-            }
-        }
-        if let Some(metrics) = &network_peers.metrics {
-            if !metrics.is_empty() {
-                apply_network_policy(namespace, &np_api, allow_metrics(oref, metrics)).await?
-            } else {
-                delete_network_policy(namespace, &np_api, "allow-metrics-access").await?
-            }
-        }
-    } else {
-        delete_network_policy(namespace, &np_api, "allow-ingress-access").await?;
-        delete_network_policy(namespace, &np_api, "allow-admin-access").await?;
-        delete_network_policy(namespace, &np_api, "allow-metrics-access").await?;
-    }
+    apply_network_policy(
+        namespace,
+        &np_api,
+        allow_access(
+            "ingress",
+            8080,
+            oref,
+            network_peers.and_then(|peers| peers.ingress.as_ref().map(Vec::as_slice)),
+        ),
+    )
+    .await?;
+
+    apply_network_policy(
+        namespace,
+        &np_api,
+        allow_access(
+            "admin",
+            9070,
+            oref,
+            network_peers.and_then(|peers| peers.admin.as_ref().map(Vec::as_slice)),
+        ),
+    )
+    .await?;
+
+    apply_network_policy(
+        namespace,
+        &np_api,
+        allow_access(
+            "metrics",
+            5122,
+            oref,
+            network_peers.and_then(|peers| peers.metrics.as_ref().map(Vec::as_slice)),
+        ),
+    )
+    .await?;
 
     Ok(())
 }
@@ -212,18 +188,5 @@ async fn apply_network_policy(
         name, namespace
     );
     np_api.patch(name, &params, &Patch::Apply(&np)).await?;
-    Ok(())
-}
-
-async fn delete_network_policy(
-    namespace: &str,
-    np_api: &Api<NetworkPolicy>,
-    name: &str,
-) -> Result<(), Error> {
-    debug!(
-        "Ensuring non-existence of Network Policy {} in namespace {}",
-        name, namespace
-    );
-    np_api.delete(name, &Default::default()).await?;
     Ok(())
 }

@@ -1,0 +1,102 @@
+import "@jsonschema/JsonSchema.pkl"
+import "@jsonschema/Parser.pkl"
+import "@jsonschemacontrib/internal/ModuleGenerator.pkl"
+import "@jsonschemacontrib/internal/Type.pkl"
+
+local schema = read("/dev/stdin")
+
+local parsedJsonSchema = Parser.parse(schema)
+
+local amendedSchema = (parsedJsonSchema as JsonSchema) {
+  properties {
+    ["spec"] {
+      properties {
+        ["compute"] {
+          properties {
+            ["env"] {
+              items {
+                properties = new {}
+              }
+            }
+            ["resources"] {
+              properties = new {}
+            }
+          }
+        }
+        ["security"] {
+          properties {
+            ["networkPeers"] {
+              properties {
+                ["ingress"] {
+                  items {
+                    properties = new {}
+                  }
+                }
+                ["admin"] {
+                  items {
+                    properties = new {}
+                  }
+                }
+                ["metrics"] {
+                  items {
+                    properties = new {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// yank out some k8s native types
+local envSchema = (amendedSchema.properties["spec"].properties["compute"].properties["env"].items!! as JsonSchema)
+local resourcesSchema = amendedSchema.properties["spec"].properties["compute"].properties["resources"]!! as JsonSchema
+local ingressPeersSchema = amendedSchema.properties["spec"].properties["security"].properties["networkPeers"].properties["ingress"].items!! as JsonSchema
+
+
+local moduleGenerator = new ModuleGenerator {
+  rootSchema = amendedSchema
+  moduleName = "RestateCluster"
+  existingTypes = Map(
+    envSchema,
+    (Type) {
+      moduleName = "RestateCluster"
+      name = "EnvVar"
+    },
+    resourcesSchema,
+    (Type) {
+      moduleName = "RestateCluster"
+      name = "ResourceRequirements"
+    },
+    ingressPeersSchema,
+    (Type) {
+      moduleName = "NetworkPolicy"
+      name = "NetworkPolicyPeer"
+    }
+  )
+  moduleNode {
+    imports = new {
+      new {
+        value = "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/EnvVar.pkl"
+      }
+      new {
+        value = "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/ResourceRequirements.pkl"
+      }
+      new {
+        value = "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/networking/v1/NetworkPolicy.pkl"
+      }
+    }
+  }
+}
+
+output {
+  files {
+    ["RestateCluster.pkl"] = (moduleGenerator.moduleNode) {
+      classes = moduleGenerator.moduleNode.classes.toList().filter((c) -> c.properties.length > 0).toListing()
+    }.output
+  }
+}
+

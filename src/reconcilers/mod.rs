@@ -21,7 +21,7 @@ pub fn label_selector(instance: &str) -> LabelSelector {
     }
 }
 
-pub fn object_meta(oref: &OwnerReference, name: &str) -> ObjectMeta {
+pub fn object_meta(oref: &OwnerReference, name: impl Into<String>) -> ObjectMeta {
     ObjectMeta {
         name: Some(name.into()),
         labels: Some(resource_labels(&oref.name)),

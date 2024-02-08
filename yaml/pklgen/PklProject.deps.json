@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "resolvedDependencies": {
+    "package://pkg.pkl-lang.org/pkl-pantry/org.json_schema.contrib@1": {
+      "type": "local",
+      "uri": "projectpackage://pkg.pkl-lang.org/pkl-pantry/org.json_schema.contrib@1.0.0",
+      "path": "../../../../apple/pkl-pantry/packages/org.json_schema.contrib"
+    },
+    "package://pkg.pkl-lang.org/pkl-pantry/pkl.experimental.syntax@1": {
+      "type": "local",
+      "uri": "projectpackage://pkg.pkl-lang.org/pkl-pantry/pkl.experimental.syntax@1.0.0",
+      "path": "../../../../apple/pkl-pantry/packages/pkl.experimental.syntax"
+    },
+    "package://pkg.pkl-lang.org/pkl-pantry/pkl.experimental.uri@1": {
+      "type": "local",
+      "uri": "projectpackage://pkg.pkl-lang.org/pkl-pantry/pkl.experimental.uri@1.0.0",
+      "path": "../../../../apple/pkl-pantry/packages/pkl.experimental.uri"
+    },
+    "package://pkg.pkl-lang.org/pkl-pantry/org.json_schema@1": {
+      "type": "local",
+      "uri": "projectpackage://pkg.pkl-lang.org/pkl-pantry/org.json_schema@1.0.0",
+      "path": "../../../../apple/pkl-pantry/packages/org.json_schema"
+    }
+  }
+}

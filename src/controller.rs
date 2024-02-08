@@ -50,6 +50,7 @@ pub struct RestateClusterSpec {
 
 /// Storage configuration
 #[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct RestateClusterStorage {
     /// storageClassName is the name of the StorageClass required by the claim. More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#class-1
     /// this field is immutable
@@ -90,6 +91,7 @@ fn expanding_volume_request(_: &mut schemars::gen::SchemaGenerator) -> schemars:
 
 /// Compute configuration
 #[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct RestateClusterCompute {
     /// replicas is the desired number of Restate nodes. If unspecified, defaults to 1.
     pub replicas: Option<i32>,
@@ -117,12 +119,14 @@ fn env_schema(g: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schem
 
 /// Security configuration
 #[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct RestateClusterSecurity {
     pub service_account_annotations: Option<BTreeMap<String, String>>,
     pub network_peers: Option<RestateClusterNetworkPeers>,
 }
 
 /// Network peers to allow access to restate ports
+/// If unset, will not allow any new traffic. Set any of these to [] to allow all traffic - not recommended.
 #[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
 pub struct RestateClusterNetworkPeers {
     #[schemars(default, schema_with = "network_peers_schema")]
@@ -407,7 +411,7 @@ pub async fn run(state: State) {
 
                 let instance = pvc.labels().get("app.kubernetes.io/instance")?.as_str();
 
-                return Some(ObjectRef::new(instance));
+                Some(ObjectRef::new(instance))
             },
         )
         .run(

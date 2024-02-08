@@ -111,7 +111,7 @@ spec:
                   image:
                     description: 'Container image name. More info: https://kubernetes.io/docs/concepts/containers/images.'
                     type: string
-                  image_pull_policy:
+                  imagePullPolicy:
                     description: 'Image pull policy. One of Always, Never, IfNotPresent. Defaults to Always if :latest tag is specified, or IfNotPresent otherwise. More info: https://kubernetes.io/docs/concepts/containers/images#updating-images'
                     nullable: true
                     type: string
@@ -161,8 +161,8 @@ spec:
                 description: Security configuration
                 nullable: true
                 properties:
-                  network_peers:
-                    description: Network peers to allow access to restate ports
+                  networkPeers:
+                    description: Network peers to allow access to restate ports If unset, will not allow any new traffic. Set any of these to [] to allow all traffic - not recommended.
                     nullable: true
                     properties:
                       admin:
@@ -430,7 +430,7 @@ spec:
                         type: array
                         x-kubernetes-list-type: atomic
                     type: object
-                  service_account_annotations:
+                  serviceAccountAnnotations:
                     additionalProperties:
                       type: string
                     nullable: true
@@ -439,14 +439,14 @@ spec:
               storage:
                 description: Storage configuration
                 properties:
-                  storage_class_name:
+                  storageClassName:
                     description: 'storageClassName is the name of the StorageClass required by the claim. More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#class-1 this field is immutable'
                     nullable: true
                     type: string
                     x-kubernetes-validations:
                     - message: storageClassName is immutable
                       rule: self == oldSelf
-                  storage_request_bytes:
+                  storageRequestBytes:
                     description: storageRequestBytes is the amount of storage to request in volume claims. It is allowed to increase but not decrease.
                     format: int64
                     minimum: 1.0
@@ -455,7 +455,7 @@ spec:
                     - message: storageRequestBytes cannot be decreased
                       rule: self >= oldSelf
                 required:
-                - storage_request_bytes
+                - storageRequestBytes
                 type: object
             required:
             - compute

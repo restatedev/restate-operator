@@ -18,6 +18,11 @@ doc = false
 name = "crdgen"
 path = "src/crdgen.rs"
 
+[[bin]]
+doc = false
+name = "schemagen"
+path = "src/schemagen.rs"
+
 [lib]
 name = "restate_operator"
 path = "src/lib.rs"
@@ -46,7 +51,6 @@ opentelemetry-otlp = { version = "0.13.0", features = ["tokio"], optional = true
 tonic = { version = "0.9", optional = true }
 thiserror = "1.0.47"
 anyhow = "1.0.75"
-itertools = "0.12.1"
 
 [dev-dependencies]
 assert-json-diff = "2.0.2"

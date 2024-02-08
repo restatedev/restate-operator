@@ -300,9 +300,10 @@ async fn resize_statefulset_storage(
 
     // ensure all existing pvcs have the right size set
     // first, filter the pvc meta store for our label selector
+    let labels = resource_labels(&oref.name);
     let pvcs = pvc_meta_store.state().into_iter().filter(|pvc_meta| {
-        for (k, v) in resource_labels(&oref.name) {
-            if pvc_meta.labels().get(&k) != Some(&v) {
+        for (k, v) in &labels {
+            if pvc_meta.labels().get(k) != Some(v) {
                 return false;
             }
         }
