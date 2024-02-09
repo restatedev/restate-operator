@@ -1,15 +1,14 @@
-import "package://pkg.pkl-lang.org/pkl-pantry/org.json_schema@1.0.0#/JsonSchema.pkl"
-import "package://pkg.pkl-lang.org/pkl-pantry/org.json_schema@1.0.0#/Parser.pkl"
 import "package://pkg.pkl-lang.org/pkl-pantry/org.json_schema.contrib@1.0.0#/internal/ModuleGenerator.pkl"
 import "package://pkg.pkl-lang.org/pkl-pantry/org.json_schema.contrib@1.0.0#/internal/Type.pkl"
+import "package://pkg.pkl-lang.org/pkl-pantry/org.json_schema@1.0.0#/JsonSchema.pkl"
+import "package://pkg.pkl-lang.org/pkl-pantry/org.json_schema@1.0.0#/Parser.pkl"
 import "package://pkg.pkl-lang.org/pkl-pantry/pkl.experimental.syntax@1.0.0#/ExpressionNode.pkl"
+import "package://pkg.pkl-lang.org/pkl-pantry/pkl.experimental.syntax@1.0.0#/TypeNode.pkl"
 
 local schema = read("/dev/stdin")
 
-local parsedJsonSchema = Parser.parse(schema)
-
 // clear out all the native k8s types so that their own properties are not made into Pkl types
-local amendedSchema = (parsedJsonSchema as JsonSchema) {
+local amendedSchema = (Parser.parse(schema) as JsonSchema) {
   properties {
     ["spec"] {
       properties {
@@ -84,6 +83,9 @@ local moduleGenerator = new ModuleGenerator {
   moduleNode {
     imports = new {
       new {
+        value = "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/apimachinery/pkg/apis/meta/v1/ObjectMeta.pkl"
+      }
+      new {
         value = "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/EnvVar.pkl"
       }
       new {
@@ -109,7 +111,30 @@ output {
           }
         }
       }
-      properties {
+      properties = new {
+        new {
+          docComment {
+            value = """
+              Standard object's metadata.
+
+              More info: <https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata>
+              """
+          }
+          name { value = "metadata" }
+          typeAnnotation {
+            type = new TypeNode.NullableTypeNode {
+              typeNode = new TypeNode.DeclaredTypeNode {
+                name {
+                  parts {
+                    new {
+                      value = "ObjectMeta"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
         new {
           modifiers { "fixed" }
           name { value = "apiVersion" }
@@ -124,6 +149,7 @@ output {
             value = "RestateCluster"
           }
         }
+        ...moduleGenerator.moduleNode.properties!!
       }
     }.output
   }

@@ -2,15 +2,19 @@ use opentelemetry::trace::TraceId;
 use tracing_subscriber::{prelude::*, EnvFilter, Registry};
 
 ///  Fetch an opentelemetry::trace::TraceId as hex through the full tracing stack
-pub fn get_trace_id() -> TraceId {
+pub fn get_trace_id() -> Option<TraceId> {
     use opentelemetry::trace::TraceContextExt as _; // opentelemetry::Context -> opentelemetry::trace::Span
     use tracing_opentelemetry::OpenTelemetrySpanExt as _; // tracing::Span to opentelemetry::Context
 
-    tracing::Span::current()
+    match tracing::Span::current()
         .context()
         .span()
         .span_context()
         .trace_id()
+    {
+        TraceId::INVALID => None,
+        valid => Some(valid),
+    }
 }
 
 #[cfg(feature = "telemetry")]
@@ -75,9 +79,10 @@ mod test {
         use super::*;
         super::init().await;
         #[tracing::instrument(name = "test_span")] // need to be in an instrumented fn
-        fn test_trace_id() -> TraceId {
+        fn test_trace_id() -> Option<TraceId> {
             get_trace_id()
         }
-        assert_ne!(test_trace_id(), TraceId::INVALID, "valid trace");
+        assert_ne!(test_trace_id(), None, "valid trace");
+        assert_ne!(test_trace_id(), Some(TraceId::INVALID), "valid trace");
     }
 }

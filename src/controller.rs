@@ -168,8 +168,9 @@ pub struct Context {
 
 #[instrument(skip(ctx, rc), fields(trace_id))]
 async fn reconcile(rc: Arc<RestateCluster>, ctx: Arc<Context>) -> Result<Action> {
-    let trace_id = telemetry::get_trace_id();
-    Span::current().record("trace_id", &field::display(&trace_id));
+    if let Some(trace_id) = telemetry::get_trace_id() {
+        Span::current().record("trace_id", &field::display(&trace_id));
+    }
     let recorder = ctx
         .diagnostics
         .read()
@@ -177,10 +178,9 @@ async fn reconcile(rc: Arc<RestateCluster>, ctx: Arc<Context>) -> Result<Action>
         .recorder(ctx.client.clone(), &rc);
     let _timer = ctx.metrics.count_and_measure();
     ctx.diagnostics.write().await.last_event = Utc::now();
-    let ns = rc.namespace().unwrap();
     let rcs: Api<RestateCluster> = Api::all(ctx.client.clone());
 
-    info!("Reconciling RestateCluster \"{}\" in {}", rc.name_any(), ns);
+    info!("Reconciling RestateCluster \"{}\"", rc.name_any());
     match finalizer(&rcs, RESTATE_CLUSTER_FINALIZER, rc.clone(), |event| async {
         match event {
             Finalizer::Apply(rc) => rc.reconcile(ctx.clone()).await,
@@ -218,7 +218,6 @@ impl RestateCluster {
     // Reconcile (for non-finalizer related changes)
     async fn reconcile(&self, ctx: Arc<Context>) -> Result<Action> {
         let client = ctx.client.clone();
-        let ns = self.namespace().unwrap();
         let name = self.name_any();
         let rcs: Api<RestateCluster> = Api::all(client.clone());
         let nss: Api<Namespace> = Api::all(client.clone());
@@ -248,7 +247,7 @@ impl RestateCluster {
 
         reconcile_network_policies(
             ctx.client.clone(),
-            &ns,
+            &name,
             &oref,
             self.spec
                 .security
@@ -257,7 +256,7 @@ impl RestateCluster {
         )
         .await?;
 
-        reconcile_compute(&ctx, &ns, &oref, &self.spec).await?;
+        reconcile_compute(&ctx, &name, &oref, &self.spec).await?;
 
         // always overwrite status object with what we saw
         let new_status = Patch::Apply(json!({
@@ -382,6 +381,8 @@ pub async fn run(state: State) {
 
     // all resources we create have this label
     let cfg = Config::default().labels("app.kubernetes.io/name=restate");
+    // but restateclusters themselves dont
+    let rc_cfg = Config::default();
 
     let (pvc_meta_store, pvc_meta_writer) = reflector::store();
     let pvc_meta_reflector = reflector(pvc_meta_writer, metadata_watcher(pvc_api, cfg.clone()))
@@ -393,7 +394,7 @@ pub async fn run(state: State) {
         .touched_objects()
         .default_backoff();
 
-    Controller::new(rc_api, cfg.clone())
+    Controller::new(rc_api, rc_cfg.clone())
         .shutdown_on_signal()
         .owns(ns_api, cfg.clone())
         .owns(svc_api, cfg.clone())

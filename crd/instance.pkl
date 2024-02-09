@@ -1,6 +1,9 @@
 import "RestateCluster.pkl"
 
 cluster = (RestateCluster) {
+  metadata {
+    name = "restate-test"
+  }
   spec {
     compute {
       image = "restatedev/restate:0.7.1"
