@@ -1,12 +1,14 @@
-import "@jsonschema/JsonSchema.pkl"
-import "@jsonschema/Parser.pkl"
-import "@jsonschemacontrib/internal/ModuleGenerator.pkl"
-import "@jsonschemacontrib/internal/Type.pkl"
+import "package://pkg.pkl-lang.org/pkl-pantry/org.json_schema@1.0.0#/JsonSchema.pkl"
+import "package://pkg.pkl-lang.org/pkl-pantry/org.json_schema@1.0.0#/Parser.pkl"
+import "package://pkg.pkl-lang.org/pkl-pantry/org.json_schema.contrib@1.0.0#/internal/ModuleGenerator.pkl"
+import "package://pkg.pkl-lang.org/pkl-pantry/org.json_schema.contrib@1.0.0#/internal/Type.pkl"
+import "package://pkg.pkl-lang.org/pkl-pantry/pkl.experimental.syntax@1.0.0#/ExpressionNode.pkl"
 
 local schema = read("/dev/stdin")
 
 local parsedJsonSchema = Parser.parse(schema)
 
+// clear out all the native k8s types so that their own properties are not made into Pkl types
 local amendedSchema = (parsedJsonSchema as JsonSchema) {
   properties {
     ["spec"] {
@@ -51,7 +53,7 @@ local amendedSchema = (parsedJsonSchema as JsonSchema) {
   }
 }
 
-// yank out some k8s native types
+// get the schemas for the native types
 local envSchema = (amendedSchema.properties["spec"].properties["compute"].properties["env"].items!! as JsonSchema)
 local resourcesSchema = amendedSchema.properties["spec"].properties["compute"].properties["resources"]!! as JsonSchema
 local ingressPeersSchema = amendedSchema.properties["spec"].properties["security"].properties["networkPeers"].properties["ingress"].items!! as JsonSchema
@@ -60,6 +62,7 @@ local ingressPeersSchema = amendedSchema.properties["spec"].properties["security
 local moduleGenerator = new ModuleGenerator {
   rootSchema = amendedSchema
   moduleName = "RestateCluster"
+  // tell the generator to treat these native types as pre-existing
   existingTypes = Map(
     envSchema,
     (Type) {
@@ -77,6 +80,7 @@ local moduleGenerator = new ModuleGenerator {
       name = "NetworkPolicyPeer"
     }
   )
+  // import the native types
   moduleNode {
     imports = new {
       new {
@@ -95,7 +99,32 @@ local moduleGenerator = new ModuleGenerator {
 output {
   files {
     ["RestateCluster.pkl"] = (moduleGenerator.moduleNode) {
+      // filter out the (empty) generated classess for the native types
       classes = moduleGenerator.moduleNode.classes.toList().filter((c) -> c.properties.length > 0).toListing()
+      declaration {
+        moduleHeader {
+          moduleExtendsOrAmendsClause {
+            type = "extends"
+            extendedModule = "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/K8sResource.pkl"
+          }
+        }
+      }
+      properties {
+        new {
+          modifiers { "fixed" }
+          name { value = "apiVersion" }
+          defaultValue = new ExpressionNode.LiteralValueExpressionNode {
+            value = "restate.dev/v1"
+          }
+        }
+        new {
+          modifiers { "fixed" }
+          name { value = "kind" }
+          defaultValue = new ExpressionNode.LiteralValueExpressionNode {
+            value = "RestateCluster"
+          }
+        }
+      }
     }.output
   }
 }

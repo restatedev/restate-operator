@@ -1,6 +1,8 @@
 generate:
-  cargo run --bin crdgen > yaml/crd.yaml
-  cargo run --bin schemagen | pkl eval yaml/pklgen/generate.pkl --project-dir yaml/pklgen -m yaml
+  cargo run --bin crdgen > crd/crd.yaml
+
+generate-pkl:
+  cargo run --bin schemagen | pkl eval crd/pklgen/generate.pkl -m crd
 
 install-crd: generate
-  kubectl apply -f yaml/crd.yaml
+  kubectl apply -f crd/crd.yaml

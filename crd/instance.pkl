@@ -3,7 +3,7 @@ import "RestateCluster.pkl"
 cluster = (RestateCluster) {
   spec {
     compute {
-      image = "restatedev/restate:0.8.0"
+      image = "restatedev/restate:0.7.1"
     }
     storage {
       storageRequestBytes = 2.gib.toUnit("b").value as Int
@@ -12,6 +12,10 @@ cluster = (RestateCluster) {
 }
 
 output {
-  renderer = new YamlRenderer {}
-  value = cluster
+  renderer = new YamlRenderer {
+    isStream = true
+  }
+  value = new Listing {
+    cluster
+  }
 }

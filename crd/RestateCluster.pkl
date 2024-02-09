@@ -6,6 +6,8 @@
 /// module level.
 module RestateCluster
 
+extends "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/K8sResource.pkl"
+
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/EnvVar.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/ResourceRequirements.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/networking/v1/NetworkPolicy.pkl"
@@ -16,6 +18,10 @@ import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/networking/v1/NetworkP
 spec: Spec
 
 status: Dynamic?
+
+fixed apiVersion = "restate.dev/v1"
+
+fixed kind = "RestateCluster"
 
 /// Generate the Kubernetes wrapper struct `RestateCluster` from our Spec and Status struct
 ///
