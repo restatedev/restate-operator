@@ -35,13 +35,11 @@ use crate::{telemetry, Error, Metrics, Result};
 
 pub static RESTATE_CLUSTER_FINALIZER: &str = "clusters.restate.dev";
 
-/// Generate the Kubernetes wrapper struct `RestateCluster` from our Spec and Status struct
-///
-/// This provides a hook for generating the CRD yaml (in crdgen.rs)
+/// Represents the configuration of a Restate Cluster
 #[derive(CustomResource, Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[cfg_attr(test, derive(Default))]
 #[kube(kind = "RestateCluster", group = "restate.dev", version = "v1")]
-#[kube(status = "RestateClusterStatus", shortname = "rc")]
+#[kube(status = "RestateClusterStatus", shortname = "rsc")]
 pub struct RestateClusterSpec {
     pub storage: RestateClusterStorage,
     pub compute: RestateClusterCompute,

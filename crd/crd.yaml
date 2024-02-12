@@ -9,7 +9,7 @@ spec:
     kind: RestateCluster
     plural: restateclusters
     shortNames:
-    - rc
+    - rsc
     singular: restatecluster
   scope: Cluster
   versions:
@@ -20,10 +20,7 @@ spec:
         description: Auto-generated derived type for RestateClusterSpec via `CustomResource`
         properties:
           spec:
-            description: |-
-              Generate the Kubernetes wrapper struct `RestateCluster` from our Spec and Status struct
-
-              This provides a hook for generating the CRD yaml (in crdgen.rs)
+            description: Represents the configuration of a Restate Cluster
             properties:
               compute:
                 description: Compute configuration

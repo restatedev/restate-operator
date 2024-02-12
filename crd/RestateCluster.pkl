@@ -22,16 +22,12 @@ fixed apiVersion = "restate.dev/v1"
 
 fixed kind = "RestateCluster"
 
-/// Generate the Kubernetes wrapper struct `RestateCluster` from our Spec and Status struct
-///
-/// This provides a hook for generating the CRD yaml (in crdgen.rs)
+/// Represents the configuration of a Restate Cluster
 spec: Spec
 
 status: Dynamic?
 
-/// Generate the Kubernetes wrapper struct `RestateCluster` from our Spec and Status struct
-///
-/// This provides a hook for generating the CRD yaml (in crdgen.rs)
+/// Represents the configuration of a Restate Cluster
 class Spec {
   /// Compute configuration
   compute: Compute
