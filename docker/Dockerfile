@@ -1,10 +1,10 @@
 FROM --platform=$BUILDPLATFORM ghcr.io/restatedev/dev-tools:latest AS planner
-COPY . .
+COPY .. .
 RUN just chef-prepare
 
 FROM --platform=$BUILDPLATFORM ghcr.io/restatedev/dev-tools:latest AS base
 COPY --from=planner /restate/recipe.json recipe.json
-COPY justfile justfile
+COPY ../justfile justfile
 
 # avoid sharing sccache port between multiplatform builds - they share a network but not a filesystem, so it won't work
 FROM base AS base-amd64
@@ -24,7 +24,7 @@ ARG SCCACHE_GHA_ENABLED=''
 # Should be set to 'false' or 'true'. See https://doc.rust-lang.org/cargo/reference/environment-variables.html
 ARG CARGO_PROFILE_RELEASE_DEBUG=false
 RUN just arch=$TARGETARCH libc=musl chef-cook --release --bin restate-operator
-COPY . .
+COPY .. .
 RUN just arch=$TARGETARCH libc=musl build --release --bin restate-operator && mv target/$(just arch=$TARGETARCH libc=musl print-target)/release/restate-operator target/restate-operator
 
 FROM gcr.io/distroless/static:nonroot
