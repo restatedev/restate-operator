@@ -1,0 +1,29 @@
+name: Create new release
+
+on:
+  push:
+    tags:
+      - v**
+
+jobs:
+  build-docker-image:
+    name: Build release Docker image
+    uses: ./.github/workflows/docker.yml
+    secrets: inherit
+
+  publish-release:
+    name: Publish release
+    runs-on: ubuntu-latest
+    needs: [build-docker-image]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Create release
+        uses: softprops/action-gh-release@v1
+        with:
+          # create a draft release which needs manual approval
+          draft: true
+          files: |
+            crd/crd.yaml
+            deploy/operator.pkl
