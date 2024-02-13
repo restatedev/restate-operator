@@ -2,7 +2,7 @@
 
 ## Installing
 ```bash
-helm install restate-operator ghcr.io/restatedev/restate-operator-helm --namespace restate-operator --create-namespace
+helm install restate-operator oci://ghcr.io/restatedev/restate-operator-helm --namespace restate-operator --create-namespace
 ```
 
 ## Releasing

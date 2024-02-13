@@ -1,5 +1,5 @@
 replicaCount: 1
-nameOverride: ""
+nameOverride: "restate-operator"
 version: "" # pin a specific version
 
 image:
