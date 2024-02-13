@@ -48,4 +48,3 @@ jobs:
           draft: true
           files: |
             crd/crd.yaml
-            deploy/operator.pkl
