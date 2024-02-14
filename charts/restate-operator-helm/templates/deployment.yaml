@@ -42,6 +42,10 @@ spec:
           env:
             - name: RUST_LOG
               value: {{ .Values.logging.env_filter }}
+          {{- if .Values.awsPodIdentityAssociationCluster }}
+            - name: AWS_POD_IDENTITY_ASSOCIATION_CLUSTER
+              value: {{ .Values.awsPodIdentityAssociationCluster }}
+          {{- end }}
           {{- with .Values.env }}
           {{- toYaml . | nindent 8 }}
           {{- end }}

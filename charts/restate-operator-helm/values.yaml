@@ -13,6 +13,8 @@ serviceAccount:
   annotations: {}
 podAnnotations: {}
 
+awsPodIdentityAssociationCluster: null
+
 podSecurityContext:
   fsGroup: 2000
   fsGroupChangePolicy: "OnRootMismatch"
