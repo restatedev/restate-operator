@@ -158,6 +158,10 @@ spec:
                 description: Security configuration
                 nullable: true
                 properties:
+                  awsPodIdentityAssociationRoleArn:
+                    description: if set, create a AWS PodIdentityAssociation using the ACK CRD in order to give the Restate pod access to this role
+                    nullable: true
+                    type: string
                   networkPeers:
                     description: Network peers to allow access to restate ports If unset, will not allow any new traffic. Set any of these to [] to allow all traffic - not recommended.
                     nullable: true

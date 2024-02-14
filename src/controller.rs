@@ -121,7 +121,7 @@ fn env_schema(g: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schem
 #[serde(rename_all = "camelCase")]
 pub struct RestateClusterSecurity {
     pub service_account_annotations: Option<BTreeMap<String, String>>,
-    // if set, create a AWS PodIdentityAssociation using the ACK CRD in order to give the Restate pod access to this role
+    /// if set, create a AWS PodIdentityAssociation using the ACK CRD in order to give the Restate pod access to this role
     pub aws_pod_identity_association_role_arn: Option<String>,
     pub network_peers: Option<RestateClusterNetworkPeers>,
 }

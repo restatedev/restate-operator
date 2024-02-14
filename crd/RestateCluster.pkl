@@ -62,6 +62,10 @@ class Compute {
 
 /// Security configuration
 class Security {
+  /// if set, create a AWS PodIdentityAssociation using the ACK CRD in order to give the Restate pod
+  /// access to this role
+  awsPodIdentityAssociationRoleArn: String?
+
   /// Network peers to allow access to restate ports If unset, will not allow any new traffic. Set any of
   /// these to [] to allow all traffic - not recommended.
   networkPeers: NetworkPeers?
