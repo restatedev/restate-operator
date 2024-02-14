@@ -62,6 +62,19 @@ rules:
       - delete
     apiGroups:
       - apps
+  {{- if .Values.awsPodIdentityAssociationCluster }}
+  - resources:
+      - podidentityassociations
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - patch
+      - delete
+    apiGroups:
+      - eks.services.k8s.aws
+  {{- end }}
 ---
 # Binding the role to the account
 kind: ClusterRoleBinding
