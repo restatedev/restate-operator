@@ -16,8 +16,9 @@ use kube::{
     api::{Patch, PatchParams},
     Api, ResourceExt,
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
+use crate::podidentityassociations::{PodIdentityAssociation, PodIdentityAssociationSpec};
 use crate::reconcilers::{label_selector, object_meta, resource_labels};
 use crate::{Context, Error, RestateClusterCompute, RestateClusterSpec, RestateClusterStorage};
 
@@ -38,6 +39,28 @@ fn restate_service_account(
     ServiceAccount {
         metadata,
         ..Default::default()
+    }
+}
+
+fn restate_pod_identity_association(
+    ns: &str,
+    oref: &OwnerReference,
+    pod_identity_association_cluster: &str,
+    pod_identity_association_role_arn: &str,
+) -> PodIdentityAssociation {
+    PodIdentityAssociation {
+        metadata: object_meta(oref, "restate"),
+        spec: PodIdentityAssociationSpec {
+            cluster_name: Some(pod_identity_association_cluster.into()),
+            namespace: ns.into(),
+            service_account: "restate".into(),
+            role_arn: Some(pod_identity_association_role_arn.into()),
+            client_request_token: None,
+            cluster_ref: None,
+            role_ref: None,
+            tags: None,
+        },
+        status: None,
     }
 }
 
@@ -225,6 +248,7 @@ pub async fn reconcile_compute(
     let pvc_api: Api<PersistentVolumeClaim> = Api::namespaced(ctx.client.clone(), namespace);
     let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), namespace);
     let svcacc_api: Api<ServiceAccount> = Api::namespaced(ctx.client.clone(), namespace);
+    let pia_api: Api<PodIdentityAssociation> = Api::namespaced(ctx.client.clone(), namespace);
 
     apply_service_account(
         namespace,
@@ -237,6 +261,32 @@ pub async fn reconcile_compute(
         ),
     )
     .await?;
+
+    match (
+        ctx.aws_pod_identity_association_cluster.as_ref(),
+        spec.security
+            .as_ref()
+            .and_then(|s| s.aws_pod_identity_association_role_arn.as_ref()),
+    ) {
+        (Some(pod_identity_association_cluster), Some(aws_pod_identity_association_role_arn)) => {
+            apply_pod_identity_association(
+                namespace,
+                &pia_api,
+                restate_pod_identity_association(
+                    namespace,
+                    oref,
+                    pod_identity_association_cluster,
+                    aws_pod_identity_association_role_arn,
+                ),
+            )
+            .await?
+        }
+        (Some(_), None) => delete_pod_identity_association(namespace, &pia_api, "restate").await?,
+        (None, Some(aws_pod_identity_association_role_arn)) => {
+            warn!("Ignoring AWS pod identity association role ARN {aws_pod_identity_association_role_arn} as the operator is not configured with --aws-pod-identity-association-cluster")
+        }
+        (None, None) => {}
+    }
 
     apply_service(namespace, &svc_api, restate_service(oref)).await?;
 
@@ -286,6 +336,37 @@ async fn apply_service_account(
     Ok(())
 }
 
+async fn apply_pod_identity_association(
+    namespace: &str,
+    pia_api: &Api<PodIdentityAssociation>,
+    pia: PodIdentityAssociation,
+) -> Result<(), Error> {
+    let name = pia.metadata.name.as_ref().unwrap();
+    let params: PatchParams = PatchParams::apply("restate-operator").force();
+    debug!(
+        "Applying PodIdentityAssociation {} in namespace {}",
+        name, namespace
+    );
+    pia_api.patch(name, &params, &Patch::Apply(&pia)).await?;
+    Ok(())
+}
+
+async fn delete_pod_identity_association(
+    namespace: &str,
+    pia_api: &Api<PodIdentityAssociation>,
+    name: &str,
+) -> Result<(), Error> {
+    debug!(
+        "Ensuring PodIdentityAssociation {} in namespace {} does not exist",
+        name, namespace
+    );
+    match pia_api.delete(name, &DeleteParams::default()).await {
+        Err(kube::Error::Api(kube::error::ErrorResponse { code: 404, .. })) => Ok(()),
+        Err(err) => Err(err.into()),
+        Ok(_) => Ok(()),
+    }
+}
+
 async fn resize_statefulset_storage(
     namespace: &str,
     oref: &OwnerReference,
@@ -313,7 +394,7 @@ async fn resize_statefulset_storage(
     for pvc in pvcs {
         let name = pvc.name_any();
         debug!(
-            "Applying PersistentVolumeCLaim {} in namespace {}",
+            "Applying PersistentVolumeClaim {} in namespace {}",
             name, namespace
         );
 

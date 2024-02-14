@@ -28,6 +28,7 @@ use serde_json::json;
 use tokio::{sync::RwLock, time::Duration};
 use tracing::*;
 
+use crate::podidentityassociations::PodIdentityAssociation;
 use crate::reconcilers::compute::reconcile_compute;
 use crate::reconcilers::network_policies::reconcile_network_policies;
 use crate::reconcilers::object_meta;
@@ -120,6 +121,8 @@ fn env_schema(g: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schem
 #[serde(rename_all = "camelCase")]
 pub struct RestateClusterSecurity {
     pub service_account_annotations: Option<BTreeMap<String, String>>,
+    // if set, create a AWS PodIdentityAssociation using the ACK CRD in order to give the Restate pod access to this role
+    pub aws_pod_identity_association_role_arn: Option<String>,
     pub network_peers: Option<RestateClusterNetworkPeers>,
 }
 
@@ -158,6 +161,8 @@ pub struct Context {
     pub pvc_meta_store: Store<PartialObjectMeta<PersistentVolumeClaim>>,
     // Store for statefulsets
     pub ss_store: Store<StatefulSet>,
+    // If set, watch PodIdentityAssociation resources, and if requested create them against this cluster
+    pub aws_pod_identity_association_cluster: Option<String>,
     /// Diagnostics read by the web server
     pub diagnostics: Arc<RwLock<Diagnostics>>,
     /// Prometheus metrics
@@ -329,6 +334,8 @@ pub struct State {
     diagnostics: Arc<RwLock<Diagnostics>>,
     /// Metrics registry
     registry: prometheus::Registry,
+    /// If set, watch AWS PodIdentityAssociation resources, and if requested create them against this cluster
+    aws_pod_identity_association_cluster: Option<String>,
 }
 
 /// State wrapper around the controller outputs for the web server
@@ -343,6 +350,16 @@ impl State {
         self.diagnostics.read().await.clone()
     }
 
+    pub fn with_aws_pod_identity_association_cluster(
+        self,
+        aws_pod_identity_association_cluster: Option<String>,
+    ) -> Self {
+        Self {
+            aws_pod_identity_association_cluster,
+            ..self
+        }
+    }
+
     // Create a Controller Context that can update State
     pub fn to_context(
         &self,
@@ -354,6 +371,7 @@ impl State {
             client,
             pvc_meta_store,
             ss_store,
+            aws_pod_identity_association_cluster: self.aws_pod_identity_association_cluster.clone(),
             metrics: Metrics::default().register(&self.registry).unwrap(),
             diagnostics: self.diagnostics.clone(),
         })
@@ -372,8 +390,17 @@ pub async fn run(state: State) {
     let svc_api = Api::<Service>::all(client.clone());
     let svcacc_api = Api::<ServiceAccount>::all(client.clone());
     let np_api = Api::<NetworkPolicy>::all(client.clone());
+    let pia_api = Api::<PodIdentityAssociation>::all(client.clone());
+
+    if state.aws_pod_identity_association_cluster.is_some() {
+        if let Err(e) = pia_api.list(&ListParams::default().limit(1)).await {
+            error!("PodIdentityAssociation is not queryable; {e:?}. Is the CRD installed?");
+            std::process::exit(1);
+        }
+    }
+
     if let Err(e) = rc_api.list(&ListParams::default().limit(1)).await {
-        error!("CRD is not queryable; {e:?}. Is the CRD installed?");
+        error!("RestateCluster is not queryable; {e:?}. Is the CRD installed?");
         std::process::exit(1);
     }
 
@@ -392,7 +419,7 @@ pub async fn run(state: State) {
         .touched_objects()
         .default_backoff();
 
-    Controller::new(rc_api, rc_cfg.clone())
+    let controller = Controller::new(rc_api, rc_cfg.clone())
         .shutdown_on_signal()
         .owns(ns_api, cfg.clone())
         .owns(svc_api, cfg.clone())
@@ -412,7 +439,13 @@ pub async fn run(state: State) {
 
                 Some(ObjectRef::new(instance))
             },
-        )
+        );
+    let controller = if state.aws_pod_identity_association_cluster.is_some() {
+        controller.owns(pia_api, cfg.clone())
+    } else {
+        controller
+    };
+    controller
         .run(
             reconcile,
             error_policy,

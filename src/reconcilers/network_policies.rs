@@ -144,7 +144,7 @@ pub async fn reconcile_network_policies(
             "ingress",
             8080,
             oref,
-            network_peers.and_then(|peers| peers.ingress.as_ref().map(Vec::as_slice)),
+            network_peers.and_then(|peers| peers.ingress.as_deref()),
         ),
     )
     .await?;
@@ -156,7 +156,7 @@ pub async fn reconcile_network_policies(
             "admin",
             9070,
             oref,
-            network_peers.and_then(|peers| peers.admin.as_ref().map(Vec::as_slice)),
+            network_peers.and_then(|peers| peers.admin.as_deref()),
         ),
     )
     .await?;
@@ -168,7 +168,7 @@ pub async fn reconcile_network_policies(
             "metrics",
             5122,
             oref,
-            network_peers.and_then(|peers| peers.metrics.as_ref().map(Vec::as_slice)),
+            network_peers.and_then(|peers| peers.metrics.as_deref()),
         ),
     )
     .await?;

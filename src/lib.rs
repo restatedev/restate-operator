@@ -37,3 +37,6 @@ pub use metrics::Metrics;
 
 /// Reconcilers
 mod reconcilers;
+
+/// External CRDs
+mod podidentityassociations;

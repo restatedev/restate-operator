@@ -51,6 +51,7 @@ opentelemetry-otlp = { version = "0.13.0", features = ["tokio"], optional = true
 tonic = { version = "0.9", optional = true }
 thiserror = "1.0.47"
 anyhow = "1.0.75"
+clap = { version = "4.1", features = ["derive", "env"] }
 
 [dev-dependencies]
 assert-json-diff = "2.0.2"
