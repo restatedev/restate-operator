@@ -256,6 +256,10 @@ impl RestateCluster {
                 .security
                 .as_ref()
                 .and_then(|s| s.network_peers.as_ref()),
+            self.spec
+                .security
+                .as_ref()
+                .map_or(false, |s| s.aws_pod_identity_association_role_arn.is_some()),
         )
         .await?;
 

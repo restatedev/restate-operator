@@ -131,6 +131,7 @@ fn restate_statefulset(
     oref: &OwnerReference,
     compute: &RestateClusterCompute,
     storage: &RestateClusterStorage,
+    pod_annotations: Option<BTreeMap<String, String>>,
 ) -> StatefulSet {
     StatefulSet {
         metadata: object_meta(oref, RESTATE_STATEFULSET_NAME),
@@ -141,6 +142,7 @@ fn restate_statefulset(
             template: PodTemplateSpec {
                 metadata: Some(ObjectMeta {
                     labels: Some(resource_labels(&oref.name)),
+                    annotations: pod_annotations,
                     ..Default::default()
                 }),
                 spec: Some(PodSpec {
@@ -262,31 +264,49 @@ pub async fn reconcile_compute(
     )
     .await?;
 
-    match (
+    // Pods MUST roll when these change, so we will apply these parameters as annotations to the pod meta
+    let pod_annotations: Option<BTreeMap<String, String>> = match (
         ctx.aws_pod_identity_association_cluster.as_ref(),
         spec.security
             .as_ref()
             .and_then(|s| s.aws_pod_identity_association_role_arn.as_ref()),
     ) {
-        (Some(pod_identity_association_cluster), Some(aws_pod_identity_association_role_arn)) => {
+        (
+            Some(aws_pod_identity_association_cluster),
+            Some(aws_pod_identity_association_role_arn),
+        ) => {
             apply_pod_identity_association(
                 namespace,
                 &pia_api,
                 restate_pod_identity_association(
                     namespace,
                     oref,
-                    pod_identity_association_cluster,
+                    aws_pod_identity_association_cluster,
                     aws_pod_identity_association_role_arn,
                 ),
             )
-            .await?
+            .await?;
+            Some(BTreeMap::from([
+                (
+                    "restate.dev/aws-pod-identity-association-cluster".into(),
+                    aws_pod_identity_association_cluster.clone(),
+                ),
+                (
+                    "restate.dev/aws-pod-identity-association-role-arn".into(),
+                    aws_pod_identity_association_role_arn.clone(),
+                ),
+            ]))
         }
-        (Some(_), None) => delete_pod_identity_association(namespace, &pia_api, "restate").await?,
+        (Some(_), None) => {
+            delete_pod_identity_association(namespace, &pia_api, "restate").await?;
+            None
+        }
         (None, Some(aws_pod_identity_association_role_arn)) => {
-            warn!("Ignoring AWS pod identity association role ARN {aws_pod_identity_association_role_arn} as the operator is not configured with --aws-pod-identity-association-cluster")
+            warn!("Ignoring AWS pod identity association role ARN {aws_pod_identity_association_role_arn} as the operator is not configured with --aws-pod-identity-association-cluster");
+            None
         }
-        (None, None) => {}
-    }
+        (None, None) => None,
+    };
 
     apply_service(namespace, &svc_api, restate_service(oref)).await?;
 
@@ -304,7 +324,7 @@ pub async fn reconcile_compute(
     apply_stateful_set(
         namespace,
         &ss_api,
-        restate_statefulset(oref, &spec.compute, &spec.storage),
+        restate_statefulset(oref, &spec.compute, &spec.storage, pod_annotations),
     )
     .await?;
 

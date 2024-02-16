@@ -8,6 +8,7 @@ use k8s_openapi::api::networking::v1::{
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, OwnerReference};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
+use kube::api::DeleteParams;
 use kube::{
     api::{Patch, PatchParams},
     Api, Client,
@@ -99,6 +100,34 @@ fn allow_public(oref: &OwnerReference) -> NetworkPolicy {
     }
 }
 
+const AWS_POD_IDENTITY_POLICY_NAME: &str = "allow-restate-egress-to-aws-pod-identity";
+
+fn allow_aws_pod_identity(oref: &OwnerReference) -> NetworkPolicy {
+    // https://docs.aws.amazon.com/eks/latest/userguide/pod-id-how-it-works.html
+    NetworkPolicy {
+        metadata: object_meta(oref, AWS_POD_IDENTITY_POLICY_NAME),
+        spec: Some(NetworkPolicySpec {
+            pod_selector: label_selector(&oref.name),
+            policy_types: Some(vec!["Egress".into()]),
+            egress: Some(vec![NetworkPolicyEgressRule {
+                to: Some(vec![NetworkPolicyPeer {
+                    ip_block: Some(IPBlock {
+                        cidr: "169.254.170.23/32".into(),
+                        except: None,
+                    }),
+                    ..Default::default()
+                }]),
+                ports: Some(vec![NetworkPolicyPort {
+                    port: Some(IntOrString::Int(80)),
+                    protocol: Some("TCP".into()),
+                    end_port: None,
+                }]), // all ports
+            }]),
+            ..Default::default()
+        }),
+    }
+}
+
 fn allow_access(
     port_name: &str,
     port: i32,
@@ -130,12 +159,19 @@ pub async fn reconcile_network_policies(
     namespace: &str,
     oref: &OwnerReference,
     network_peers: Option<&RestateClusterNetworkPeers>,
+    aws_pod_identity_enabled: bool,
 ) -> Result<(), Error> {
     let np_api: Api<NetworkPolicy> = Api::namespaced(client, namespace);
 
     apply_network_policy(namespace, &np_api, deny_all(oref)).await?;
     apply_network_policy(namespace, &np_api, allow_dns(oref)).await?;
     apply_network_policy(namespace, &np_api, allow_public(oref)).await?;
+
+    if aws_pod_identity_enabled {
+        apply_network_policy(namespace, &np_api, allow_aws_pod_identity(oref)).await?
+    } else {
+        delete_network_policy(namespace, &np_api, AWS_POD_IDENTITY_POLICY_NAME).await?
+    }
 
     apply_network_policy(
         namespace,
@@ -189,4 +225,20 @@ async fn apply_network_policy(
     );
     np_api.patch(name, &params, &Patch::Apply(&np)).await?;
     Ok(())
+}
+
+async fn delete_network_policy(
+    namespace: &str,
+    np_api: &Api<NetworkPolicy>,
+    name: &str,
+) -> Result<(), Error> {
+    debug!(
+        "Ensuring NetworkPolicy {} in namespace {} does not exist",
+        name, namespace
+    );
+    match np_api.delete(name, &DeleteParams::default()).await {
+        Err(kube::Error::Api(kube::error::ErrorResponse { code: 404, .. })) => Ok(()),
+        Err(err) => Err(err.into()),
+        Ok(_) => Ok(()),
+    }
 }
