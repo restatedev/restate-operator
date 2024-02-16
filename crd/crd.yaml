@@ -436,6 +436,11 @@ spec:
                       type: string
                     nullable: true
                     type: object
+                  serviceAnnotations:
+                    additionalProperties:
+                      type: string
+                    nullable: true
+                    type: object
                 type: object
               storage:
                 description: Storage configuration

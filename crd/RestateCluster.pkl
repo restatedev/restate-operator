@@ -71,6 +71,8 @@ class Security {
   networkPeers: NetworkPeers?
 
   serviceAccountAnnotations: Mapping<String, String>?
+
+  serviceAnnotations: Mapping<String, String>?
 }
 
 /// Network peers to allow access to restate ports If unset, will not allow any new traffic. Set any of

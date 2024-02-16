@@ -64,7 +64,20 @@ fn restate_pod_identity_association(
     }
 }
 
-fn restate_service(oref: &OwnerReference) -> Service {
+fn restate_service(
+    oref: &OwnerReference,
+    annotations: Option<&BTreeMap<String, String>>,
+) -> Service {
+    let mut metadata = object_meta(oref, "restate");
+    if let Some(annotations) = annotations {
+        match &mut metadata.annotations {
+            Some(existing_annotations) => {
+                existing_annotations.extend(annotations.iter().map(|(k, v)| (k.clone(), v.clone())))
+            }
+            None => metadata.annotations = Some(annotations.clone()),
+        }
+    }
+
     Service {
         metadata: object_meta(oref, "restate"),
         spec: Some(ServiceSpec {
@@ -308,7 +321,17 @@ pub async fn reconcile_compute(
         (None, None) => None,
     };
 
-    apply_service(namespace, &svc_api, restate_service(oref)).await?;
+    apply_service(
+        namespace,
+        &svc_api,
+        restate_service(
+            oref,
+            spec.security
+                .as_ref()
+                .and_then(|s| s.service_annotations.as_ref()),
+        ),
+    )
+    .await?;
 
     resize_statefulset_storage(
         namespace,
