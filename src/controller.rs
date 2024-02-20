@@ -7,7 +7,7 @@ use k8s_openapi::api::apps::v1::StatefulSet;
 use k8s_openapi::api::core::v1::{
     EnvVar, Namespace, PersistentVolumeClaim, ResourceRequirements, Service, ServiceAccount,
 };
-use k8s_openapi::api::networking::v1::{NetworkPolicy, NetworkPolicyPeer};
+use k8s_openapi::api::networking::v1::{NetworkPolicy, NetworkPolicyEgressRule, NetworkPolicyPeer};
 use kube::core::PartialObjectMeta;
 use kube::runtime::reflector::{ObjectRef, Store};
 use kube::runtime::{metadata_watcher, reflector, watcher, WatchStreamExt};
@@ -122,13 +122,18 @@ fn env_schema(g: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schem
 pub struct RestateClusterSecurity {
     pub service_annotations: Option<BTreeMap<String, String>>,
     pub service_account_annotations: Option<BTreeMap<String, String>>,
-    /// if set, create a AWS PodIdentityAssociation using the ACK CRD in order to give the Restate pod access to this role
+    /// if set, create a AWS PodIdentityAssociation using the ACK CRD in order to give the Restate pod access to this role and
+    /// allow the cluster to reach the Pod Identity agent.
     pub aws_pod_identity_association_role_arn: Option<String>,
+    /// Network peers to allow inbound access to restate ports
+    /// If unset, will not allow any new traffic. Set any of these to [] to allow all traffic - not recommended.
     pub network_peers: Option<RestateClusterNetworkPeers>,
+    /// Egress rules to allow the cluster to make outbound requests; this is in addition to the default
+    /// of allowing public internet access and cluster DNS access. Providing a single empty rule will allow
+    /// all outbound traffic - not recommended
+    pub network_egress_rules: Option<Vec<NetworkPolicyEgressRule>>,
 }
 
-/// Network peers to allow access to restate ports
-/// If unset, will not allow any new traffic. Set any of these to [] to allow all traffic - not recommended.
 #[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
 pub struct RestateClusterNetworkPeers {
     #[schemars(default, schema_with = "network_peers_schema")]
@@ -257,6 +262,10 @@ impl RestateCluster {
                 .security
                 .as_ref()
                 .and_then(|s| s.network_peers.as_ref()),
+            self.spec
+                .security
+                .as_ref()
+                .and_then(|s| s.network_egress_rules.as_ref().map(|v| v.as_slice())),
             self.spec
                 .security
                 .as_ref()

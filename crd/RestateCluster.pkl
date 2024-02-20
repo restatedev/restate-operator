@@ -63,11 +63,16 @@ class Compute {
 /// Security configuration
 class Security {
   /// if set, create a AWS PodIdentityAssociation using the ACK CRD in order to give the Restate pod
-  /// access to this role
+  /// access to this role and allow the cluster to reach the Pod Identity agent.
   awsPodIdentityAssociationRoleArn: String?
 
-  /// Network peers to allow access to restate ports If unset, will not allow any new traffic. Set any of
-  /// these to [] to allow all traffic - not recommended.
+  /// Egress rules to allow the cluster to make outbound requests; this is in addition to the default of
+  /// allowing public internet access and cluster DNS access. Providing a single empty rule will allow
+  /// all outbound traffic - not recommended
+  networkEgressRules: Listing<NetworkPolicy.NetworkPolicyEgressRule>?
+
+  /// Network peers to allow inbound access to restate ports If unset, will not allow any new traffic.
+  /// Set any of these to [] to allow all traffic - not recommended.
   networkPeers: NetworkPeers?
 
   serviceAccountAnnotations: Mapping<String, String>?
@@ -75,8 +80,8 @@ class Security {
   serviceAnnotations: Mapping<String, String>?
 }
 
-/// Network peers to allow access to restate ports If unset, will not allow any new traffic. Set any of
-/// these to [] to allow all traffic - not recommended.
+/// Network peers to allow inbound access to restate ports If unset, will not allow any new traffic. Set
+/// any of these to [] to allow all traffic - not recommended.
 class NetworkPeers {
   admin: Listing<NetworkPolicy.NetworkPolicyPeer>?
 

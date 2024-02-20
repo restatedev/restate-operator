@@ -45,6 +45,11 @@ local amendedSchema = (Parser.parse(schema) as JsonSchema) {
                 }
               }
             }
+            ["networkEgressRules"] {
+              items {
+                properties = new {}
+              }
+            }
           }
         }
       }
@@ -56,6 +61,7 @@ local amendedSchema = (Parser.parse(schema) as JsonSchema) {
 local envSchema = (amendedSchema.properties["spec"].properties["compute"].properties["env"].items!! as JsonSchema)
 local resourcesSchema = amendedSchema.properties["spec"].properties["compute"].properties["resources"]!! as JsonSchema
 local ingressPeersSchema = amendedSchema.properties["spec"].properties["security"].properties["networkPeers"].properties["ingress"].items!! as JsonSchema
+local networkEgressRules = amendedSchema.properties["spec"].properties["security"].properties["networkEgressRules"].items!! as JsonSchema
 
 
 local moduleGenerator = new ModuleGenerator {
@@ -77,6 +83,11 @@ local moduleGenerator = new ModuleGenerator {
     (Type) {
       moduleName = "NetworkPolicy"
       name = "NetworkPolicyPeer"
+    },
+    networkEgressRules,
+    (Type) {
+      moduleName = "NetworkPolicy"
+      name = "NetworkPolicyEgressRule"
     }
   )
   // import the native types

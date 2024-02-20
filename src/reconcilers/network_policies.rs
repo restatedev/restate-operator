@@ -110,13 +110,22 @@ fn allow_aws_pod_identity(oref: &OwnerReference) -> NetworkPolicy {
             pod_selector: label_selector(&oref.name),
             policy_types: Some(vec!["Egress".into()]),
             egress: Some(vec![NetworkPolicyEgressRule {
-                to: Some(vec![NetworkPolicyPeer {
-                    ip_block: Some(IPBlock {
-                        cidr: "169.254.170.23/32".into(),
-                        except: None,
-                    }),
-                    ..Default::default()
-                }]),
+                to: Some(vec![
+                    NetworkPolicyPeer {
+                        ip_block: Some(IPBlock {
+                            cidr: "169.254.170.23/32".into(),
+                            except: None,
+                        }),
+                        ..Default::default()
+                    },
+                    NetworkPolicyPeer {
+                        ip_block: Some(IPBlock {
+                            cidr: "fd00:ec2::23/128".into(),
+                            except: None,
+                        }),
+                        ..Default::default()
+                    },
+                ]),
                 ports: Some(vec![NetworkPolicyPort {
                     port: Some(IntOrString::Int(80)),
                     protocol: Some("TCP".into()),
@@ -154,11 +163,27 @@ fn allow_access(
     }
 }
 
+fn allow_egress(
+    oref: &OwnerReference,
+    egress: Option<&[NetworkPolicyEgressRule]>,
+) -> NetworkPolicy {
+    NetworkPolicy {
+        metadata: object_meta(oref, "allow-restate-egress"),
+        spec: Some(NetworkPolicySpec {
+            pod_selector: label_selector(&oref.name),
+            policy_types: Some(vec!["Egress".into()]),
+            egress: egress.map(|e| e.to_vec()), // if none, this policy will do nothing
+            ..Default::default()
+        }),
+    }
+}
+
 pub async fn reconcile_network_policies(
     client: Client,
     namespace: &str,
     oref: &OwnerReference,
     network_peers: Option<&RestateClusterNetworkPeers>,
+    network_egress_rules: Option<&[NetworkPolicyEgressRule]>,
     aws_pod_identity_enabled: bool,
 ) -> Result<(), Error> {
     let np_api: Api<NetworkPolicy> = Api::namespaced(client, namespace);
@@ -172,6 +197,8 @@ pub async fn reconcile_network_policies(
     } else {
         delete_network_policy(namespace, &np_api, AWS_POD_IDENTITY_POLICY_NAME).await?
     }
+
+    apply_network_policy(namespace, &np_api, allow_egress(oref, network_egress_rules)).await?;
 
     apply_network_policy(
         namespace,
