@@ -17,8 +17,16 @@ spec:
     name: v1
     schema:
       openAPIV3Schema:
-        description: Auto-generated derived type for RestateClusterSpec via `CustomResource`
+        description: RestateCluster describes the configuration and status of a Restate cluster.
         properties:
+          metadata:
+            properties:
+              name:
+                maxLength: 63
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                type: string
+            type: object
           spec:
             description: Represents the configuration of a Restate Cluster
             properties:
@@ -584,6 +592,7 @@ spec:
             nullable: true
             type: object
         required:
+        - metadata
         - spec
         title: RestateCluster
         type: object

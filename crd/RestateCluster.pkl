@@ -1,10 +1,7 @@
-/// Auto-generated derived type for RestateClusterSpec via `CustomResource`
+/// RestateCluster describes the configuration and status of a Restate cluster.
 ///
-/// This module was generated from JSON Schema from <>.
-///
-/// WARN: The root schema describes open-ended properties, but this is not possible to describe at the
-/// module level.
-module RestateCluster
+/// This module was generated from the CustomResourceDefinition at <file:./crd/crd.yaml>.
+module dev.restate.v1.RestateCluster
 
 extends "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/K8sResource.pkl"
 
@@ -13,14 +10,14 @@ import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/EnvVar.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/ResourceRequirements.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/networking/v1/NetworkPolicy.pkl"
 
+fixed apiVersion: "restate.dev/v1"
+
+fixed kind: "RestateCluster"
+
 /// Standard object's metadata.
 ///
-/// More info: <https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata>
+/// More info: <https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata>.
 metadata: ObjectMeta?
-
-fixed apiVersion = "restate.dev/v1"
-
-fixed kind = "RestateCluster"
 
 /// Represents the configuration of a Restate Cluster
 spec: Spec

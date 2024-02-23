@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -22,6 +23,7 @@ use kube::{
     },
     CustomResource, Resource,
 };
+use schemars::schema::{Schema, SchemaObject};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -39,12 +41,74 @@ pub static RESTATE_CLUSTER_FINALIZER: &str = "clusters.restate.dev";
 /// Represents the configuration of a Restate Cluster
 #[derive(CustomResource, Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[cfg_attr(test, derive(Default))]
-#[kube(kind = "RestateCluster", group = "restate.dev", version = "v1")]
+#[kube(
+    kind = "RestateCluster",
+    group = "restate.dev",
+    version = "v1",
+    schema = "manual"
+)]
 #[kube(status = "RestateClusterStatus", shortname = "rsc")]
 pub struct RestateClusterSpec {
     pub storage: RestateClusterStorage,
     pub compute: RestateClusterCompute,
     pub security: Option<RestateClusterSecurity>,
+}
+
+// Hoisted from the derived implementation so that we can restrict names to be valid namespace names
+impl schemars::JsonSchema for RestateCluster {
+    fn schema_name() -> String {
+        "RestateCluster".to_owned()
+    }
+    fn schema_id() -> Cow<'static, str> {
+        "restate_operator::controller::RestateCluster".into()
+    }
+    fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> Schema {
+        {
+            let mut schema_object = SchemaObject {
+                instance_type: Some(
+                    schemars::schema::InstanceType::Object.into(),
+                ),
+                metadata: Some(Box::new(schemars::schema::Metadata {
+                    description: Some(
+                        "RestateCluster describes the configuration and status of a Restate cluster."
+                            .to_owned(),
+                    ),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            };
+            let object_validation = schema_object.object();
+
+            object_validation
+                .properties
+                .insert(
+                    "metadata".to_owned(),
+                    serde_json::from_value(json!({
+                                "type": "object",
+                                "properties": {
+                                    "name": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "maxLength": 63,
+                                        "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+                                    }
+                                }
+                            })).unwrap(),
+                );
+            object_validation.required.insert("metadata".to_owned());
+
+            object_validation
+                .properties
+                .insert("spec".to_owned(), gen.subschema_for::<RestateClusterSpec>());
+            object_validation.required.insert("spec".to_owned());
+
+            object_validation.properties.insert(
+                "status".to_owned(),
+                gen.subschema_for::<Option<RestateClusterStatus>>(),
+            );
+            Schema::Object(schema_object)
+        }
+    }
 }
 
 /// Storage configuration

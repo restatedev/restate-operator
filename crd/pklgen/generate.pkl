@@ -1,168 +1,18 @@
-import "package://pkg.pkl-lang.org/pkl-pantry/org.json_schema.contrib@1.0.0#/internal/ModuleGenerator.pkl"
-import "package://pkg.pkl-lang.org/pkl-pantry/org.json_schema.contrib@1.0.0#/internal/Type.pkl"
-import "package://pkg.pkl-lang.org/pkl-pantry/org.json_schema@1.0.0#/JsonSchema.pkl"
-import "package://pkg.pkl-lang.org/pkl-pantry/org.json_schema@1.0.0#/Parser.pkl"
-import "package://pkg.pkl-lang.org/pkl-pantry/pkl.experimental.syntax@1.0.0#/ExpressionNode.pkl"
-import "package://pkg.pkl-lang.org/pkl-pantry/pkl.experimental.syntax@1.0.0#/TypeNode.pkl"
+amends "package://pkg.pkl-lang.org/pkl-pantry/k8s.contrib.crd@1.0.0#/generate.pkl"
 
-local schema = read("/dev/stdin")
+import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/ResourceRequirements.pkl"
+import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/networking/v1/NetworkPolicy.pkl"
+import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/EnvVar.pkl"
 
-// clear out all the native k8s types so that their own properties are not made into Pkl types
-local amendedSchema = (Parser.parse(schema) as JsonSchema) {
-  properties {
-    ["spec"] {
-      properties {
-        ["compute"] {
-          properties {
-            ["env"] {
-              items {
-                properties = new {}
-              }
-            }
-            ["resources"] {
-              properties = new {}
-            }
-          }
-        }
-        ["security"] {
-          properties {
-            ["networkPeers"] {
-              properties {
-                ["ingress"] {
-                  items {
-                    properties = new {}
-                  }
-                }
-                ["admin"] {
-                  items {
-                    properties = new {}
-                  }
-                }
-                ["metrics"] {
-                  items {
-                    properties = new {}
-                  }
-                }
-              }
-            }
-            ["networkEgressRules"] {
-              items {
-                properties = new {}
-              }
-            }
-          }
-        }
-      }
-    }
+source = "file:./crd/crd.yaml"
+
+converters {
+  ["restateclusters.restate.dev"] {
+    [List("spec", "compute", "env", "env")] = EnvVar
+    [List("spec", "compute", "resources")] = ResourceRequirements
+    [List("spec", "security", "networkEgressRules", "networkEgressRule")] = NetworkPolicy.NetworkPolicyEgressRule
+    [List("spec", "security", "networkPeers", "admin", "admin")] = NetworkPolicy.NetworkPolicyPeer
+    [List("spec", "security", "networkPeers", "ingress", "ingres")] = NetworkPolicy.NetworkPolicyPeer
+    [List("spec", "security", "networkPeers", "metrics", "metric")] = NetworkPolicy.NetworkPolicyPeer
   }
 }
-
-// get the schemas for the native types
-local envSchema = (amendedSchema.properties["spec"].properties["compute"].properties["env"].items!! as JsonSchema)
-local resourcesSchema = amendedSchema.properties["spec"].properties["compute"].properties["resources"]!! as JsonSchema
-local ingressPeersSchema = amendedSchema.properties["spec"].properties["security"].properties["networkPeers"].properties["ingress"].items!! as JsonSchema
-local networkEgressRules = amendedSchema.properties["spec"].properties["security"].properties["networkEgressRules"].items!! as JsonSchema
-
-
-local moduleGenerator = new ModuleGenerator {
-  rootSchema = amendedSchema
-  moduleName = "RestateCluster"
-  // tell the generator to treat these native types as pre-existing
-  existingTypes = Map(
-    envSchema,
-    (Type) {
-      moduleName = "RestateCluster"
-      name = "EnvVar"
-    },
-    resourcesSchema,
-    (Type) {
-      moduleName = "RestateCluster"
-      name = "ResourceRequirements"
-    },
-    ingressPeersSchema,
-    (Type) {
-      moduleName = "NetworkPolicy"
-      name = "NetworkPolicyPeer"
-    },
-    networkEgressRules,
-    (Type) {
-      moduleName = "NetworkPolicy"
-      name = "NetworkPolicyEgressRule"
-    }
-  )
-  // import the native types
-  moduleNode {
-    imports = new {
-      new {
-        value = "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/apimachinery/pkg/apis/meta/v1/ObjectMeta.pkl"
-      }
-      new {
-        value = "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/EnvVar.pkl"
-      }
-      new {
-        value = "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/ResourceRequirements.pkl"
-      }
-      new {
-        value = "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/networking/v1/NetworkPolicy.pkl"
-      }
-    }
-  }
-}
-
-output {
-  files {
-    ["RestateCluster.pkl"] = (moduleGenerator.moduleNode) {
-      // filter out the (empty) generated classess for the native types
-      classes = moduleGenerator.moduleNode.classes.toList().filter((c) -> c.properties.length > 0).toListing()
-      declaration {
-        moduleHeader {
-          moduleExtendsOrAmendsClause {
-            type = "extends"
-            extendedModule = "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/K8sResource.pkl"
-          }
-        }
-      }
-      properties = new {
-        new {
-          docComment {
-            value = """
-              Standard object's metadata.
-
-              More info: <https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata>
-              """
-          }
-          name { value = "metadata" }
-          typeAnnotation {
-            type = new TypeNode.NullableTypeNode {
-              typeNode = new TypeNode.DeclaredTypeNode {
-                name {
-                  parts {
-                    new {
-                      value = "ObjectMeta"
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-        new {
-          modifiers { "fixed" }
-          name { value = "apiVersion" }
-          defaultValue = new ExpressionNode.LiteralValueExpressionNode {
-            value = "restate.dev/v1"
-          }
-        }
-        new {
-          modifiers { "fixed" }
-          name { value = "kind" }
-          defaultValue = new ExpressionNode.LiteralValueExpressionNode {
-            value = "RestateCluster"
-          }
-        }
-        ...moduleGenerator.moduleNode.properties!!
-      }
-    }.output
-  }
-}
-
