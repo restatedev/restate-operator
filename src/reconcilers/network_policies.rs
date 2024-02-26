@@ -165,14 +165,14 @@ fn allow_access(
 
 fn allow_egress(
     oref: &OwnerReference,
-    egress: Option<&[NetworkPolicyEgressRule]>,
+    egress: Option<&[crate::NetworkPolicyEgressRule]>,
 ) -> NetworkPolicy {
     NetworkPolicy {
         metadata: object_meta(oref, "allow-restate-egress"),
         spec: Some(NetworkPolicySpec {
             pod_selector: label_selector(&oref.name),
             policy_types: Some(vec!["Egress".into()]),
-            egress: egress.map(|e| e.to_vec()), // if none, this policy will do nothing
+            egress: egress.map(|e| e.iter().map(|r| r.clone().into()).collect()), // if none, this policy will do nothing
             ..Default::default()
         }),
     }
@@ -183,7 +183,7 @@ pub async fn reconcile_network_policies(
     namespace: &str,
     oref: &OwnerReference,
     network_peers: Option<&RestateClusterNetworkPeers>,
-    network_egress_rules: Option<&[NetworkPolicyEgressRule]>,
+    network_egress_rules: Option<&[crate::NetworkPolicyEgressRule]>,
     aws_pod_identity_enabled: bool,
 ) -> Result<(), Error> {
     let np_api: Api<NetworkPolicy> = Api::namespaced(client, namespace);

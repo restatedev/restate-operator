@@ -8,7 +8,8 @@ use k8s_openapi::api::apps::v1::StatefulSet;
 use k8s_openapi::api::core::v1::{
     EnvVar, Namespace, PersistentVolumeClaim, ResourceRequirements, Service, ServiceAccount,
 };
-use k8s_openapi::api::networking::v1::{NetworkPolicy, NetworkPolicyEgressRule, NetworkPolicyPeer};
+use k8s_openapi::api::networking::v1;
+use k8s_openapi::api::networking::v1::{NetworkPolicy, NetworkPolicyPeer, NetworkPolicyPort};
 use kube::core::PartialObjectMeta;
 use kube::runtime::reflector::{ObjectRef, Store};
 use kube::runtime::{metadata_watcher, reflector, watcher, WatchStreamExt};
@@ -138,7 +139,7 @@ fn immutable_storage_class_name(
     .unwrap()
 }
 
-fn expanding_volume_request(_: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+fn expanding_volume_request(_: &mut schemars::gen::SchemaGenerator) -> Schema {
     serde_json::from_value(json!({
         "format": "int64",
         "type": "integer",
@@ -169,7 +170,7 @@ pub struct RestateClusterCompute {
     pub resources: Option<ResourceRequirements>,
 }
 
-fn env_schema(g: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+fn env_schema(g: &mut schemars::gen::SchemaGenerator) -> Schema {
     serde_json::from_value(json!({
         "items": EnvVar::json_schema(g),
         "nullable": true,
@@ -208,7 +209,7 @@ pub struct RestateClusterNetworkPeers {
     pub metrics: Option<Vec<NetworkPolicyPeer>>,
 }
 
-fn network_peers_schema(g: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+fn network_peers_schema(g: &mut schemars::gen::SchemaGenerator) -> Schema {
     serde_json::from_value(json!({
         "items": NetworkPolicyPeer::json_schema(g),
         "nullable": true,
@@ -216,6 +217,56 @@ fn network_peers_schema(g: &mut schemars::gen::SchemaGenerator) -> schemars::sch
         "x-kubernetes-list-type": "atomic"
     }))
     .unwrap()
+}
+
+/// NetworkPolicyEgressRule describes a particular set of traffic that is allowed out of pods matched by a NetworkPolicySpec's podSelector. The traffic must match both ports and to. This type is beta-level in 1.8
+#[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
+pub struct NetworkPolicyEgressRule {
+    /// ports is a list of destination ports for outgoing traffic. Each item in this list is combined using a logical OR. If this field is empty or missing, this rule matches all ports (traffic not restricted by port). If this field is present and contains at least one item, then this rule allows traffic only if the traffic matches at least one port in the list.
+    #[schemars(default, schema_with = "network_ports_schema")]
+    pub ports: Option<Vec<NetworkPolicyPort>>,
+
+    /// to is a list of destinations for outgoing traffic of pods selected for this rule. Items in this list are combined using a logical OR operation. If this field is empty or missing, this rule matches all destinations (traffic not restricted by destination). If this field is present and contains at least one item, this rule allows traffic only if the traffic matches at least one item in the to list.
+    #[schemars(default, schema_with = "network_peers_schema")]
+    pub to: Option<Vec<NetworkPolicyPeer>>,
+}
+
+impl From<NetworkPolicyEgressRule> for v1::NetworkPolicyEgressRule {
+    fn from(value: NetworkPolicyEgressRule) -> Self {
+        Self {
+            ports: value.ports,
+            to: value.to,
+        }
+    }
+}
+
+fn network_ports_schema(_: &mut schemars::gen::SchemaGenerator) -> Schema {
+    serde_json::from_value(json!({
+          "items": {
+            "description": "NetworkPolicyPort describes a port to allow traffic on",
+            "properties": {
+              "endPort": {
+                "description": "endPort indicates that the range of ports from port to endPort if set, inclusive, should be allowed by the policy. This field cannot be defined if the port field is not defined or if the port field is defined as a named (string) port. The endPort must be equal or greater than port.",
+                "format": "int32",
+                "type": "integer"
+              },
+              "port": {
+                "x-kubernetes-int-or-string": true,
+                "anyOf": [{"type": "integer"}, {"type": "string"}],
+                "description": "port represents the port on the given protocol. This can either be a numerical or named port on a pod. If this field is not provided, this matches all port names and numbers. If present, only traffic on the specified protocol AND port will be matched."
+              },
+              "protocol": {
+                "description": "protocol represents the protocol (TCP, UDP, or SCTP) which traffic must match. If not specified, this field defaults to TCP.",
+                "type": "string"
+              }
+            },
+            "type": "object",
+          },
+          "nullable": true,
+          "type": "array",
+          "x-kubernetes-list-type": "atomic"
+        }))
+        .unwrap()
 }
 
 #[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
@@ -329,7 +380,7 @@ impl RestateCluster {
             self.spec
                 .security
                 .as_ref()
-                .and_then(|s| s.network_egress_rules.as_ref().map(|v| v.as_slice())),
+                .and_then(|s| s.network_egress_rules.as_deref()),
             self.spec
                 .security
                 .as_ref()
