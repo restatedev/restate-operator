@@ -78,21 +78,36 @@ fn allow_public(oref: &OwnerReference) -> NetworkPolicy {
             pod_selector: label_selector(&oref.name),
             policy_types: Some(vec!["Egress".into()]),
             egress: Some(vec![NetworkPolicyEgressRule {
-                to: Some(vec![NetworkPolicyPeer {
-                    ip_block: Some(IPBlock {
-                        // all ipv4
-                        cidr: "0.0.0.0/0".into(),
-                        except: Some(vec![
-                            // except the private IP ranges: https://en.wikipedia.org/wiki/Private_network
-                            "10.0.0.0/8".into(),
-                            "192.168.0.0/16".into(),
-                            "172.16.0.0/20".into(),
-                            // and the link-local IP ranges, as this is used by AWS instance metadata
-                            "169.254.0.0/16".into(),
-                        ]),
-                    }),
-                    ..Default::default()
-                }]),
+                to: Some(vec![
+                    // we split the ipv4 space into two because there is a known issue with AWS VPC CNI
+                    // that makes using 0.0.0.0/0 as `cidr` very dangerous.
+                    // https://github.com/aws/aws-network-policy-agent/pull/58
+                    NetworkPolicyPeer {
+                        ip_block: Some(IPBlock {
+                            // 0.0.0.0 to 127.255.255.255
+                            cidr: "0.0.0.0/1".into(),
+                            except: Some(vec![
+                                // private IP ranges: https://en.wikipedia.org/wiki/Private_network
+                                "10.0.0.0/8".into(),
+                            ]),
+                        }),
+                        ..Default::default()
+                    },
+                    NetworkPolicyPeer {
+                        ip_block: Some(IPBlock {
+                            // 	128.0.0.0 to 255.255.255.255
+                            cidr: "128.0.0.0/1".into(),
+                            except: Some(vec![
+                                // private IP ranges: https://en.wikipedia.org/wiki/Private_network
+                                "192.168.0.0/16".into(),
+                                "172.16.0.0/12".into(),
+                                // and the link-local IP ranges, as this is used by AWS instance metadata
+                                "169.254.0.0/16".into(),
+                            ]),
+                        }),
+                        ..Default::default()
+                    },
+                ]),
                 ports: None, // all ports
             }]),
             ..Default::default()
