@@ -1,3 +1,4 @@
+use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -17,7 +18,11 @@ pub enum Error {
     NameConflict,
 
     #[error("Cluster is not yet Ready: {message}")]
-    NotReady { message: String, reason: String },
+    NotReady {
+        message: String,
+        reason: String,
+        requeue_after: Option<Duration>,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
