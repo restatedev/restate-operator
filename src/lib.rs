@@ -17,10 +17,7 @@ pub enum Error {
     NameConflict,
 
     #[error("Cluster is not yet Ready: {message}")]
-    NotReady {
-        message: String,
-        reason: String,
-    },
+    NotReady { message: String, reason: String },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

@@ -43,10 +43,10 @@ pub static RESTATE_CLUSTER_FINALIZER: &str = "clusters.restate.dev";
 #[derive(CustomResource, Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[cfg_attr(test, derive(Default))]
 #[kube(
-kind = "RestateCluster",
-group = "restate.dev",
-version = "v1",
-schema = "manual"
+    kind = "RestateCluster",
+    group = "restate.dev",
+    version = "v1",
+    schema = "manual"
 )]
 #[kube(status = "RestateClusterStatus", shortname = "rsc")]
 pub struct RestateClusterSpec {
@@ -136,7 +136,7 @@ fn immutable_storage_class_name(
             "message": "storageClassName is immutable"
         }]
     }))
-        .unwrap()
+    .unwrap()
 }
 
 fn expanding_volume_request(_: &mut schemars::gen::SchemaGenerator) -> Schema {
@@ -150,7 +150,7 @@ fn expanding_volume_request(_: &mut schemars::gen::SchemaGenerator) -> Schema {
             }
         ]
     }))
-        .unwrap()
+    .unwrap()
 }
 
 /// Compute configuration
@@ -178,7 +178,7 @@ fn env_schema(g: &mut schemars::gen::SchemaGenerator) -> Schema {
         "x-kubernetes-list-map-keys": ["name"],
         "x-kubernetes-list-type": "map"
     }))
-        .unwrap()
+    .unwrap()
 }
 
 /// Security configuration
@@ -216,7 +216,7 @@ fn network_peers_schema(g: &mut schemars::gen::SchemaGenerator) -> Schema {
         "type": "array",
         "x-kubernetes-list-type": "atomic"
     }))
-        .unwrap()
+    .unwrap()
 }
 
 /// NetworkPolicyEgressRule describes a particular set of traffic that is allowed out of pods matched by a NetworkPolicySpec's podSelector. The traffic must match both ports and to. This type is beta-level in 1.8
@@ -335,7 +335,7 @@ async fn reconcile(rc: Arc<RestateCluster>, ctx: Arc<Context>) -> Result<Action>
             Finalizer::Cleanup(rc) => rc.cleanup(ctx.clone()).await,
         }
     })
-        .await
+    .await
     {
         Ok(action) => Ok(action),
         Err(err) => {
@@ -389,7 +389,7 @@ impl RestateCluster {
                 ..Default::default()
             },
         )
-            .await?;
+        .await?;
 
         reconcile_network_policies(
             ctx.client.clone(),
@@ -408,7 +408,7 @@ impl RestateCluster {
                 .as_ref()
                 .map_or(false, |s| s.aws_pod_identity_association_role_arn.is_some()),
         )
-            .await?;
+        .await?;
 
         reconcile_compute(&ctx, name, &oref, &self.spec).await?;
 
@@ -424,26 +424,43 @@ impl RestateCluster {
                 // If no events were received, check back every 5 minutes
                 let action = Action::requeue(Duration::from_secs(5 * 60));
 
-                (Ok(action), "Restate Cluster provisioned successfully".into(), "Provisioned".into(), "True".into())
+                (
+                    Ok(action),
+                    "Restate Cluster provisioned successfully".into(),
+                    "Provisioned".into(),
+                    "True".into(),
+                )
             }
             Err(Error::NotReady { message, reason }) => {
                 // 1 minute in the NotReady case
                 let action = Action::requeue(Duration::from_secs(60));
 
-
                 (Ok(action), message, reason, "False".into())
             }
             Err(err) => {
                 let message = err.to_string();
-                (Err(err), message, "FailedReconcile".into(), "Unknown".into())
+                (
+                    Err(err),
+                    message,
+                    "FailedReconcile".into(),
+                    "Unknown".into(),
+                )
             }
         };
 
-        let existing_ready = self.status.as_ref().and_then(|s| s.conditions.as_ref()).and_then(|c| c.iter().find(|cond| cond.r#type == "Ready"));
+        let existing_ready = self
+            .status
+            .as_ref()
+            .and_then(|s| s.conditions.as_ref())
+            .and_then(|c| c.iter().find(|cond| cond.r#type == "Ready"));
         let now = k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(Utc::now());
 
         let mut ready = RestateClusterCondition {
-            last_transition_time: Some(existing_ready.and_then(|r| r.last_transition_time.clone()).unwrap_or_else(|| now.clone())),
+            last_transition_time: Some(
+                existing_ready
+                    .and_then(|r| r.last_transition_time.clone())
+                    .unwrap_or_else(|| now.clone()),
+            ),
             message: Some(message),
             reason: Some(reason),
             status,
@@ -455,7 +472,6 @@ impl RestateCluster {
             ready.last_transition_time = Some(now)
         }
 
-
         // always overwrite status object with what we saw
         let new_status = Patch::Apply(json!({
             "apiVersion": "restate.dev/v1",
@@ -466,7 +482,6 @@ impl RestateCluster {
         }));
         let ps = PatchParams::apply("restate-operator").force();
         let _o = rcs.patch_status(&name, &ps, &new_status).await?;
-
 
         result
     }

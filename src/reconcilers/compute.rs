@@ -275,7 +275,7 @@ pub async fn reconcile_compute(
                 .and_then(|s| s.service_account_annotations.as_ref()),
         ),
     )
-        .await?;
+    .await?;
 
     // Pods MUST roll when these change, so we will apply these parameters as annotations to the pod meta
     let pod_annotations: Option<BTreeMap<String, String>> = match (
@@ -298,7 +298,7 @@ pub async fn reconcile_compute(
                     aws_pod_identity_association_role_arn,
                 ),
             )
-                .await?;
+            .await?;
 
             if !is_pod_identity_association_synced(pia) {
                 return Err(Error::NotReady { reason: "PodIdentityAssociationNotSynced".into(), message: "Waiting for the AWS ACK controller to provision the Pod Identity Association with IAM".into() });
@@ -336,7 +336,7 @@ pub async fn reconcile_compute(
                 .and_then(|s| s.service_annotations.as_ref()),
         ),
     )
-        .await?;
+    .await?;
 
     resize_statefulset_storage(
         namespace,
@@ -347,14 +347,14 @@ pub async fn reconcile_compute(
         &ctx.pvc_meta_store,
         &spec.storage,
     )
-        .await?;
+    .await?;
 
     let ss = apply_stateful_set(
         namespace,
         &ss_api,
         restate_statefulset(oref, &spec.compute, &spec.storage, pod_annotations),
     )
-        .await?;
+    .await?;
 
     let replicas = ss.status.map(|s| s.replicas).unwrap_or(0);
     let expected_replicas = spec.compute.replicas.unwrap_or(1);
@@ -404,12 +404,13 @@ async fn apply_pod_identity_association(
     Ok(pia_api.patch(name, &params, &Patch::Apply(&pia)).await?)
 }
 
-fn is_pod_identity_association_synced(
-    pia: PodIdentityAssociation,
-) -> bool {
+fn is_pod_identity_association_synced(pia: PodIdentityAssociation) -> bool {
     if let Some(status) = pia.status {
         if let Some(conditions) = status.conditions {
-            if let Some(synced) = conditions.iter().find(|cond| cond.r#type == "ACK.ResourceSynced") {
+            if let Some(synced) = conditions
+                .iter()
+                .find(|cond| cond.r#type == "ACK.ResourceSynced")
+            {
                 return synced.status == "True";
             }
         }
@@ -483,7 +484,13 @@ async fn resize_statefulset_storage(
             .await?;
 
         if pvc.status.and_then(|s| s.phase).as_deref() != Some("Bound") {
-            return Err(Error::NotReady { reason: "PersistentVolumeClaimNotBound".into(), message: format!("PersistentVolumeClaim {} is not yet bound to a volume", name) });
+            return Err(Error::NotReady {
+                reason: "PersistentVolumeClaimNotBound".into(),
+                message: format!(
+                    "PersistentVolumeClaim {} is not yet bound to a volume",
+                    name
+                ),
+            });
         }
     }
 
