@@ -46,7 +46,10 @@ pub static RESTATE_CLUSTER_FINALIZER: &str = "clusters.restate.dev";
     kind = "RestateCluster",
     group = "restate.dev",
     version = "v1",
-    schema = "manual"
+    schema = "manual",
+    printcolumn = r#"{"name":"Ready", "type":"string", "jsonPath":".status.conditions[?(@.type==\"Ready\")].status"}"#,
+    printcolumn = r#"{"name":"Status", "priority": 1, "type":"string", "jsonPath":".status.conditions[?(@.type==\"Ready\")].message"}"#,
+    printcolumn = r#"{"name":"Age", "description": "CreationTimestamp is a timestamp representing the server time when this object was created. It is not guaranteed to be set in happens-before order across separate operations. Clients may not set this value. It is represented in RFC3339 form and is in UTC", "type":"date", "jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[kube(status = "RestateClusterStatus", shortname = "rsc")]
 pub struct RestateClusterSpec {
@@ -279,6 +282,7 @@ pub struct RestateClusterStatus {
 }
 
 #[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct RestateClusterCondition {
     /// Last time the condition transitioned from one status to another.
     pub last_transition_time: Option<k8s_openapi::apimachinery::pkg::apis::meta::v1::Time>,

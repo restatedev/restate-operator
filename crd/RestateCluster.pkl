@@ -108,7 +108,7 @@ class Status {
 
 class Condition {
   /// Last time the condition transitioned from one status to another.
-  last_transition_time: String?
+  lastTransitionTime: String?
 
   /// Human-readable message indicating details about last transition.
   message: String?

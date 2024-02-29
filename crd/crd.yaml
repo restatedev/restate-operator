@@ -13,7 +13,18 @@ spec:
     singular: restatecluster
   scope: Cluster
   versions:
-  - additionalPrinterColumns: []
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].message
+      name: Status
+      priority: 1
+      type: string
+    - description: CreationTimestamp is a timestamp representing the server time when this object was created. It is not guaranteed to be set in happens-before order across separate operations. Clients may not set this value. It is represented in RFC3339 form and is in UTC
+      jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
     name: v1
     schema:
       openAPIV3Schema:
@@ -601,7 +612,7 @@ spec:
               conditions:
                 items:
                   properties:
-                    last_transition_time:
+                    lastTransitionTime:
                       description: Last time the condition transitioned from one status to another.
                       format: date-time
                       nullable: true
