@@ -595,7 +595,37 @@ spec:
             - storage
             type: object
           status:
+            description: 'Status of the RestateCluster. This is set and managed automatically. Read-only. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status'
             nullable: true
+            properties:
+              conditions:
+                items:
+                  properties:
+                    last_transition_time:
+                      description: Last time the condition transitioned from one status to another.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      description: Human-readable message indicating details about last transition.
+                      nullable: true
+                      type: string
+                    reason:
+                      description: Unique, one-word, CamelCase reason for the condition's last transition.
+                      nullable: true
+                      type: string
+                    status:
+                      description: Status is the status of the condition. Can be True, False, Unknown.
+                      type: string
+                    type:
+                      description: Type of the condition, known values are (`Ready`).
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
             type: object
         required:
         - metadata

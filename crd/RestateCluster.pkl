@@ -22,7 +22,9 @@ metadata: ObjectMeta?
 /// Represents the configuration of a Restate Cluster
 spec: Spec
 
-status: Dynamic?
+/// Status of the RestateCluster. This is set and managed automatically. Read-only. More info:
+/// https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
+status: Status?
 
 /// Represents the configuration of a Restate Cluster
 class Spec {
@@ -96,4 +98,27 @@ class Storage {
   /// storageRequestBytes is the amount of storage to request in volume claims. It is allowed to increase
   /// but not decrease.
   storageRequestBytes: Int(this >= 1.0)
+}
+
+/// Status of the RestateCluster. This is set and managed automatically. Read-only. More info:
+/// https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
+class Status {
+  conditions: Listing<Condition>?
+}
+
+class Condition {
+  /// Last time the condition transitioned from one status to another.
+  last_transition_time: String?
+
+  /// Human-readable message indicating details about last transition.
+  message: String?
+
+  /// Unique, one-word, CamelCase reason for the condition's last transition.
+  reason: String?
+
+  /// Status is the status of the condition. Can be True, False, Unknown.
+  status: String
+
+  /// Type of the condition, known values are (`Ready`).
+  type: String
 }

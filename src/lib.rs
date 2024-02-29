@@ -15,7 +15,14 @@ pub enum Error {
 
     #[error("A namespace cannot be created for this name as one already exists")]
     NameConflict,
+
+    #[error("Cluster is not yet Ready: {message}")]
+    NotReady {
+        message: String,
+        reason: String,
+    },
 }
+
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 impl Error {
@@ -26,6 +33,7 @@ impl Error {
 
 /// Expose all controller components used by main
 pub mod controller;
+
 pub use crate::controller::*;
 
 /// Log and trace integrations
@@ -33,6 +41,7 @@ pub mod telemetry;
 
 /// Metrics
 mod metrics;
+
 pub use metrics::Metrics;
 
 /// Reconcilers

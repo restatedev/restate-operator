@@ -275,7 +275,7 @@ pub async fn reconcile_compute(
                 .and_then(|s| s.service_account_annotations.as_ref()),
         ),
     )
-    .await?;
+        .await?;
 
     // Pods MUST roll when these change, so we will apply these parameters as annotations to the pod meta
     let pod_annotations: Option<BTreeMap<String, String>> = match (
@@ -288,7 +288,7 @@ pub async fn reconcile_compute(
             Some(aws_pod_identity_association_cluster),
             Some(aws_pod_identity_association_role_arn),
         ) => {
-            apply_pod_identity_association(
+            let pia = apply_pod_identity_association(
                 namespace,
                 &pia_api,
                 restate_pod_identity_association(
@@ -298,7 +298,12 @@ pub async fn reconcile_compute(
                     aws_pod_identity_association_role_arn,
                 ),
             )
-            .await?;
+                .await?;
+
+            if !is_pod_identity_association_synced(pia) {
+                return Err(Error::NotReady { reason: "PodIdentityAssociationNotSynced".into(), message: "Waiting for the AWS ACK controller to provision the Pod Identity Association with IAM".into() });
+            }
+
             Some(BTreeMap::from([
                 (
                     "restate.dev/aws-pod-identity-association-cluster".into(),
@@ -331,7 +336,7 @@ pub async fn reconcile_compute(
                 .and_then(|s| s.service_annotations.as_ref()),
         ),
     )
-    .await?;
+        .await?;
 
     resize_statefulset_storage(
         namespace,
@@ -342,14 +347,20 @@ pub async fn reconcile_compute(
         &ctx.pvc_meta_store,
         &spec.storage,
     )
-    .await?;
+        .await?;
 
-    apply_stateful_set(
+    let ss = apply_stateful_set(
         namespace,
         &ss_api,
         restate_statefulset(oref, &spec.compute, &spec.storage, pod_annotations),
     )
-    .await?;
+        .await?;
+
+    let replicas = ss.status.map(|s| s.replicas).unwrap_or(0);
+    let expected_replicas = spec.compute.replicas.unwrap_or(1);
+    if replicas != expected_replicas {
+        return Err(Error::NotReady { reason: "StatefulSetScaling".into(), message: format!("StatefulSet has {replicas} replicas instead of the expected {expected_replicas}; it may be scaling up or down", ) });
+    }
 
     Ok(())
 }
@@ -383,15 +394,27 @@ async fn apply_pod_identity_association(
     namespace: &str,
     pia_api: &Api<PodIdentityAssociation>,
     pia: PodIdentityAssociation,
-) -> Result<(), Error> {
+) -> Result<PodIdentityAssociation, Error> {
     let name = pia.metadata.name.as_ref().unwrap();
     let params: PatchParams = PatchParams::apply("restate-operator").force();
     debug!(
         "Applying PodIdentityAssociation {} in namespace {}",
         name, namespace
     );
-    pia_api.patch(name, &params, &Patch::Apply(&pia)).await?;
-    Ok(())
+    Ok(pia_api.patch(name, &params, &Patch::Apply(&pia)).await?)
+}
+
+fn is_pod_identity_association_synced(
+    pia: PodIdentityAssociation,
+) -> bool {
+    if let Some(status) = pia.status {
+        if let Some(conditions) = status.conditions {
+            if let Some(synced) = conditions.iter().find(|cond| cond.r#type == "ACK.ResourceSynced") {
+                return synced.status == "True";
+            }
+        }
+    }
+    false
 }
 
 async fn delete_pod_identity_association(
@@ -441,7 +464,7 @@ async fn resize_statefulset_storage(
             name, namespace
         );
 
-        pvc_api
+        let pvc = pvc_api
             .patch(
                 &name,
                 &params,
@@ -458,6 +481,10 @@ async fn resize_statefulset_storage(
                 }),
             )
             .await?;
+
+        if pvc.status.and_then(|s| s.phase).as_deref() != Some("Bound") {
+            return Err(Error::NotReady { reason: "PersistentVolumeClaimNotBound".into(), message: format!("PersistentVolumeClaim {} is not yet bound to a volume", name) });
+        }
     }
 
     let existing = match ss_store.get(&ObjectRef::new(RESTATE_STATEFULSET_NAME).within(namespace)) {
@@ -509,10 +536,9 @@ async fn apply_stateful_set(
     namespace: &str,
     ss_api: &Api<StatefulSet>,
     ss: StatefulSet,
-) -> Result<(), Error> {
+) -> Result<StatefulSet, Error> {
     let name = ss.metadata.name.as_ref().unwrap();
     let params: PatchParams = PatchParams::apply("restate-operator").force();
     debug!("Applying Stateful Set {} in namespace {}", name, namespace);
-    ss_api.patch(name, &params, &Patch::Apply(&ss)).await?;
-    Ok(())
+    Ok(ss_api.patch(name, &params, &Patch::Apply(&ss)).await?)
 }
