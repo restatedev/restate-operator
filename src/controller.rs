@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use k8s_openapi::api::apps::v1::StatefulSet;
 use k8s_openapi::api::core::v1::{
-    EnvVar, Namespace, PersistentVolumeClaim, ResourceRequirements, Service, ServiceAccount,
+    EnvVar, Namespace, PersistentVolumeClaim, Pod, ResourceRequirements, Service, ServiceAccount,
 };
 use k8s_openapi::api::networking::v1;
 use k8s_openapi::api::networking::v1::{NetworkPolicy, NetworkPolicyPeer, NetworkPolicyPort};
@@ -435,11 +435,22 @@ impl RestateCluster {
                     "True".into(),
                 )
             }
-            Err(Error::NotReady { message, reason }) => {
-                // 1 minute in the NotReady case
-                let action = Action::requeue(Duration::from_secs(60));
+            Err(Error::NotReady {
+                message,
+                reason,
+                requeue_after,
+            }) => {
+                // default 1 minute in the NotReady case
+                let requeue_after = requeue_after.unwrap_or(Duration::from_secs(60));
 
-                (Ok(action), message, reason, "False".into())
+                info!("RestateCluster is not yet ready: {message}");
+
+                (
+                    Ok(Action::requeue(requeue_after)),
+                    message,
+                    reason,
+                    "False".into(),
+                )
             }
             Err(err) => {
                 let message = err.to_string();
@@ -607,6 +618,7 @@ pub async fn run(state: State) {
     let svcacc_api = Api::<ServiceAccount>::all(client.clone());
     let np_api = Api::<NetworkPolicy>::all(client.clone());
     let pia_api = Api::<PodIdentityAssociation>::all(client.clone());
+    let pod_api = Api::<Pod>::all(client.clone());
 
     if state.aws_pod_identity_association_cluster.is_some() {
         if let Err(e) = pia_api.list(&ListParams::default().limit(1)).await {
@@ -657,7 +669,9 @@ pub async fn run(state: State) {
             },
         );
     let controller = if state.aws_pod_identity_association_cluster.is_some() {
-        controller.owns(pia_api, cfg.clone())
+        controller
+            .owns(pia_api, cfg.clone())
+            .owns(pod_api, cfg.clone())
     } else {
         controller
     };

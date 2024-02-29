@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, HashSet};
 use std::convert::Into;
+use std::time::Duration;
 
 use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetSpec};
 use k8s_openapi::api::core::v1::{
-    Container, ContainerPort, EnvVar, PersistentVolumeClaim, PersistentVolumeClaimSpec,
+    Container, ContainerPort, EnvVar, PersistentVolumeClaim, PersistentVolumeClaimSpec, Pod,
     PodSecurityContext, PodSpec, PodTemplateSpec, SeccompProfile, SecurityContext, Service,
     ServiceAccount, ServicePort, ServiceSpec, Volume, VolumeMount, VolumeResourceRequirements,
 };
@@ -264,6 +265,7 @@ pub async fn reconcile_compute(
     let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), namespace);
     let svcacc_api: Api<ServiceAccount> = Api::namespaced(ctx.client.clone(), namespace);
     let pia_api: Api<PodIdentityAssociation> = Api::namespaced(ctx.client.clone(), namespace);
+    let pod_api: Api<Pod> = Api::namespaced(ctx.client.clone(), namespace);
 
     apply_service_account(
         namespace,
@@ -301,7 +303,11 @@ pub async fn reconcile_compute(
             .await?;
 
             if !is_pod_identity_association_synced(pia) {
-                return Err(Error::NotReady { reason: "PodIdentityAssociationNotSynced".into(), message: "Waiting for the AWS ACK controller to provision the Pod Identity Association with IAM".into() });
+                return Err(Error::NotReady { reason: "PodIdentityAssociationNotSynced".into(), message: "Waiting for the AWS ACK controller to provision the Pod Identity Association with IAM".into(), requeue_after: None });
+            }
+
+            if !check_pia(namespace, oref, &pod_api).await? {
+                return Err(Error::NotReady { reason: "PodIdentityAssociationCanaryFailed".into(), message: "Canary pod did not receive Pod Identity credentials; PIA webhook may need to catch up".into(), requeue_after: Some(Duration::from_secs(2)) });
             }
 
             Some(BTreeMap::from([
@@ -359,7 +365,7 @@ pub async fn reconcile_compute(
     let replicas = ss.status.map(|s| s.replicas).unwrap_or(0);
     let expected_replicas = spec.compute.replicas.unwrap_or(1);
     if replicas != expected_replicas {
-        return Err(Error::NotReady { reason: "StatefulSetScaling".into(), message: format!("StatefulSet has {replicas} replicas instead of the expected {expected_replicas}; it may be scaling up or down", ) });
+        return Err(Error::NotReady { reason: "StatefulSetScaling".into(), message: format!("StatefulSet has {replicas} replicas instead of the expected {expected_replicas}; it may be scaling up or down", ), requeue_after: None });
     }
 
     Ok(())
@@ -404,6 +410,74 @@ async fn apply_pod_identity_association(
     Ok(pia_api.patch(name, &params, &Patch::Apply(&pia)).await?)
 }
 
+async fn check_pia(
+    namespace: &str,
+    oref: &OwnerReference,
+    pod_api: &Api<Pod>,
+) -> Result<bool, Error> {
+    let name = "restate-pia-canary";
+    let params: PatchParams = PatchParams::apply("restate-operator").force();
+
+    let mut metadata = object_meta(oref, name);
+    let labels = metadata.labels.get_or_insert(Default::default());
+    if let Some(existing) = labels.get_mut("app.kubernetes.io/name") {
+        *existing = name.into()
+    } else {
+        labels.insert("app.kubernetes.io/name".into(), name.into());
+    }
+
+    debug!(
+        "Applying PodIdentityAssociation canary Pod in namespace {}",
+        namespace
+    );
+
+    let created = pod_api
+        .patch(
+            name,
+            &params,
+            &Patch::Apply(&Pod {
+                metadata: object_meta(oref, name),
+                spec: Some(PodSpec {
+                    service_account_name: Some("restate".into()),
+                    containers: vec![Container {
+                        name: "canary".into(),
+                        image: Some("hello-world:linux".into()),
+                        ..Default::default()
+                    }],
+                    restart_policy: Some("Never".into()),
+                    ..Default::default()
+                }),
+                status: None,
+            }),
+        )
+        .await?;
+
+    if let Some(spec) = created.spec {
+        if let Some(volumes) = spec.volumes {
+            if volumes.iter().any(|v| v.name == "eks-pod-identity-token") {
+                debug!(
+                    "PodIdentityAssociation canary check succeeded in namespace {}",
+                    namespace
+                );
+                // leave pod in place as a signal that we passed the check
+                return Ok(true);
+            }
+        }
+    }
+
+    debug!(
+        "PodIdentityAssociation canary check failed in namespace {}, deleting canary Pod",
+        namespace
+    );
+
+    // delete pod to try again next time
+    pod_api
+        .delete("restate-canary", &Default::default())
+        .await?;
+
+    Ok(false)
+}
+
 fn is_pod_identity_association_synced(pia: PodIdentityAssociation) -> bool {
     if let Some(status) = pia.status {
         if let Some(conditions) = status.conditions {
@@ -411,7 +485,9 @@ fn is_pod_identity_association_synced(pia: PodIdentityAssociation) -> bool {
                 .iter()
                 .find(|cond| cond.r#type == "ACK.ResourceSynced")
             {
-                return synced.status == "True";
+                if synced.status == "True" {
+                    return true;
+                }
             }
         }
     }
@@ -490,6 +566,7 @@ async fn resize_statefulset_storage(
                     "PersistentVolumeClaim {} is not yet bound to a volume",
                     name
                 ),
+                requeue_after: None,
             });
         }
     }
