@@ -46,6 +46,7 @@ rules:
       - networkpolicies
       - statefulsets
       - persistentvolumeclaims
+      - pods
     verbs:
       - get
       - list
@@ -59,6 +60,7 @@ rules:
   - resources:
       - statefulsets
       - networkpolicies
+      - pods
     verbs:
       - delete
     apiGroups:

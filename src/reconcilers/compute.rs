@@ -471,9 +471,7 @@ async fn check_pia(
     );
 
     // delete pod to try again next time
-    pod_api
-        .delete("restate-canary", &Default::default())
-        .await?;
+    pod_api.delete(name, &Default::default()).await?;
 
     Ok(false)
 }
