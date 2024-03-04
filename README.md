@@ -37,9 +37,10 @@ For the full schema as a [Pkl](https://pkl-lang.org/) template see [`crd/Restate
 
 ### EKS Pod Identity
 
-EKS Pod Identity is a convenient way to have a single AWS role shared amongst many Restate clusters, where the AWS
-identities will contain tags detailing their Kubernetes identity. This can be useful for access control
-eg 'Restate clusters in namespace `my-cluster` may call this Lambda'.
+[EKS Pod Identity](https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html) is a convenient way to have a
+single AWS role shared amongst many Restate clusters, where the AWS identities will contain tags detailing their
+Kubernetes identity. This can be useful for access control eg 'Restate clusters in namespace `my-cluster` may call this
+Lambda'.
 
 This operator can create objects for the
 [AWS ACK EKS controller](https://github.com/aws-controllers-k8s/eks-controller) such that pod identity associations are
