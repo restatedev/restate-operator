@@ -64,6 +64,7 @@ rules:
     verbs:
       - delete
     apiGroups:
+      - ''
       - apps
       - networking.k8s.io
   {{- if .Values.awsPodIdentityAssociationCluster }}
