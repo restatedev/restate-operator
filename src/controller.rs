@@ -6,10 +6,12 @@ use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use k8s_openapi::api::apps::v1::StatefulSet;
 use k8s_openapi::api::core::v1::{
-    EnvVar, Namespace, PersistentVolumeClaim, Pod, ResourceRequirements, Service, ServiceAccount,
+    EnvVar, Namespace, PersistentVolumeClaim, Pod, PodDNSConfig, ResourceRequirements, Service,
+    ServiceAccount,
 };
 use k8s_openapi::api::networking::v1;
 use k8s_openapi::api::networking::v1::{NetworkPolicy, NetworkPolicyPeer, NetworkPolicyPort};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::APIGroup;
 use kube::core::PartialObjectMeta;
 use kube::runtime::reflector::{ObjectRef, Store};
 use kube::runtime::{metadata_watcher, reflector, watcher, WatchStreamExt};
@@ -35,6 +37,7 @@ use crate::podidentityassociations::PodIdentityAssociation;
 use crate::reconcilers::compute::reconcile_compute;
 use crate::reconcilers::network_policies::reconcile_network_policies;
 use crate::reconcilers::object_meta;
+use crate::securitygrouppolicies::SecurityGroupPolicy;
 use crate::{telemetry, Error, Metrics, Result};
 
 pub static RESTATE_CLUSTER_FINALIZER: &str = "clusters.restate.dev";
@@ -171,6 +174,10 @@ pub struct RestateClusterCompute {
     pub env: Option<Vec<EnvVar>>,
     /// Compute Resources for the Restate container. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
     pub resources: Option<ResourceRequirements>,
+    /// Specifies the DNS parameters of the Restate pod. Parameters specified here will be merged to the generated DNS configuration based on DNSPolicy.
+    pub dns_config: Option<PodDNSConfig>,
+    /// Set DNS policy for the pod. Defaults to "ClusterFirst". Valid values are 'ClusterFirstWithHostNet', 'ClusterFirst', 'Default' or 'None'. DNS parameters given in DNSConfig will be merged with the policy selected with DNSPolicy.
+    pub dns_policy: Option<String>,
 }
 
 fn env_schema(g: &mut schemars::gen::SchemaGenerator) -> Schema {
@@ -190,9 +197,11 @@ fn env_schema(g: &mut schemars::gen::SchemaGenerator) -> Schema {
 pub struct RestateClusterSecurity {
     pub service_annotations: Option<BTreeMap<String, String>>,
     pub service_account_annotations: Option<BTreeMap<String, String>>,
-    /// if set, create a AWS PodIdentityAssociation using the ACK CRD in order to give the Restate pod access to this role and
+    /// If set, create an AWS PodIdentityAssociation using the ACK CRD in order to give the Restate pod access to this role and
     /// allow the cluster to reach the Pod Identity agent.
     pub aws_pod_identity_association_role_arn: Option<String>,
+    /// If set, create an AWS SecurityGroupPolicy CRD object to place the Restate pod into these security groups
+    pub aws_pod_security_groups: Option<Vec<String>>,
     /// Network peers to allow inbound access to restate ports
     /// If unset, will not allow any new traffic. Set any of these to [] to allow all traffic - not recommended.
     pub network_peers: Option<RestateClusterNetworkPeers>,
@@ -312,6 +321,8 @@ pub struct Context {
     pub ss_store: Store<StatefulSet>,
     // If set, watch PodIdentityAssociation resources, and if requested create them against this cluster
     pub aws_pod_identity_association_cluster: Option<String>,
+    // Whether the EKS SecurityGroupPolicy CRD is installed
+    pub security_group_policy_installed: bool,
     /// Diagnostics read by the web server
     pub diagnostics: Arc<RwLock<Diagnostics>>,
     /// Prometheus metrics
@@ -593,12 +604,14 @@ impl State {
         client: Client,
         pvc_meta_store: Store<PartialObjectMeta<PersistentVolumeClaim>>,
         ss_store: Store<StatefulSet>,
+        security_group_policy_installed: bool,
     ) -> Arc<Context> {
         Arc::new(Context {
             client,
             pvc_meta_store,
             ss_store,
             aws_pod_identity_association_cluster: self.aws_pod_identity_association_cluster.clone(),
+            security_group_policy_installed,
             metrics: Metrics::default().register(&self.registry).unwrap(),
             diagnostics: self.diagnostics.clone(),
         })
@@ -610,6 +623,29 @@ pub async fn run(state: State) {
     let client = Client::try_default()
         .await
         .expect("failed to create kube Client");
+
+    let api_groups = match client.list_api_groups().await {
+        Ok(list) => list,
+        Err(e) => {
+            error!("Could not list api groups: {e:?}");
+            std::process::exit(1);
+        }
+    };
+
+    let (security_group_policy_installed, pod_identity_association_installed) = api_groups
+        .groups
+        .iter()
+        .fold((false, false), |(sgp, pia), group| {
+            fn group_matches<R: Resource<DynamicType = ()>>(group: &APIGroup) -> bool {
+                group.name == R::group(&())
+                    && group.versions.iter().any(|v| v.version == R::version(&()))
+            }
+            (
+                sgp || group_matches::<SecurityGroupPolicy>(group),
+                pia || group_matches::<PodIdentityAssociation>(group),
+            )
+        });
+
     let rc_api = Api::<RestateCluster>::all(client.clone());
     let ns_api = Api::<Namespace>::all(client.clone());
     let ss_api = Api::<StatefulSet>::all(client.clone());
@@ -619,12 +655,11 @@ pub async fn run(state: State) {
     let np_api = Api::<NetworkPolicy>::all(client.clone());
     let pia_api = Api::<PodIdentityAssociation>::all(client.clone());
     let pod_api = Api::<Pod>::all(client.clone());
+    let sgp_api = Api::<SecurityGroupPolicy>::all(client.clone());
 
-    if state.aws_pod_identity_association_cluster.is_some() {
-        if let Err(e) = pia_api.list(&ListParams::default().limit(1)).await {
-            error!("PodIdentityAssociation is not queryable; {e:?}. Is the CRD installed?");
-            std::process::exit(1);
-        }
+    if state.aws_pod_identity_association_cluster.is_some() && !pod_identity_association_installed {
+        error!("PodIdentityAssociation is not available on apiserver, but a pod identity association cluster was provided. Is the CRD installed?");
+        std::process::exit(1);
     }
 
     if let Err(e) = rc_api.list(&ListParams::default().limit(1)).await {
@@ -668,10 +703,15 @@ pub async fn run(state: State) {
                 Some(ObjectRef::new(instance))
             },
         );
-    let controller = if state.aws_pod_identity_association_cluster.is_some() {
+    let controller = if pod_identity_association_installed {
         controller
             .owns(pia_api, cfg.clone())
             .owns(pod_api, cfg.clone())
+    } else {
+        controller
+    };
+    let controller = if security_group_policy_installed {
+        controller.owns(sgp_api, cfg.clone())
     } else {
         controller
     };
@@ -679,7 +719,12 @@ pub async fn run(state: State) {
         .run(
             reconcile,
             error_policy,
-            state.to_context(client, pvc_meta_store, ss_store),
+            state.to_context(
+                client,
+                pvc_meta_store,
+                ss_store,
+                security_group_policy_installed,
+            ),
         )
         .filter_map(|x| async move { Result::ok(x) })
         .for_each(|_| futures::future::ready(()))

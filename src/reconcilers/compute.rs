@@ -21,6 +21,11 @@ use tracing::{debug, warn};
 
 use crate::podidentityassociations::{PodIdentityAssociation, PodIdentityAssociationSpec};
 use crate::reconcilers::{label_selector, object_meta, resource_labels};
+use crate::securitygrouppolicies::{
+    SecurityGroupPolicy, SecurityGroupPolicyPodSelector,
+    SecurityGroupPolicyPodSelectorMatchExpressions, SecurityGroupPolicySecurityGroups,
+    SecurityGroupPolicySpec,
+};
 use crate::{Context, Error, RestateClusterCompute, RestateClusterSpec, RestateClusterStorage};
 
 fn restate_service_account(
@@ -62,6 +67,36 @@ fn restate_pod_identity_association(
             tags: None,
         },
         status: None,
+    }
+}
+
+fn restate_security_group_policy(
+    oref: &OwnerReference,
+    aws_security_groups: &[String],
+) -> SecurityGroupPolicy {
+    SecurityGroupPolicy {
+        metadata: object_meta(oref, "restate"),
+        spec: SecurityGroupPolicySpec {
+            security_groups: Some(SecurityGroupPolicySecurityGroups {
+                group_ids: Some(aws_security_groups.into()),
+            }),
+            pod_selector: Some({
+                let selector = label_selector(&oref.name);
+                SecurityGroupPolicyPodSelector {
+                    match_labels: selector.match_labels,
+                    match_expressions: selector.match_expressions.map(|es| {
+                        es.into_iter()
+                            .map(|e| SecurityGroupPolicyPodSelectorMatchExpressions {
+                                key: e.key,
+                                operator: e.operator,
+                                values: e.values,
+                            })
+                            .collect()
+                    }),
+                }
+            }),
+            service_account_selector: None,
+        },
     }
 }
 
@@ -161,6 +196,8 @@ fn restate_statefulset(
                 }),
                 spec: Some(PodSpec {
                     automount_service_account_token: Some(false),
+                    dns_policy: compute.dns_policy.clone(),
+                    dns_config: compute.dns_config.clone(),
                     containers: vec![Container {
                         name: "restate".into(),
                         image: Some(compute.image.clone()),
@@ -266,6 +303,7 @@ pub async fn reconcile_compute(
     let svcacc_api: Api<ServiceAccount> = Api::namespaced(ctx.client.clone(), namespace);
     let pia_api: Api<PodIdentityAssociation> = Api::namespaced(ctx.client.clone(), namespace);
     let pod_api: Api<Pod> = Api::namespaced(ctx.client.clone(), namespace);
+    let sgp_api: Api<SecurityGroupPolicy> = Api::namespaced(ctx.client.clone(), namespace);
 
     apply_service_account(
         namespace,
@@ -279,8 +317,9 @@ pub async fn reconcile_compute(
     )
     .await?;
 
-    // Pods MUST roll when these change, so we will apply these parameters as annotations to the pod meta
-    let pod_annotations: Option<BTreeMap<String, String>> = match (
+    let mut pod_annotations: Option<BTreeMap<String, String>> = None;
+
+    match (
         ctx.aws_pod_identity_association_cluster.as_ref(),
         spec.security
             .as_ref()
@@ -310,27 +349,55 @@ pub async fn reconcile_compute(
                 return Err(Error::NotReady { reason: "PodIdentityAssociationCanaryFailed".into(), message: "Canary pod did not receive Pod Identity credentials; PIA webhook may need to catch up".into(), requeue_after: Some(Duration::from_secs(2)) });
             }
 
-            Some(BTreeMap::from([
-                (
-                    "restate.dev/aws-pod-identity-association-cluster".into(),
-                    aws_pod_identity_association_cluster.clone(),
-                ),
-                (
-                    "restate.dev/aws-pod-identity-association-role-arn".into(),
-                    aws_pod_identity_association_role_arn.clone(),
-                ),
-            ]))
+            // Pods MUST roll when these change, so we will apply these parameters as annotations to the pod meta
+            let pod_annotations = pod_annotations.get_or_insert_with(Default::default);
+            pod_annotations.insert(
+                "restate.dev/aws-pod-identity-association-cluster".into(),
+                aws_pod_identity_association_cluster.clone(),
+            );
+            pod_annotations.insert(
+                "restate.dev/aws-pod-identity-association-role-arn".into(),
+                aws_pod_identity_association_role_arn.clone(),
+            );
         }
         (Some(_), None) => {
             delete_pod_identity_association(namespace, &pia_api, "restate").await?;
-            None
         }
         (None, Some(aws_pod_identity_association_role_arn)) => {
             warn!("Ignoring AWS pod identity association role ARN {aws_pod_identity_association_role_arn} as the operator is not configured with --aws-pod-identity-association-cluster");
-            None
         }
-        (None, None) => None,
+        (None, None) => {}
     };
+
+    match (
+        ctx.security_group_policy_installed,
+        spec.security
+            .as_ref()
+            .and_then(|s| s.aws_pod_security_groups.as_deref()),
+    ) {
+        (true, Some(aws_pod_security_groups)) => {
+            apply_security_group_policy(
+                namespace,
+                &sgp_api,
+                restate_security_group_policy(oref, aws_pod_security_groups),
+            )
+            .await?;
+
+            let pod_annotations = pod_annotations.get_or_insert_with(Default::default);
+            // Pods MUST roll when these change, so we will apply the groups as annotations to the pod meta
+            pod_annotations.insert(
+                "restate.dev/aws-security-groups".into(),
+                aws_pod_security_groups.join(","),
+            );
+        }
+        (true, None) => {
+            delete_security_group_policy(namespace, &sgp_api, "restate").await?;
+        }
+        (false, Some(aws_pod_security_groups)) => {
+            warn!("Ignoring AWS pod security groups {} as the SecurityGroupPolicy CRD is not installed", aws_pod_security_groups.join(","));
+        }
+        (false, None) => {}
+    }
 
     apply_service(
         namespace,
@@ -502,6 +569,37 @@ async fn delete_pod_identity_association(
         name, namespace
     );
     match pia_api.delete(name, &DeleteParams::default()).await {
+        Err(kube::Error::Api(kube::error::ErrorResponse { code: 404, .. })) => Ok(()),
+        Err(err) => Err(err.into()),
+        Ok(_) => Ok(()),
+    }
+}
+
+async fn apply_security_group_policy(
+    namespace: &str,
+    pia_api: &Api<SecurityGroupPolicy>,
+    pia: SecurityGroupPolicy,
+) -> Result<(), Error> {
+    let name = pia.metadata.name.as_ref().unwrap();
+    let params: PatchParams = PatchParams::apply("restate-operator").force();
+    debug!(
+        "Applying SecurityGroupPolicy {} in namespace {}",
+        name, namespace
+    );
+    pia_api.patch(name, &params, &Patch::Apply(&pia)).await?;
+    Ok(())
+}
+
+async fn delete_security_group_policy(
+    namespace: &str,
+    sgp_api: &Api<SecurityGroupPolicy>,
+    name: &str,
+) -> Result<(), Error> {
+    debug!(
+        "Ensuring SecurityGroupPolicy {} in namespace {} does not exist",
+        name, namespace
+    );
+    match sgp_api.delete(name, &DeleteParams::default()).await {
         Err(kube::Error::Api(kube::error::ErrorResponse { code: 404, .. })) => Ok(()),
         Err(err) => Err(err.into()),
         Ok(_) => Ok(()),
