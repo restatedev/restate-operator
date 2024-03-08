@@ -369,13 +369,14 @@ pub async fn reconcile_compute(
         (None, None) => {}
     };
 
-    match (
-        ctx.security_group_policy_installed,
-        spec.security
-            .as_ref()
-            .and_then(|s| s.aws_pod_security_groups.as_deref()),
-    ) {
-        (true, Some(aws_pod_security_groups)) => {
+    match spec
+        .security
+        .as_ref()
+        .and_then(|s| s.aws_pod_security_groups.as_deref())
+    {
+        Some(aws_pod_security_groups)
+            if ctx.security_group_policy_installed && !aws_pod_security_groups.is_empty() =>
+        {
             apply_security_group_policy(
                 namespace,
                 &sgp_api,
@@ -390,13 +391,13 @@ pub async fn reconcile_compute(
                 aws_pod_security_groups.join(","),
             );
         }
-        (true, None) => {
+        None | Some(_) if ctx.security_group_policy_installed => {
             delete_security_group_policy(namespace, &sgp_api, "restate").await?;
         }
-        (false, Some(aws_pod_security_groups)) => {
+        Some(aws_pod_security_groups) if !aws_pod_security_groups.is_empty() => {
             warn!("Ignoring AWS pod security groups {} as the SecurityGroupPolicy CRD is not installed", aws_pod_security_groups.join(","));
         }
-        (false, None) => {}
+        None | Some(_) => {}
     }
 
     apply_service(
