@@ -22,9 +22,7 @@ use tracing::{debug, warn};
 use crate::podidentityassociations::{PodIdentityAssociation, PodIdentityAssociationSpec};
 use crate::reconcilers::{label_selector, object_meta, resource_labels};
 use crate::securitygrouppolicies::{
-    SecurityGroupPolicy, SecurityGroupPolicyPodSelector,
-    SecurityGroupPolicyPodSelectorMatchExpressions, SecurityGroupPolicySecurityGroups,
-    SecurityGroupPolicySpec,
+    SecurityGroupPolicy, SecurityGroupPolicySecurityGroups, SecurityGroupPolicySpec,
 };
 use crate::{Context, Error, RestateClusterCompute, RestateClusterSpec, RestateClusterStorage};
 
@@ -80,21 +78,7 @@ fn restate_security_group_policy(
             security_groups: Some(SecurityGroupPolicySecurityGroups {
                 group_ids: Some(aws_security_groups.into()),
             }),
-            pod_selector: Some({
-                let selector = label_selector(&oref.name);
-                SecurityGroupPolicyPodSelector {
-                    match_labels: selector.match_labels,
-                    match_expressions: selector.match_expressions.map(|es| {
-                        es.into_iter()
-                            .map(|e| SecurityGroupPolicyPodSelectorMatchExpressions {
-                                key: e.key,
-                                operator: e.operator,
-                                values: e.values,
-                            })
-                            .collect()
-                    }),
-                }
-            }),
+            pod_selector: Some(label_selector(&oref.name)),
             service_account_selector: None,
         },
     }
