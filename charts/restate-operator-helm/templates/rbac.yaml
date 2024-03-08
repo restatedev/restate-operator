@@ -47,6 +47,7 @@ rules:
       - statefulsets
       - persistentvolumeclaims
       - pods
+      - securitygrouppolicies
     verbs:
       - get
       - list
@@ -57,16 +58,19 @@ rules:
       - ''
       - apps
       - networking.k8s.io
+      - vpcresources.k8s.aws
   - resources:
       - statefulsets
       - networkpolicies
       - pods
+      - securitygrouppolicies
     verbs:
       - delete
     apiGroups:
       - ''
       - apps
       - networking.k8s.io
+      - vpcresources.k8s.aws
   {{- if .Values.awsPodIdentityAssociationCluster }}
   - resources:
       - podidentityassociations
