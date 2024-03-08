@@ -11,7 +11,7 @@ use k8s_openapi::api::core::v1::{
 };
 use k8s_openapi::api::networking::v1;
 use k8s_openapi::api::networking::v1::{NetworkPolicy, NetworkPolicyPeer, NetworkPolicyPort};
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::APIGroup;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{APIGroup, ObjectMeta};
 use kube::core::PartialObjectMeta;
 use kube::runtime::reflector::{ObjectRef, Store};
 use kube::runtime::{metadata_watcher, reflector, watcher, WatchStreamExt};
@@ -385,6 +385,14 @@ impl RestateCluster {
 
         let oref = self.controller_owner_ref(&()).unwrap();
 
+        let base_metadata = ObjectMeta {
+            name: Some(name.into()),
+            labels: Some(self.labels().clone()),
+            annotations: Some(self.annotations().clone()),
+            owner_references: Some(vec![oref.clone()]),
+            ..Default::default()
+        };
+
         if let Some(ns) = nss.get_metadata_opt(name).await? {
             // check to see if extant namespace is managed by us
             if !ns
@@ -400,7 +408,7 @@ impl RestateCluster {
         apply_namespace(
             &nss,
             Namespace {
-                metadata: object_meta(&oref, name),
+                metadata: object_meta(&base_metadata, name),
                 ..Default::default()
             },
         )
@@ -409,7 +417,7 @@ impl RestateCluster {
         reconcile_network_policies(
             ctx.client.clone(),
             name,
-            &oref,
+            &base_metadata,
             self.spec
                 .security
                 .as_ref()
@@ -425,7 +433,7 @@ impl RestateCluster {
         )
         .await?;
 
-        reconcile_compute(&ctx, name, &oref, &self.spec).await?;
+        reconcile_compute(&ctx, name, &base_metadata, &self.spec).await?;
 
         Ok(())
     }
