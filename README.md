@@ -45,9 +45,18 @@ Lambda'.
 This operator can create objects for the
 [AWS ACK EKS controller](https://github.com/aws-controllers-k8s/eks-controller) such that pod identity associations are
 created for each `RestateCluster`. To enable this functionality the operator must be started with knowledge of the EKS
-cluster name, by setting `awsPodIdentityAssociationCluster` in the helm chart. If this option is set, the ACK controller
-must be running or the operator will fail to start. Then, you may provide `awsPodIdentityAssociationRoleArn` in
+cluster name, by setting `awsPodIdentityAssociationCluster` in the helm chart. If this option is set, the ACK CRDs must
+be installed or the operator will fail to start. Then, you may provide `awsPodIdentityAssociationRoleArn` in
 the `RestateCluster` spec.
+
+### EKS Security Groups for Pods
+
+[EKS Security Groups for Pods](https://docs.aws.amazon.com/eks/latest/userguide/security-groups-for-pods.html) allows
+you to isolate pods into separate AWS Security Groups, which is a powerful security primitive which can help you limit
+Restate to public IP access, as well as to obtain VPC flow logs.
+
+The operator can create `SecurityGroupPolicy` objects which put Restate pods into a set of Security Groups. If this CRD
+is installed, you may provide `awsPodSecurityGroups` in the `RestateCluster` spec.
 
 ## Releasing
 
