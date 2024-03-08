@@ -9,7 +9,7 @@ use k8s_openapi::api::core::v1::{
     ServiceAccount, ServicePort, ServiceSpec, Volume, VolumeMount, VolumeResourceRequirements,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{DeleteParams, Preconditions, PropagationPolicy};
 use kube::core::PartialObjectMeta;
 use kube::runtime::reflector::{ObjectRef, Store};
@@ -20,17 +20,17 @@ use kube::{
 use tracing::{debug, warn};
 
 use crate::podidentityassociations::{PodIdentityAssociation, PodIdentityAssociationSpec};
-use crate::reconcilers::{label_selector, object_meta, resource_labels};
+use crate::reconcilers::{label_selector, mandatory_labels, object_meta};
 use crate::securitygrouppolicies::{
     SecurityGroupPolicy, SecurityGroupPolicySecurityGroups, SecurityGroupPolicySpec,
 };
 use crate::{Context, Error, RestateClusterCompute, RestateClusterSpec, RestateClusterStorage};
 
 fn restate_service_account(
-    oref: &OwnerReference,
+    base_metadata: &ObjectMeta,
     annotations: Option<&BTreeMap<String, String>>,
 ) -> ServiceAccount {
-    let mut metadata = object_meta(oref, "restate");
+    let mut metadata = object_meta(base_metadata, "restate");
     if let Some(annotations) = annotations {
         match &mut metadata.annotations {
             Some(existing_annotations) => {
@@ -48,12 +48,12 @@ fn restate_service_account(
 
 fn restate_pod_identity_association(
     ns: &str,
-    oref: &OwnerReference,
+    base_metadata: &ObjectMeta,
     pod_identity_association_cluster: &str,
     pod_identity_association_role_arn: &str,
 ) -> PodIdentityAssociation {
     PodIdentityAssociation {
-        metadata: object_meta(oref, "restate"),
+        metadata: object_meta(base_metadata, "restate"),
         spec: PodIdentityAssociationSpec {
             cluster_name: Some(pod_identity_association_cluster.into()),
             namespace: ns.into(),
@@ -69,26 +69,26 @@ fn restate_pod_identity_association(
 }
 
 fn restate_security_group_policy(
-    oref: &OwnerReference,
+    base_metadata: &ObjectMeta,
     aws_security_groups: &[String],
 ) -> SecurityGroupPolicy {
     SecurityGroupPolicy {
-        metadata: object_meta(oref, "restate"),
+        metadata: object_meta(base_metadata, "restate"),
         spec: SecurityGroupPolicySpec {
             security_groups: Some(SecurityGroupPolicySecurityGroups {
                 group_ids: Some(aws_security_groups.into()),
             }),
-            pod_selector: Some(label_selector(&oref.name)),
+            pod_selector: Some(label_selector(base_metadata)),
             service_account_selector: None,
         },
     }
 }
 
 fn restate_service(
-    oref: &OwnerReference,
+    base_metadata: &ObjectMeta,
     annotations: Option<&BTreeMap<String, String>>,
 ) -> Service {
-    let mut metadata = object_meta(oref, "restate");
+    let mut metadata = object_meta(base_metadata, "restate");
     if let Some(annotations) = annotations {
         match &mut metadata.annotations {
             Some(existing_annotations) => {
@@ -99,9 +99,9 @@ fn restate_service(
     }
 
     Service {
-        metadata: object_meta(oref, "restate"),
+        metadata: object_meta(base_metadata, "restate"),
         spec: Some(ServiceSpec {
-            selector: label_selector(&oref.name).match_labels,
+            selector: label_selector(base_metadata).match_labels,
             ports: Some(vec![
                 ServicePort {
                     app_protocol: Some("kubernetes.io/h2c".into()),
@@ -161,20 +161,30 @@ fn env(custom: Option<&[EnvVar]>) -> Option<Vec<EnvVar>> {
 const RESTATE_STATEFULSET_NAME: &str = "restate";
 
 fn restate_statefulset(
-    oref: &OwnerReference,
+    base_metadata: &ObjectMeta,
     compute: &RestateClusterCompute,
     storage: &RestateClusterStorage,
     pod_annotations: Option<BTreeMap<String, String>>,
 ) -> StatefulSet {
+    let metadata = object_meta(base_metadata, RESTATE_STATEFULSET_NAME);
+    let labels = metadata.labels.clone();
+    let pod_annotations = match (pod_annotations, metadata.annotations.clone()) {
+        (Some(pod_annotations), Some(mut base_annotations)) => {
+            base_annotations.extend(pod_annotations);
+            Some(base_annotations)
+        }
+        (Some(annotations), None) | (None, Some(annotations)) => Some(annotations),
+        (None, None) => None,
+    };
     StatefulSet {
-        metadata: object_meta(oref, RESTATE_STATEFULSET_NAME),
+        metadata,
         spec: Some(StatefulSetSpec {
             replicas: compute.replicas,
-            selector: label_selector(&oref.name),
+            selector: label_selector(base_metadata),
             service_name: "restate".into(),
             template: PodTemplateSpec {
                 metadata: Some(ObjectMeta {
-                    labels: Some(resource_labels(&oref.name)),
+                    labels,
                     annotations: pod_annotations,
                     ..Default::default()
                 }),
@@ -248,7 +258,7 @@ fn restate_statefulset(
             volume_claim_templates: Some(vec![PersistentVolumeClaim {
                 metadata: ObjectMeta {
                     name: Some("storage".into()),
-                    labels: Some(resource_labels(&oref.name)),
+                    labels: Some(mandatory_labels(base_metadata)), // caution needed; these cannot be changed
                     ..Default::default()
                 },
                 spec: Some(PersistentVolumeClaimSpec {
@@ -278,7 +288,7 @@ fn restate_pvc_resources(storage: &RestateClusterStorage) -> VolumeResourceRequi
 pub async fn reconcile_compute(
     ctx: &Context,
     namespace: &str,
-    oref: &OwnerReference,
+    base_metadata: &ObjectMeta,
     spec: &RestateClusterSpec,
 ) -> Result<(), Error> {
     let ss_api: Api<StatefulSet> = Api::namespaced(ctx.client.clone(), namespace);
@@ -293,7 +303,7 @@ pub async fn reconcile_compute(
         namespace,
         &svcacc_api,
         restate_service_account(
-            oref,
+            base_metadata,
             spec.security
                 .as_ref()
                 .and_then(|s| s.service_account_annotations.as_ref()),
@@ -318,7 +328,7 @@ pub async fn reconcile_compute(
                 &pia_api,
                 restate_pod_identity_association(
                     namespace,
-                    oref,
+                    base_metadata,
                     aws_pod_identity_association_cluster,
                     aws_pod_identity_association_role_arn,
                 ),
@@ -329,7 +339,7 @@ pub async fn reconcile_compute(
                 return Err(Error::NotReady { reason: "PodIdentityAssociationNotSynced".into(), message: "Waiting for the AWS ACK controller to provision the Pod Identity Association with IAM".into(), requeue_after: None });
             }
 
-            if !check_pia(namespace, oref, &pod_api).await? {
+            if !check_pia(namespace, base_metadata, &pod_api).await? {
                 return Err(Error::NotReady { reason: "PodIdentityAssociationCanaryFailed".into(), message: "Canary pod did not receive Pod Identity credentials; PIA webhook may need to catch up".into(), requeue_after: Some(Duration::from_secs(2)) });
             }
 
@@ -364,7 +374,7 @@ pub async fn reconcile_compute(
             apply_security_group_policy(
                 namespace,
                 &sgp_api,
-                restate_security_group_policy(oref, aws_pod_security_groups),
+                restate_security_group_policy(base_metadata, aws_pod_security_groups),
             )
             .await?;
 
@@ -388,7 +398,7 @@ pub async fn reconcile_compute(
         namespace,
         &svc_api,
         restate_service(
-            oref,
+            base_metadata,
             spec.security
                 .as_ref()
                 .and_then(|s| s.service_annotations.as_ref()),
@@ -398,7 +408,7 @@ pub async fn reconcile_compute(
 
     resize_statefulset_storage(
         namespace,
-        oref,
+        base_metadata,
         &ss_api,
         &ctx.ss_store,
         &pvc_api,
@@ -410,7 +420,7 @@ pub async fn reconcile_compute(
     let ss = apply_stateful_set(
         namespace,
         &ss_api,
-        restate_statefulset(oref, &spec.compute, &spec.storage, pod_annotations),
+        restate_statefulset(base_metadata, &spec.compute, &spec.storage, pod_annotations),
     )
     .await?;
 
@@ -464,13 +474,13 @@ async fn apply_pod_identity_association(
 
 async fn check_pia(
     namespace: &str,
-    oref: &OwnerReference,
+    base_metadata: &ObjectMeta,
     pod_api: &Api<Pod>,
 ) -> Result<bool, Error> {
     let name = "restate-pia-canary";
     let params: PatchParams = PatchParams::apply("restate-operator").force();
 
-    let mut metadata = object_meta(oref, name);
+    let mut metadata = object_meta(base_metadata, name);
     let labels = metadata.labels.get_or_insert(Default::default());
     if let Some(existing) = labels.get_mut("app.kubernetes.io/name") {
         *existing = name.into()
@@ -488,7 +498,7 @@ async fn check_pia(
             name,
             &params,
             &Patch::Apply(&Pod {
-                metadata: object_meta(oref, name),
+                metadata: object_meta(base_metadata, name),
                 spec: Some(PodSpec {
                     service_account_name: Some("restate".into()),
                     containers: vec![Container {
@@ -593,7 +603,7 @@ async fn delete_security_group_policy(
 
 async fn resize_statefulset_storage(
     namespace: &str,
-    oref: &OwnerReference,
+    base_metadata: &ObjectMeta,
     ss_api: &Api<StatefulSet>,
     ss_store: &Store<StatefulSet>,
     pvc_api: &Api<PersistentVolumeClaim>,
@@ -605,7 +615,7 @@ async fn resize_statefulset_storage(
 
     // ensure all existing pvcs have the right size set
     // first, filter the pvc meta store for our label selector
-    let labels = resource_labels(&oref.name);
+    let labels = mandatory_labels(base_metadata);
     let pvcs = pvc_meta_store.state().into_iter().filter(|pvc_meta| {
         for (k, v) in &labels {
             if pvc_meta.labels().get(k) != Some(v) {

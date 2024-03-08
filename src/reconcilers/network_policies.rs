@@ -6,7 +6,7 @@ use k8s_openapi::api::networking::v1::{
     IPBlock, NetworkPolicy, NetworkPolicyEgressRule, NetworkPolicyIngressRule, NetworkPolicyPeer,
     NetworkPolicyPort,
 };
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, OwnerReference};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::DeleteParams;
 use kube::{
@@ -18,9 +18,9 @@ use tracing::debug;
 use crate::reconcilers::{label_selector, object_meta};
 use crate::{Error, RestateClusterNetworkPeers};
 
-fn deny_all(oref: &OwnerReference) -> NetworkPolicy {
+fn deny_all(base_metadata: &ObjectMeta) -> NetworkPolicy {
     NetworkPolicy {
-        metadata: object_meta(oref, "deny-all"),
+        metadata: object_meta(base_metadata, "deny-all"),
         spec: Some(NetworkPolicySpec {
             policy_types: Some(vec!["Egress".into(), "Ingress".into()]),
             ..Default::default()
@@ -28,9 +28,9 @@ fn deny_all(oref: &OwnerReference) -> NetworkPolicy {
     }
 }
 
-fn allow_dns(oref: &OwnerReference) -> NetworkPolicy {
+fn allow_dns(base_metadata: &ObjectMeta) -> NetworkPolicy {
     NetworkPolicy {
-        metadata: object_meta(oref, "allow-egress-to-kube-dns"),
+        metadata: object_meta(base_metadata, "allow-egress-to-kube-dns"),
         spec: Some(NetworkPolicySpec {
             policy_types: Some(vec!["Egress".into()]),
             egress: Some(vec![NetworkPolicyEgressRule {
@@ -71,11 +71,11 @@ fn allow_dns(oref: &OwnerReference) -> NetworkPolicy {
     }
 }
 
-fn allow_public(oref: &OwnerReference) -> NetworkPolicy {
+fn allow_public(base_metadata: &ObjectMeta) -> NetworkPolicy {
     NetworkPolicy {
-        metadata: object_meta(oref, "allow-restate-egress-to-public-internet"),
+        metadata: object_meta(base_metadata, "allow-restate-egress-to-public-internet"),
         spec: Some(NetworkPolicySpec {
-            pod_selector: label_selector(&oref.name),
+            pod_selector: label_selector(base_metadata),
             policy_types: Some(vec!["Egress".into()]),
             egress: Some(vec![NetworkPolicyEgressRule {
                 to: Some(vec![
@@ -117,12 +117,12 @@ fn allow_public(oref: &OwnerReference) -> NetworkPolicy {
 
 const AWS_POD_IDENTITY_POLICY_NAME: &str = "allow-restate-egress-to-aws-pod-identity";
 
-fn allow_aws_pod_identity(oref: &OwnerReference) -> NetworkPolicy {
+fn allow_aws_pod_identity(base_metadata: &ObjectMeta) -> NetworkPolicy {
     // https://docs.aws.amazon.com/eks/latest/userguide/pod-id-how-it-works.html
     NetworkPolicy {
-        metadata: object_meta(oref, AWS_POD_IDENTITY_POLICY_NAME),
+        metadata: object_meta(base_metadata, AWS_POD_IDENTITY_POLICY_NAME),
         spec: Some(NetworkPolicySpec {
-            pod_selector: label_selector(&oref.name),
+            pod_selector: label_selector(base_metadata),
             policy_types: Some(vec!["Egress".into()]),
             egress: Some(vec![NetworkPolicyEgressRule {
                 to: Some(vec![
@@ -155,13 +155,13 @@ fn allow_aws_pod_identity(oref: &OwnerReference) -> NetworkPolicy {
 fn allow_access(
     port_name: &str,
     port: i32,
-    oref: &OwnerReference,
+    base_metadata: &ObjectMeta,
     peers: Option<&[NetworkPolicyPeer]>,
 ) -> NetworkPolicy {
     NetworkPolicy {
-        metadata: object_meta(oref, format!("allow-{port_name}-access")),
+        metadata: object_meta(base_metadata, format!("allow-{port_name}-access")),
         spec: Some(NetworkPolicySpec {
-            pod_selector: label_selector(&oref.name),
+            pod_selector: label_selector(base_metadata),
             policy_types: Some(vec!["Ingress".into()]),
             ingress: peers.map(|peers| {
                 vec![NetworkPolicyIngressRule {
@@ -179,13 +179,13 @@ fn allow_access(
 }
 
 fn allow_egress(
-    oref: &OwnerReference,
+    base_metadata: &ObjectMeta,
     egress: Option<&[crate::NetworkPolicyEgressRule]>,
 ) -> NetworkPolicy {
     NetworkPolicy {
-        metadata: object_meta(oref, "allow-restate-egress"),
+        metadata: object_meta(base_metadata, "allow-restate-egress"),
         spec: Some(NetworkPolicySpec {
-            pod_selector: label_selector(&oref.name),
+            pod_selector: label_selector(base_metadata),
             policy_types: Some(vec!["Egress".into()]),
             egress: egress.map(|e| e.iter().map(|r| r.clone().into()).collect()), // if none, this policy will do nothing
             ..Default::default()
@@ -196,24 +196,29 @@ fn allow_egress(
 pub async fn reconcile_network_policies(
     client: Client,
     namespace: &str,
-    oref: &OwnerReference,
+    base_metadata: &ObjectMeta,
     network_peers: Option<&RestateClusterNetworkPeers>,
     network_egress_rules: Option<&[crate::NetworkPolicyEgressRule]>,
     aws_pod_identity_enabled: bool,
 ) -> Result<(), Error> {
     let np_api: Api<NetworkPolicy> = Api::namespaced(client, namespace);
 
-    apply_network_policy(namespace, &np_api, deny_all(oref)).await?;
-    apply_network_policy(namespace, &np_api, allow_dns(oref)).await?;
-    apply_network_policy(namespace, &np_api, allow_public(oref)).await?;
+    apply_network_policy(namespace, &np_api, deny_all(base_metadata)).await?;
+    apply_network_policy(namespace, &np_api, allow_dns(base_metadata)).await?;
+    apply_network_policy(namespace, &np_api, allow_public(base_metadata)).await?;
 
     if aws_pod_identity_enabled {
-        apply_network_policy(namespace, &np_api, allow_aws_pod_identity(oref)).await?
+        apply_network_policy(namespace, &np_api, allow_aws_pod_identity(base_metadata)).await?
     } else {
         delete_network_policy(namespace, &np_api, AWS_POD_IDENTITY_POLICY_NAME).await?
     }
 
-    apply_network_policy(namespace, &np_api, allow_egress(oref, network_egress_rules)).await?;
+    apply_network_policy(
+        namespace,
+        &np_api,
+        allow_egress(base_metadata, network_egress_rules),
+    )
+    .await?;
 
     apply_network_policy(
         namespace,
@@ -221,7 +226,7 @@ pub async fn reconcile_network_policies(
         allow_access(
             "ingress",
             8080,
-            oref,
+            base_metadata,
             network_peers.and_then(|peers| peers.ingress.as_deref()),
         ),
     )
@@ -233,7 +238,7 @@ pub async fn reconcile_network_policies(
         allow_access(
             "admin",
             9070,
-            oref,
+            base_metadata,
             network_peers.and_then(|peers| peers.admin.as_deref()),
         ),
     )
@@ -245,7 +250,7 @@ pub async fn reconcile_network_policies(
         allow_access(
             "metrics",
             5122,
-            oref,
+            base_metadata,
             network_peers.and_then(|peers| peers.metrics.as_deref()),
         ),
     )
