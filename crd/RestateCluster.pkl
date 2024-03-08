@@ -6,6 +6,7 @@ module dev.restate.v1.RestateCluster
 extends "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/K8sResource.pkl"
 
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/apimachinery/pkg/apis/meta/v1/ObjectMeta.pkl"
+import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/PodSpec.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/EnvVar.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/ResourceRequirements.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/networking/v1/NetworkPolicy.pkl"
@@ -40,6 +41,15 @@ class Spec {
 
 /// Compute configuration
 class Compute {
+  /// Specifies the DNS parameters of the Restate pod. Parameters specified here will be merged to the
+  /// generated DNS configuration based on DNSPolicy.
+  dnsConfig: PodSpec.PodDNSConfig?
+
+  /// Set DNS policy for the pod. Defaults to "ClusterFirst". Valid values are 'ClusterFirstWithHostNet',
+  /// 'ClusterFirst', 'Default' or 'None'. DNS parameters given in DNSConfig will be merged with the
+  /// policy selected with DNSPolicy.
+  dnsPolicy: String?
+
   /// List of environment variables to set in the container; these may override defaults
   env: Listing<EnvVar>?
 
@@ -61,9 +71,13 @@ class Compute {
 
 /// Security configuration
 class Security {
-  /// if set, create a AWS PodIdentityAssociation using the ACK CRD in order to give the Restate pod
+  /// If set, create an AWS PodIdentityAssociation using the ACK CRD in order to give the Restate pod
   /// access to this role and allow the cluster to reach the Pod Identity agent.
   awsPodIdentityAssociationRoleArn: String?
+
+  /// If set, create an AWS SecurityGroupPolicy CRD object to place the Restate pod into these security
+  /// groups
+  awsPodSecurityGroups: Listing<String>?
 
   /// Egress rules to allow the cluster to make outbound requests; this is in addition to the default of
   /// allowing public internet access and cluster DNS access. Providing a single empty rule will allow

@@ -44,6 +44,37 @@ spec:
               compute:
                 description: Compute configuration
                 properties:
+                  dnsConfig:
+                    description: Specifies the DNS parameters of the Restate pod. Parameters specified here will be merged to the generated DNS configuration based on DNSPolicy.
+                    nullable: true
+                    properties:
+                      nameservers:
+                        description: A list of DNS name server IP addresses. This will be appended to the base nameservers generated from DNSPolicy. Duplicated nameservers will be removed.
+                        items:
+                          type: string
+                        type: array
+                      options:
+                        description: A list of DNS resolver options. This will be merged with the base options generated from DNSPolicy. Duplicated entries will be removed. Resolution options given in Options will override those that appear in the base DNSPolicy.
+                        items:
+                          description: PodDNSConfigOption defines DNS resolver options of a pod.
+                          properties:
+                            name:
+                              description: Required.
+                              type: string
+                            value:
+                              type: string
+                          type: object
+                        type: array
+                      searches:
+                        description: A list of DNS search domains for host-name lookup. This will be appended to the base search paths generated from DNSPolicy. Duplicated search paths will be removed.
+                        items:
+                          type: string
+                        type: array
+                    type: object
+                  dnsPolicy:
+                    description: Set DNS policy for the pod. Defaults to "ClusterFirst". Valid values are 'ClusterFirstWithHostNet', 'ClusterFirst', 'Default' or 'None'. DNS parameters given in DNSConfig will be merged with the policy selected with DNSPolicy.
+                    nullable: true
+                    type: string
                   env:
                     description: List of environment variables to set in the container; these may override defaults
                     items:
@@ -178,9 +209,15 @@ spec:
                 nullable: true
                 properties:
                   awsPodIdentityAssociationRoleArn:
-                    description: if set, create a AWS PodIdentityAssociation using the ACK CRD in order to give the Restate pod access to this role and allow the cluster to reach the Pod Identity agent.
+                    description: If set, create an AWS PodIdentityAssociation using the ACK CRD in order to give the Restate pod access to this role and allow the cluster to reach the Pod Identity agent.
                     nullable: true
                     type: string
+                  awsPodSecurityGroups:
+                    description: If set, create an AWS SecurityGroupPolicy CRD object to place the Restate pod into these security groups
+                    items:
+                      type: string
+                    nullable: true
+                    type: array
                   networkEgressRules:
                     description: Egress rules to allow the cluster to make outbound requests; this is in addition to the default of allowing public internet access and cluster DNS access. Providing a single empty rule will allow all outbound traffic - not recommended
                     items:

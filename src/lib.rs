@@ -51,3 +51,4 @@ mod reconcilers;
 
 /// External CRDs
 mod podidentityassociations;
+mod securitygrouppolicies;

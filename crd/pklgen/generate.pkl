@@ -1,6 +1,7 @@
 amends "package://pkg.pkl-lang.org/pkl-pantry/k8s.contrib.crd@1.0.0#/generate.pkl"
 
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/ResourceRequirements.pkl"
+import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/PodSpec.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/networking/v1/NetworkPolicy.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/EnvVar.pkl"
 
@@ -10,6 +11,7 @@ converters {
   ["restateclusters.restate.dev"] {
     [List("spec", "compute", "env", "env")] = EnvVar
     [List("spec", "compute", "resources")] = ResourceRequirements
+    [List("spec", "compute", "dnsConfig")] = PodSpec.PodDNSConfig
     [List("spec", "security", "networkEgressRules", "networkEgressRule")] = NetworkPolicy.NetworkPolicyEgressRule
     [List("spec", "security", "networkPeers", "admin", "admin")] = NetworkPolicy.NetworkPolicyPeer
     [List("spec", "security", "networkPeers", "ingress", "ingres")] = NetworkPolicy.NetworkPolicyPeer
