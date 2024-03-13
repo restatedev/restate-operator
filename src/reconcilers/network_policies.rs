@@ -125,22 +125,13 @@ fn allow_aws_pod_identity(base_metadata: &ObjectMeta) -> NetworkPolicy {
             pod_selector: label_selector(base_metadata),
             policy_types: Some(vec!["Egress".into()]),
             egress: Some(vec![NetworkPolicyEgressRule {
-                to: Some(vec![
-                    NetworkPolicyPeer {
-                        ip_block: Some(IPBlock {
-                            cidr: "169.254.170.23/32".into(),
-                            except: None,
-                        }),
-                        ..Default::default()
-                    },
-                    NetworkPolicyPeer {
-                        ip_block: Some(IPBlock {
-                            cidr: "fd00:ec2::23/128".into(),
-                            except: None,
-                        }),
-                        ..Default::default()
-                    },
-                ]),
+                to: Some(vec![NetworkPolicyPeer {
+                    ip_block: Some(IPBlock {
+                        cidr: "169.254.170.23/32".into(),
+                        except: None,
+                    }),
+                    ..Default::default()
+                }]),
                 ports: Some(vec![NetworkPolicyPort {
                     port: Some(IntOrString::Int(80)),
                     protocol: Some("TCP".into()),
