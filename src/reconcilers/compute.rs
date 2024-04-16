@@ -129,9 +129,12 @@ fn restate_service(
     }
 }
 
-fn env(custom: Option<&[EnvVar]>) -> Option<Vec<EnvVar>> {
+fn env(cluster_name: &str, custom: Option<&[EnvVar]>) -> Option<Vec<EnvVar>> {
     let defaults = [
-        ("RESTATE_OBSERVABILITY__LOG__FORMAT", "Json"),
+        ("RESTATE_OBSERVABILITY__LOG__FORMAT", "Json"), // todo: old env var can be removed soon
+        ("RESTATE_LOG_FORMAT", "json"),
+        ("RESTATE_CLUSTER_NAME", cluster_name),
+        ("RESTATE_BASE_DIR", "/target"),
         ("RUST_LOG", "info,restate=debug"),
         ("RUST_BACKTRACE", "1"),
         ("RUST_LIB_BACKTRACE", "0"),
@@ -196,7 +199,10 @@ fn restate_statefulset(
                         name: "restate".into(),
                         image: Some(compute.image.clone()),
                         image_pull_policy: compute.image_pull_policy.clone(),
-                        env: env(compute.env.as_deref()),
+                        env: env(
+                            base_metadata.name.as_ref().unwrap().as_str(),
+                            compute.env.as_deref(),
+                        ),
                         ports: Some(vec![
                             ContainerPort {
                                 name: Some("ingress".into()),
