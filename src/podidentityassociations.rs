@@ -6,6 +6,7 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::hash::Hash;
 
 /// PodIdentityAssociationSpec defines the desired state of PodIdentityAssociation.
 ///
@@ -162,7 +163,7 @@ pub struct PodIdentityAssociationRoleRefFrom {
 }
 
 /// PodIdentityAssociationStatus defines the observed state of PodIdentityAssociation
-#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Hash)]
 pub struct PodIdentityAssociationStatus {
     /// All CRs managed by ACK have a common `Status.ACKResourceMetadata` member
     /// that is used to contain resource sync state, account ownership,
@@ -208,7 +209,7 @@ pub struct PodIdentityAssociationStatus {
 /// All CRs managed by ACK have a common `Status.ACKResourceMetadata` member
 /// that is used to contain resource sync state, account ownership,
 /// constructed ARN for the resource
-#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Hash)]
 pub struct PodIdentityAssociationStatusAckResourceMetadata {
     /// ARN is the Amazon Resource Name for the resource. This is a
     /// globally-unique identifier and is set only by the ACK service controller
@@ -231,7 +232,7 @@ pub struct PodIdentityAssociationStatusAckResourceMetadata {
 /// Condition is the common struct used by all CRDs managed by ACK service
 /// controllers to indicate terminal states  of the CR and its backend AWS
 /// service API resource
-#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Hash)]
 pub struct PodIdentityAssociationStatusConditions {
     /// Last time the condition transitioned from one status to another.
     #[serde(
