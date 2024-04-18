@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -12,9 +13,10 @@ use k8s_openapi::api::core::v1::{
 use k8s_openapi::api::networking::v1;
 use k8s_openapi::api::networking::v1::{NetworkPolicy, NetworkPolicyPeer, NetworkPolicyPort};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{APIGroup, ObjectMeta};
+use kube::core::object::HasStatus;
 use kube::core::PartialObjectMeta;
 use kube::runtime::reflector::{ObjectRef, Store};
-use kube::runtime::{metadata_watcher, reflector, watcher, WatchStreamExt};
+use kube::runtime::{metadata_watcher, reflector, watcher, Predicate, WatchStreamExt};
 use kube::{
     api::{Api, ListParams, Patch, PatchParams, ResourceExt},
     client::Client,
@@ -690,12 +692,17 @@ pub async fn run(state: State) {
         .touched_objects()
         .default_backoff();
 
+    let np_watcher = metadata_watcher(np_api, cfg.clone())
+        .touched_objects()
+        // netpols are really bad for apply-loops for some reason?
+        .predicate_filter(changed_predicate);
+
     let controller = Controller::new(rc_api, rc_cfg.clone())
         .shutdown_on_signal()
         .owns(ns_api, cfg.clone())
         .owns(svc_api, cfg.clone())
         .owns(svcacc_api, cfg.clone())
-        .owns(np_api, cfg.clone())
+        .owns_stream(np_watcher)
         .owns_stream(ss_reflector)
         .watches_stream(
             pvc_meta_reflector,
@@ -712,14 +719,24 @@ pub async fn run(state: State) {
             },
         );
     let controller = if pod_identity_association_installed {
+        let pia_watcher = watcher(pia_api, cfg.clone())
+            .touched_objects()
+            // avoid apply loops that seem to happen with crds
+            .predicate_filter(changed_predicate.combine(status_predicate));
+
         controller
-            .owns(pia_api, cfg.clone())
+            .owns_stream(pia_watcher)
             .owns(pod_api, cfg.clone())
     } else {
         controller
     };
     let controller = if security_group_policy_installed {
-        controller.owns(sgp_api, cfg.clone())
+        let sgp_watcher = metadata_watcher(sgp_api, cfg.clone())
+            .touched_objects()
+            // avoid apply loops that seem to happen with crds
+            .predicate_filter(changed_predicate);
+
+        controller.owns_stream(sgp_watcher)
     } else {
         controller
     };
@@ -737,4 +754,27 @@ pub async fn run(state: State) {
         .filter_map(|x| async move { Result::ok(x) })
         .for_each(|_| futures::future::ready(()))
         .await;
+}
+
+fn changed_predicate<K: Resource>(obj: &K) -> Option<u64> {
+    let mut hasher = DefaultHasher::new();
+    if let Some(g) = obj.meta().generation {
+        // covers spec but not metadata or status
+        g.hash(&mut hasher)
+    }
+    obj.labels().hash(&mut hasher);
+    obj.annotations().hash(&mut hasher);
+    // we don't care about status (and don't currently watch anything but metadata)
+    Some(hasher.finish())
+}
+
+fn status_predicate<K: Resource + HasStatus>(obj: &K) -> Option<u64>
+where
+    K::Status: Hash,
+{
+    let mut hasher = DefaultHasher::new();
+    if let Some(s) = obj.status() {
+        s.hash(&mut hasher)
+    }
+    Some(hasher.finish())
 }
