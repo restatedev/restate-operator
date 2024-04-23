@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -40,6 +41,8 @@ use crate::podidentityassociations::PodIdentityAssociation;
 use crate::reconcilers::compute::reconcile_compute;
 use crate::reconcilers::network_policies::reconcile_network_policies;
 use crate::reconcilers::object_meta;
+use crate::reconcilers::signing_key::reconcile_signing_key;
+use crate::secretproviderclasses::SecretProviderClass;
 use crate::securitygrouppolicies::SecurityGroupPolicy;
 use crate::{telemetry, Error, Metrics, Result};
 
@@ -212,6 +215,8 @@ pub struct RestateClusterSecurity {
     /// of allowing public internet access and cluster DNS access. Providing a single empty rule will allow
     /// all outbound traffic - not recommended
     pub network_egress_rules: Option<Vec<NetworkPolicyEgressRule>>,
+    /// If set, configure the use of a private key to sign outbound requests from this cluster
+    pub request_signing_private_key: Option<RequestSigningPrivateKey>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
@@ -284,6 +289,37 @@ fn network_ports_schema(_: &mut schemars::gen::SchemaGenerator) -> Schema {
         .unwrap()
 }
 
+#[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestSigningPrivateKey {
+    /// The version of Restate request signing that the key is for; currently only "v1" accepted.
+    pub version: String,
+    /// A Kubernetes Secret source for the private key
+    pub secret: Option<SecretSigningKeySource>,
+    /// A CSI secret provider source for the private key
+    /// See https://secrets-store-csi-driver.sigs.k8s.io/concepts.html#secretproviderclass
+    pub secret_provider: Option<SecretProviderSigningKeySource>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretSigningKeySource {
+    /// The key of the secret to select from.  Must be a valid secret key.
+    pub key: String,
+    /// Name of the secret.
+    pub secret_name: String,
+}
+
+#[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
+pub struct SecretProviderSigningKeySource {
+    /// Configuration for specific provider
+    pub parameters: Option<BTreeMap<String, String>>,
+    /// Configuration for provider name
+    pub provider: Option<String>,
+    /// The path of the private key relative to the root of the mounted volume
+    pub path: PathBuf,
+}
+
 /// Status of the RestateCluster.
 /// This is set and managed automatically.
 /// Read-only.
@@ -326,6 +362,8 @@ pub struct Context {
     pub aws_pod_identity_association_cluster: Option<String>,
     // Whether the EKS SecurityGroupPolicy CRD is installed
     pub security_group_policy_installed: bool,
+    // Whether the SecretProviderClass CRD is installed
+    pub secret_provider_class_installed: bool,
     /// Diagnostics read by the web server
     pub diagnostics: Arc<RwLock<Diagnostics>>,
     /// Prometheus metrics
@@ -433,6 +471,17 @@ impl RestateCluster {
                 .security
                 .as_ref()
                 .map_or(false, |s| s.aws_pod_identity_association_role_arn.is_some()),
+        )
+        .await?;
+
+        reconcile_signing_key(
+            &ctx,
+            name,
+            &base_metadata,
+            self.spec
+                .security
+                .as_ref()
+                .and_then(|s| s.request_signing_private_key.as_ref()),
         )
         .await?;
 
@@ -616,6 +665,7 @@ impl State {
         pvc_meta_store: Store<PartialObjectMeta<PersistentVolumeClaim>>,
         ss_store: Store<StatefulSet>,
         security_group_policy_installed: bool,
+        secret_provider_class_installed: bool,
     ) -> Arc<Context> {
         Arc::new(Context {
             client,
@@ -623,6 +673,7 @@ impl State {
             ss_store,
             aws_pod_identity_association_cluster: self.aws_pod_identity_association_cluster.clone(),
             security_group_policy_installed,
+            secret_provider_class_installed,
             metrics: Metrics::default().register(&self.registry).unwrap(),
             diagnostics: self.diagnostics.clone(),
         })
@@ -643,10 +694,14 @@ pub async fn run(state: State) {
         }
     };
 
-    let (security_group_policy_installed, pod_identity_association_installed) = api_groups
+    let (
+        security_group_policy_installed,
+        pod_identity_association_installed,
+        secret_provider_class_installed,
+    ) = api_groups
         .groups
         .iter()
-        .fold((false, false), |(sgp, pia), group| {
+        .fold((false, false, false), |(sgp, pia, spc), group| {
             fn group_matches<R: Resource<DynamicType = ()>>(group: &APIGroup) -> bool {
                 group.name == R::group(&())
                     && group.versions.iter().any(|v| v.version == R::version(&()))
@@ -654,6 +709,7 @@ pub async fn run(state: State) {
             (
                 sgp || group_matches::<SecurityGroupPolicy>(group),
                 pia || group_matches::<PodIdentityAssociation>(group),
+                spc || group_matches::<SecretProviderClass>(group),
             )
         });
 
@@ -667,6 +723,7 @@ pub async fn run(state: State) {
     let pia_api = Api::<PodIdentityAssociation>::all(client.clone());
     let pod_api = Api::<Pod>::all(client.clone());
     let sgp_api = Api::<SecurityGroupPolicy>::all(client.clone());
+    let spc_api = Api::<SecretProviderClass>::all(client.clone());
 
     if state.aws_pod_identity_association_cluster.is_some() && !pod_identity_association_installed {
         error!("PodIdentityAssociation is not available on apiserver, but a pod identity association cluster was provided. Is the CRD installed?");
@@ -741,6 +798,16 @@ pub async fn run(state: State) {
     } else {
         controller
     };
+    let controller = if secret_provider_class_installed {
+        let spc_watcher = metadata_watcher(spc_api, cfg.clone())
+            .touched_objects()
+            // avoid apply loops that seem to happen with crds
+            .predicate_filter(changed_predicate);
+
+        controller.owns_stream(spc_watcher)
+    } else {
+        controller
+    };
     controller
         .run(
             reconcile,
@@ -750,6 +817,7 @@ pub async fn run(state: State) {
                 pvc_meta_store,
                 ss_store,
                 security_group_policy_installed,
+                secret_provider_class_installed,
             ),
         )
         .filter_map(|x| async move { Result::ok(x) })

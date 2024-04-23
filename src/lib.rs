@@ -1,3 +1,4 @@
+use reconcilers::signing_key::InvalidSigningKeyError;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -23,6 +24,9 @@ pub enum Error {
         reason: String,
         requeue_after: Option<Duration>,
     },
+
+    #[error(transparent)]
+    InvalidSigningKeyError(#[from] InvalidSigningKeyError),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -51,4 +55,5 @@ mod reconcilers;
 
 /// External CRDs
 mod podidentityassociations;
+mod secretproviderclasses;
 mod securitygrouppolicies;
