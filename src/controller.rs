@@ -474,7 +474,7 @@ impl RestateCluster {
         )
         .await?;
 
-        reconcile_signing_key(
+        let signing_key = reconcile_signing_key(
             &ctx,
             name,
             &base_metadata,
@@ -485,7 +485,7 @@ impl RestateCluster {
         )
         .await?;
 
-        reconcile_compute(&ctx, name, &base_metadata, &self.spec).await?;
+        reconcile_compute(&ctx, name, &base_metadata, &self.spec, signing_key).await?;
 
         Ok(())
     }

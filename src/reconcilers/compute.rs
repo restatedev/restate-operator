@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 use std::convert::Into;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetSpec, StatefulSetStatus};
@@ -131,7 +132,7 @@ fn restate_service(
     }
 }
 
-fn env(cluster_name: &str, custom: Option<&[EnvVar]>) -> Option<Vec<EnvVar>> {
+fn env(cluster_name: &str, custom: Option<&[EnvVar]>) -> Vec<EnvVar> {
     let defaults = [
         ("RESTATE_OBSERVABILITY__LOG__FORMAT", "Json"), // todo: old env var can be removed soon
         ("RESTATE_LOG_FORMAT", "json"),
@@ -157,9 +158,9 @@ fn env(cluster_name: &str, custom: Option<&[EnvVar]>) -> Option<Vec<EnvVar>> {
         });
 
     if let Some(custom) = custom {
-        Some(defaults.chain(custom.iter().cloned()).collect())
+        defaults.chain(custom.iter().cloned()).collect()
     } else {
-        Some(defaults.collect())
+        defaults.collect()
     }
 }
 
@@ -170,6 +171,7 @@ fn restate_statefulset(
     compute: &RestateClusterCompute,
     storage: &RestateClusterStorage,
     pod_annotations: Option<BTreeMap<String, String>>,
+    signing_key: Option<(Volume, PathBuf)>,
 ) -> StatefulSet {
     let metadata = object_meta(base_metadata, RESTATE_STATEFULSET_NAME);
     let labels = metadata.labels.clone();
@@ -181,6 +183,49 @@ fn restate_statefulset(
         (Some(annotations), None) | (None, Some(annotations)) => Some(annotations),
         (None, None) => None,
     };
+
+    let mut volume_mounts = vec![
+        VolumeMount {
+            name: "storage".into(),
+            mount_path: "/target".into(),
+            ..Default::default()
+        },
+        VolumeMount {
+            name: "tmp".into(),
+            mount_path: "/tmp".into(),
+            ..Default::default()
+        },
+    ];
+
+    let mut volumes = vec![Volume {
+        name: "tmp".into(),
+        empty_dir: Some(Default::default()),
+        ..Default::default()
+    }];
+
+    let mut env = env(
+        base_metadata.name.as_ref().unwrap().as_str(),
+        compute.env.as_deref(),
+    );
+
+    if let Some((volume, relative_path)) = signing_key {
+        let mut absolute_path = PathBuf::from("/signing-key");
+
+        volume_mounts.push(VolumeMount {
+            mount_path: absolute_path.to_str().unwrap().into(),
+            name: volume.name.clone(),
+            read_only: Some(true),
+            ..Default::default()
+        });
+        volumes.push(volume);
+        absolute_path.push(relative_path);
+        env.push(EnvVar {
+            name: "RESTATE_REQUEST_SIGNING_PRIVATE_KEY_PEM_FILE".into(),
+            value: Some(absolute_path.to_str().unwrap().into()),
+            value_from: None,
+        })
+    }
+
     StatefulSet {
         metadata,
         spec: Some(StatefulSetSpec {
@@ -201,10 +246,7 @@ fn restate_statefulset(
                         name: "restate".into(),
                         image: Some(compute.image.clone()),
                         image_pull_policy: compute.image_pull_policy.clone(),
-                        env: env(
-                            base_metadata.name.as_ref().unwrap().as_str(),
-                            compute.env.as_deref(),
-                        ),
+                        env: Some(env),
                         ports: Some(vec![
                             ContainerPort {
                                 name: Some("ingress".into()),
@@ -236,18 +278,7 @@ fn restate_statefulset(
                             allow_privilege_escalation: Some(false),
                             ..Default::default()
                         }),
-                        volume_mounts: Some(vec![
-                            VolumeMount {
-                                name: "storage".into(),
-                                mount_path: "/target".into(),
-                                ..Default::default()
-                            },
-                            VolumeMount {
-                                name: "tmp".into(),
-                                mount_path: "/tmp".into(),
-                                ..Default::default()
-                            },
-                        ]),
+                        volume_mounts: Some(volume_mounts),
                         ..Default::default()
                     }],
                     security_context: Some(PodSecurityContext {
@@ -263,11 +294,7 @@ fn restate_statefulset(
                     }),
                     service_account_name: Some("restate".into()),
                     termination_grace_period_seconds: Some(60),
-                    volumes: Some(vec![Volume {
-                        name: "tmp".into(),
-                        empty_dir: Some(Default::default()),
-                        ..Default::default()
-                    }]),
+                    volumes: Some(volumes),
                     ..Default::default()
                 }),
             },
@@ -306,6 +333,7 @@ pub async fn reconcile_compute(
     namespace: &str,
     base_metadata: &ObjectMeta,
     spec: &RestateClusterSpec,
+    signing_key: Option<(Volume, PathBuf)>,
 ) -> Result<(), Error> {
     let ss_api: Api<StatefulSet> = Api::namespaced(ctx.client.clone(), namespace);
     let pvc_api: Api<PersistentVolumeClaim> = Api::namespaced(ctx.client.clone(), namespace);
@@ -436,7 +464,13 @@ pub async fn reconcile_compute(
     let ss = apply_stateful_set(
         namespace,
         &ss_api,
-        restate_statefulset(base_metadata, &spec.compute, &spec.storage, pod_annotations),
+        restate_statefulset(
+            base_metadata,
+            &spec.compute,
+            &spec.storage,
+            pod_annotations,
+            signing_key,
+        ),
     )
     .await?;
 
