@@ -48,6 +48,7 @@ rules:
       - persistentvolumeclaims
       - pods
       - securitygrouppolicies
+      - secretproviderclasses
     verbs:
       - get
       - list
@@ -59,11 +60,13 @@ rules:
       - apps
       - networking.k8s.io
       - vpcresources.k8s.aws
+      - secrets-store.csi.x-k8s.io
   - resources:
       - statefulsets
       - networkpolicies
       - pods
       - securitygrouppolicies
+      - secretproviderclasses
     verbs:
       - delete
     apiGroups:
@@ -71,6 +74,7 @@ rules:
       - apps
       - networking.k8s.io
       - vpcresources.k8s.aws
+      - secrets-store.csi.x-k8s.io
   {{- if .Values.awsPodIdentityAssociationCluster }}
   - resources:
       - podidentityassociations
