@@ -201,7 +201,9 @@ fn env_schema(g: &mut schemars::gen::SchemaGenerator) -> Schema {
 #[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RestateClusterSecurity {
+    /// Annotations to set on the Service created for Restate
     pub service_annotations: Option<BTreeMap<String, String>>,
+    /// Annotations to set on the ServiceAccount created for Restate
     pub service_account_annotations: Option<BTreeMap<String, String>>,
     /// If set, create an AWS PodIdentityAssociation using the ACK CRD in order to give the Restate pod access to this role and
     /// allow the cluster to reach the Pod Identity agent.
@@ -289,6 +291,8 @@ fn network_ports_schema(_: &mut schemars::gen::SchemaGenerator) -> Schema {
         .unwrap()
 }
 
+/// Configuration for request signing private keys. Exactly one source of 'secret', 'secretProvider'
+/// must be provided.
 #[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestSigningPrivateKey {
@@ -296,8 +300,7 @@ pub struct RequestSigningPrivateKey {
     pub version: String,
     /// A Kubernetes Secret source for the private key
     pub secret: Option<SecretSigningKeySource>,
-    /// A CSI secret provider source for the private key
-    /// See https://secrets-store-csi-driver.sigs.k8s.io/concepts.html#secretproviderclass
+    /// A CSI secret provider source for the private key; will create a SecretProviderClass.
     pub secret_provider: Option<SecretProviderSigningKeySource>,
 }
 

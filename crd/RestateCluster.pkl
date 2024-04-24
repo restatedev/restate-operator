@@ -91,8 +91,10 @@ class Security {
   /// If set, configure the use of a private key to sign outbound requests from this cluster
   requestSigningPrivateKey: RequestSigningPrivateKey?
 
+  /// Annotations to set on the ServiceAccount created for Restate
   serviceAccountAnnotations: Mapping<String, String>?
 
+  /// Annotations to set on the Service created for Restate
   serviceAnnotations: Mapping<String, String>?
 }
 
@@ -111,8 +113,7 @@ class RequestSigningPrivateKey {
   /// A Kubernetes Secret source for the private key
   secret: Secret?
 
-  /// A CSI secret provider source for the private key See
-  /// https://secrets-store-csi-driver.sigs.k8s.io/concepts.html#secretproviderclass
+  /// A CSI secret provider source for the private key; will create a SecretProviderClass.
   secretProvider: SecretProvider?
 
   /// The version of Restate request signing that the key is for; currently only "v1" accepted.
@@ -128,8 +129,7 @@ class Secret {
   secretName: String
 }
 
-/// A CSI secret provider source for the private key See
-/// https://secrets-store-csi-driver.sigs.k8s.io/concepts.html#secretproviderclass
+/// A CSI secret provider source for the private key; will create a SecretProviderClass.
 class SecretProvider {
   /// Configuration for specific provider
   parameters: Mapping<String, String>?

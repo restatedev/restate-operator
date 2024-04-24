@@ -625,7 +625,7 @@ spec:
                         - secretName
                         type: object
                       secretProvider:
-                        description: A CSI secret provider source for the private key See https://secrets-store-csi-driver.sigs.k8s.io/concepts.html#secretproviderclass
+                        description: A CSI secret provider source for the private key; will create a SecretProviderClass.
                         nullable: true
                         properties:
                           parameters:
@@ -653,11 +653,13 @@ spec:
                   serviceAccountAnnotations:
                     additionalProperties:
                       type: string
+                    description: Annotations to set on the ServiceAccount created for Restate
                     nullable: true
                     type: object
                   serviceAnnotations:
                     additionalProperties:
                       type: string
+                    description: Annotations to set on the Service created for Restate
                     nullable: true
                     type: object
                 type: object
