@@ -220,7 +220,7 @@ fn restate_statefulset(
         volumes.push(volume);
         absolute_path.push(relative_path);
         env.push(EnvVar {
-            name: "RESTATE_REQUEST_SIGNING_PRIVATE_KEY_PEM_FILE".into(),
+            name: "RESTATE_REQUEST_IDENTITY_PRIVATE_KEY_PEM_FILE".into(),
             value: Some(absolute_path.to_str().unwrap().into()),
             value_from: None,
         })
