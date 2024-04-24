@@ -88,8 +88,13 @@ class Security {
   /// Set any of these to [] to allow all traffic - not recommended.
   networkPeers: NetworkPeers?
 
+  /// If set, configure the use of a private key to sign outbound requests from this cluster
+  requestSigningPrivateKey: RequestSigningPrivateKey?
+
+  /// Annotations to set on the ServiceAccount created for Restate
   serviceAccountAnnotations: Mapping<String, String>?
 
+  /// Annotations to set on the Service created for Restate
   serviceAnnotations: Mapping<String, String>?
 }
 
@@ -101,6 +106,39 @@ class NetworkPeers {
   ingress: Listing<NetworkPolicy.NetworkPolicyPeer>?
 
   metrics: Listing<NetworkPolicy.NetworkPolicyPeer>?
+}
+
+/// If set, configure the use of a private key to sign outbound requests from this cluster
+class RequestSigningPrivateKey {
+  /// A Kubernetes Secret source for the private key
+  secret: Secret?
+
+  /// A CSI secret provider source for the private key; will create a SecretProviderClass.
+  secretProvider: SecretProvider?
+
+  /// The version of Restate request signing that the key is for; currently only "v1" accepted.
+  version: String
+}
+
+/// A Kubernetes Secret source for the private key
+class Secret {
+  /// The key of the secret to select from. Must be a valid secret key.
+  key: String
+
+  /// Name of the secret.
+  secretName: String
+}
+
+/// A CSI secret provider source for the private key; will create a SecretProviderClass.
+class SecretProvider {
+  /// Configuration for specific provider
+  parameters: Mapping<String, String>?
+
+  /// The path of the private key relative to the root of the mounted volume
+  path: String
+
+  /// Configuration for provider name
+  provider: String?
 }
 
 /// Storage configuration

@@ -606,14 +606,60 @@ spec:
                         type: array
                         x-kubernetes-list-type: atomic
                     type: object
+                  requestSigningPrivateKey:
+                    description: If set, configure the use of a private key to sign outbound requests from this cluster
+                    nullable: true
+                    properties:
+                      secret:
+                        description: A Kubernetes Secret source for the private key
+                        nullable: true
+                        properties:
+                          key:
+                            description: The key of the secret to select from.  Must be a valid secret key.
+                            type: string
+                          secretName:
+                            description: Name of the secret.
+                            type: string
+                        required:
+                        - key
+                        - secretName
+                        type: object
+                      secretProvider:
+                        description: A CSI secret provider source for the private key; will create a SecretProviderClass.
+                        nullable: true
+                        properties:
+                          parameters:
+                            additionalProperties:
+                              type: string
+                            description: Configuration for specific provider
+                            nullable: true
+                            type: object
+                          path:
+                            description: The path of the private key relative to the root of the mounted volume
+                            type: string
+                          provider:
+                            description: Configuration for provider name
+                            nullable: true
+                            type: string
+                        required:
+                        - path
+                        type: object
+                      version:
+                        description: The version of Restate request signing that the key is for; currently only "v1" accepted.
+                        type: string
+                    required:
+                    - version
+                    type: object
                   serviceAccountAnnotations:
                     additionalProperties:
                       type: string
+                    description: Annotations to set on the ServiceAccount created for Restate
                     nullable: true
                     type: object
                   serviceAnnotations:
                     additionalProperties:
                       type: string
+                    description: Annotations to set on the Service created for Restate
                     nullable: true
                     type: object
                 type: object
