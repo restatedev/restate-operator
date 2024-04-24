@@ -1,10 +1,10 @@
 [package]
 name = "restate-operator"
-version = "0.5.2"
+version = "0.6.0"
 authors = ["restate.dev"]
 edition = "2021"
 rust-version = "1.75"
-license = "BUSL-1.1"
+license = "MIT"
 repository = "https://github.com/restatedev/restate-operator"
 description = "Restate makes distributed applications easy!"
 
