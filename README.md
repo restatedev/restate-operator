@@ -5,6 +5,8 @@ A Kubernetes operator that creates [Restate](https://restate.dev/) clusters. Sup
 - Online volume expansion
 - Network security via `NetworkPolicy`
 - Manage credentials using [EKS Pod Identity](https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html)
+- Manage security groups using [Security Groups for Pods](https://docs.aws.amazon.com/eks/latest/userguide/security-groups-for-pods.html)
+- Sign requests using private keys from Secrets or CSI Secret Store
 
 ## Usage
 
