@@ -4,6 +4,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
 
 pub mod compute;
 pub mod network_policies;
+mod quantity_parser;
 pub mod signing_key;
 
 // resource_labels returns labels to apply to all created resources on top of the RestateCluster labels

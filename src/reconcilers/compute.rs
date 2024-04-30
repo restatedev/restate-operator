@@ -29,6 +29,8 @@ use crate::securitygrouppolicies::{
 };
 use crate::{Context, Error, RestateClusterCompute, RestateClusterSpec, RestateClusterStorage};
 
+use super::quantity_parser::QuantityParser;
+
 fn restate_service_account(
     base_metadata: &ObjectMeta,
     annotations: Option<&BTreeMap<String, String>>,
@@ -717,16 +719,20 @@ async fn resize_statefulset_storage(
         None => return Ok(()),
     };
 
-    let existing_resources = existing
+    let existing_storage_request = existing
         .spec
         .as_ref()
         .and_then(|spec| spec.volume_claim_templates.as_ref())
         .and_then(|templates| templates.first())
         .and_then(|storage| storage.spec.as_ref())
-        .and_then(|spec| spec.resources.as_ref());
+        .and_then(|spec| spec.resources.as_ref())
+        .and_then(|resources| resources.requests.as_ref())
+        .and_then(|requests| requests.get("storage").map(|storage| storage.to_bytes()));
 
-    if existing_resources == resources.as_ref() {
-        return Ok(()); // nothing to do
+    match existing_storage_request {
+        // check if we can interpret the statefulset as having the same storage request
+        Some(Ok(Some(bytes))) if bytes == storage.storage_request_bytes => return Ok(()),
+        _ => {}
     }
 
     // expansion case - we would have failed when updating the pvcs if this was a contraction
