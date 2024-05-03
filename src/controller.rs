@@ -8,13 +8,15 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use k8s_openapi::api::apps::v1::StatefulSet;
+use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{
-    EnvVar, Namespace, PersistentVolumeClaim, Pod, PodDNSConfig, ResourceRequirements, Service,
+    EnvVar, Namespace, PersistentVolumeClaim, PodDNSConfig, ResourceRequirements, Service,
     ServiceAccount,
 };
 use k8s_openapi::api::networking::v1;
 use k8s_openapi::api::networking::v1::{NetworkPolicy, NetworkPolicyPeer, NetworkPolicyPort};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{APIGroup, ObjectMeta};
+
 use kube::core::object::HasStatus;
 use kube::core::PartialObjectMeta;
 use kube::runtime::reflector::{ObjectRef, Store};
@@ -417,7 +419,7 @@ async fn reconcile(rc: Arc<RestateCluster>, ctx: Arc<Context>) -> Result<Action>
     }
 }
 
-fn error_policy(_rc: Arc<RestateCluster>, _error: &Error, _ctx: Arc<Context>) -> Action {
+fn error_policy<K, C>(_rc: Arc<K>, _error: &Error, _ctx: C) -> Action {
     Action::requeue(Duration::from_secs(30))
 }
 
@@ -724,7 +726,7 @@ pub async fn run(state: State) {
     let svcacc_api = Api::<ServiceAccount>::all(client.clone());
     let np_api = Api::<NetworkPolicy>::all(client.clone());
     let pia_api = Api::<PodIdentityAssociation>::all(client.clone());
-    let pod_api = Api::<Pod>::all(client.clone());
+    let job_api = Api::<Job>::all(client.clone());
     let sgp_api = Api::<SecurityGroupPolicy>::all(client.clone());
     let spc_api = Api::<SecretProviderClass>::all(client.clone());
 
@@ -785,9 +787,10 @@ pub async fn run(state: State) {
             // avoid apply loops that seem to happen with crds
             .predicate_filter(changed_predicate.combine(status_predicate));
 
-        controller
-            .owns_stream(pia_watcher)
-            .owns(pod_api, cfg.clone())
+        controller.owns_stream(pia_watcher).owns(
+            job_api,
+            Config::default().labels("app.kubernetes.io/name=restate-pia-canary"),
+        )
     } else {
         controller
     };

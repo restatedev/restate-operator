@@ -47,6 +47,7 @@ rules:
       - statefulsets
       - persistentvolumeclaims
       - pods
+      - jobs
       - securitygrouppolicies
       - secretproviderclasses
     verbs:
@@ -64,7 +65,7 @@ rules:
   - resources:
       - statefulsets
       - networkpolicies
-      - pods
+      - jobs
       - securitygrouppolicies
       - secretproviderclasses
     verbs:
