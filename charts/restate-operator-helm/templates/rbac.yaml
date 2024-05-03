@@ -58,6 +58,7 @@ rules:
       - patch
     apiGroups:
       - ''
+      - batch
       - apps
       - networking.k8s.io
       - vpcresources.k8s.aws
@@ -71,7 +72,7 @@ rules:
     verbs:
       - delete
     apiGroups:
-      - ''
+      - batch
       - apps
       - networking.k8s.io
       - vpcresources.k8s.aws
