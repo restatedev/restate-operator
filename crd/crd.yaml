@@ -41,6 +41,10 @@ spec:
           spec:
             description: Represents the configuration of a Restate Cluster
             properties:
+              clusterName:
+                description: clusterName sets the RESTATE_CLUSTER_NAME environment variable. Defaults to the object name.
+                nullable: true
+                type: string
               compute:
                 description: Compute configuration
                 properties:

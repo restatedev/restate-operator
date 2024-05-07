@@ -29,6 +29,9 @@ status: Status?
 
 /// Represents the configuration of a Restate Cluster
 class Spec {
+  /// clusterName sets the RESTATE_CLUSTER_NAME environment variable. Defaults to the object name.
+  clusterName: String?
+
   /// Compute configuration
   compute: Compute
 

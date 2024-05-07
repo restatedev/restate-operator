@@ -27,7 +27,7 @@ use crate::reconcilers::{label_selector, mandatory_labels, object_meta};
 use crate::securitygrouppolicies::{
     SecurityGroupPolicy, SecurityGroupPolicySecurityGroups, SecurityGroupPolicySpec,
 };
-use crate::{Context, Error, RestateClusterCompute, RestateClusterSpec, RestateClusterStorage};
+use crate::{Context, Error, RestateClusterSpec, RestateClusterStorage};
 
 use super::quantity_parser::QuantityParser;
 
@@ -170,8 +170,7 @@ const RESTATE_STATEFULSET_NAME: &str = "restate";
 
 fn restate_statefulset(
     base_metadata: &ObjectMeta,
-    compute: &RestateClusterCompute,
-    storage: &RestateClusterStorage,
+    spec: &RestateClusterSpec,
     pod_annotations: Option<BTreeMap<String, String>>,
     signing_key: Option<(Volume, PathBuf)>,
 ) -> StatefulSet {
@@ -206,8 +205,11 @@ fn restate_statefulset(
     }];
 
     let mut env = env(
-        base_metadata.name.as_ref().unwrap().as_str(),
-        compute.env.as_deref(),
+        spec.cluster_name
+            .as_ref()
+            .or(base_metadata.name.as_ref())
+            .unwrap(),
+        spec.compute.env.as_deref(),
     );
 
     if let Some((volume, relative_path)) = signing_key {
@@ -231,7 +233,7 @@ fn restate_statefulset(
     StatefulSet {
         metadata,
         spec: Some(StatefulSetSpec {
-            replicas: compute.replicas,
+            replicas: spec.compute.replicas,
             selector: label_selector(base_metadata),
             service_name: "restate".into(),
             template: PodTemplateSpec {
@@ -242,12 +244,12 @@ fn restate_statefulset(
                 }),
                 spec: Some(PodSpec {
                     automount_service_account_token: Some(false),
-                    dns_policy: compute.dns_policy.clone(),
-                    dns_config: compute.dns_config.clone(),
+                    dns_policy: spec.compute.dns_policy.clone(),
+                    dns_config: spec.compute.dns_config.clone(),
                     containers: vec![Container {
                         name: "restate".into(),
-                        image: Some(compute.image.clone()),
-                        image_pull_policy: compute.image_pull_policy.clone(),
+                        image: Some(spec.compute.image.clone()),
+                        image_pull_policy: spec.compute.image_pull_policy.clone(),
                         env: Some(env),
                         ports: Some(vec![
                             ContainerPort {
@@ -274,7 +276,7 @@ fn restate_statefulset(
                             }),
                             ..Default::default()
                         }),
-                        resources: compute.resources.clone(),
+                        resources: spec.compute.resources.clone(),
                         security_context: Some(SecurityContext {
                             read_only_root_filesystem: Some(true),
                             allow_privilege_escalation: Some(false),
@@ -307,9 +309,9 @@ fn restate_statefulset(
                     ..Default::default()
                 },
                 spec: Some(PersistentVolumeClaimSpec {
-                    storage_class_name: storage.storage_class_name.clone(),
+                    storage_class_name: spec.storage.storage_class_name.clone(),
                     access_modes: Some(vec!["ReadWriteOnce".into()]),
-                    resources: Some(restate_pvc_resources(storage)),
+                    resources: Some(restate_pvc_resources(&spec.storage)),
                     ..Default::default()
                 }),
                 status: None,
@@ -466,13 +468,7 @@ pub async fn reconcile_compute(
     let ss = apply_stateful_set(
         namespace,
         &ss_api,
-        restate_statefulset(
-            base_metadata,
-            &spec.compute,
-            &spec.storage,
-            pod_annotations,
-            signing_key,
-        ),
+        restate_statefulset(base_metadata, spec, pod_annotations, signing_key),
     )
     .await?;
 
