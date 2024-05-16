@@ -140,7 +140,6 @@ fn env(cluster_name: &str, custom: Option<&[EnvVar]>) -> Vec<EnvVar> {
         ("RESTATE_LOG_FORMAT", "json"),
         ("RESTATE_CLUSTER_NAME", cluster_name),
         ("RESTATE_BASE_DIR", "/target"),
-        ("RUST_LOG", "info,restate=debug"),
         ("RUST_BACKTRACE", "1"),
         ("RUST_LIB_BACKTRACE", "0"),
     ];
