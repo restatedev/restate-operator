@@ -35,6 +35,9 @@ class Spec {
   /// Compute configuration
   compute: Compute
 
+  /// TOML-encoded Restate config file
+  config: String?
+
   /// Security configuration
   security: Security?
 

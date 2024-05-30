@@ -10,8 +10,8 @@ use futures::StreamExt;
 use k8s_openapi::api::apps::v1::StatefulSet;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{
-    EnvVar, Namespace, PersistentVolumeClaim, PodDNSConfig, ResourceRequirements, Service,
-    ServiceAccount,
+    ConfigMap, EnvVar, Namespace, PersistentVolumeClaim, PodDNSConfig, ResourceRequirements,
+    Service, ServiceAccount,
 };
 use k8s_openapi::api::networking::v1;
 use k8s_openapi::api::networking::v1::{NetworkPolicy, NetworkPolicyPeer, NetworkPolicyPort};
@@ -70,6 +70,8 @@ pub struct RestateClusterSpec {
     pub storage: RestateClusterStorage,
     pub compute: RestateClusterCompute,
     pub security: Option<RestateClusterSecurity>,
+    /// TOML-encoded Restate config file
+    pub config: Option<String>,
 }
 
 // Hoisted from the derived implementation so that we can restrict names to be valid namespace names
@@ -727,6 +729,7 @@ pub async fn run(state: State) {
     let pvc_api = Api::<PersistentVolumeClaim>::all(client.clone());
     let svc_api = Api::<Service>::all(client.clone());
     let svcacc_api = Api::<ServiceAccount>::all(client.clone());
+    let cm_api = Api::<ConfigMap>::all(client.clone());
     let np_api = Api::<NetworkPolicy>::all(client.clone());
     let pia_api = Api::<PodIdentityAssociation>::all(client.clone());
     let job_api = Api::<Job>::all(client.clone());
@@ -768,6 +771,7 @@ pub async fn run(state: State) {
         .owns(ns_api, cfg.clone())
         .owns(svc_api, cfg.clone())
         .owns(svcacc_api, cfg.clone())
+        .owns(cm_api, cfg.clone())
         .owns_stream(np_watcher)
         .owns_stream(ss_reflector)
         .watches_stream(

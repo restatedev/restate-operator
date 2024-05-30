@@ -5,10 +5,10 @@ use std::path::PathBuf;
 use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetSpec, StatefulSetStatus};
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    Container, ContainerPort, EnvVar, HTTPGetAction, PersistentVolumeClaim,
-    PersistentVolumeClaimSpec, Pod, PodSecurityContext, PodSpec, PodTemplateSpec, Probe,
-    SeccompProfile, SecurityContext, Service, ServiceAccount, ServicePort, ServiceSpec, Volume,
-    VolumeMount, VolumeResourceRequirements,
+    ConfigMap, ConfigMapVolumeSource, Container, ContainerPort, EnvVar, HTTPGetAction,
+    PersistentVolumeClaim, PersistentVolumeClaimSpec, Pod, PodSecurityContext, PodSpec,
+    PodTemplateSpec, Probe, SeccompProfile, SecurityContext, Service, ServiceAccount, ServicePort,
+    ServiceSpec, Volume, VolumeMount, VolumeResourceRequirements,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -20,6 +20,7 @@ use kube::{
     api::{Patch, PatchParams},
     Api, ResourceExt,
 };
+use sha2::Digest;
 use tracing::{debug, error, warn};
 
 use crate::podidentityassociations::{PodIdentityAssociation, PodIdentityAssociationSpec};
@@ -47,6 +48,22 @@ fn restate_service_account(
 
     ServiceAccount {
         metadata,
+        ..Default::default()
+    }
+}
+
+fn restate_configmap(base_metadata: &ObjectMeta, config: Option<&str>) -> ConfigMap {
+    let config: String = config.unwrap_or_default().into();
+
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(config.as_bytes());
+    let result = u32::from_le_bytes(hasher.finalize()[..4].try_into().unwrap());
+
+    let metadata = object_meta(base_metadata, format!("restate-config-{result:x}"));
+
+    ConfigMap {
+        metadata,
+        data: Some(BTreeMap::from([("config.toml".into(), config)])),
         ..Default::default()
     }
 }
@@ -142,6 +159,7 @@ fn env(cluster_name: &str, custom: Option<&[EnvVar]>) -> Vec<EnvVar> {
         ("RESTATE_BASE_DIR", "/target"),
         ("RUST_BACKTRACE", "1"),
         ("RUST_LIB_BACKTRACE", "0"),
+        ("RESTATE_CONFIG", "/config/config.toml"),
     ];
 
     // allow crd to override our defaults
@@ -172,6 +190,7 @@ fn restate_statefulset(
     spec: &RestateClusterSpec,
     pod_annotations: Option<BTreeMap<String, String>>,
     signing_key: Option<(Volume, PathBuf)>,
+    cm_name: String,
 ) -> StatefulSet {
     let metadata = object_meta(base_metadata, RESTATE_STATEFULSET_NAME);
     let labels = metadata.labels.clone();
@@ -195,13 +214,29 @@ fn restate_statefulset(
             mount_path: "/tmp".into(),
             ..Default::default()
         },
+        VolumeMount {
+            name: "config".into(),
+            mount_path: "/config".into(),
+            read_only: Some(true),
+            ..Default::default()
+        },
     ];
 
-    let mut volumes = vec![Volume {
-        name: "tmp".into(),
-        empty_dir: Some(Default::default()),
-        ..Default::default()
-    }];
+    let mut volumes = vec![
+        Volume {
+            name: "tmp".into(),
+            empty_dir: Some(Default::default()),
+            ..Default::default()
+        },
+        Volume {
+            name: "config".into(),
+            config_map: Some(ConfigMapVolumeSource {
+                name: Some(cm_name),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    ];
 
     let mut env = env(
         spec.cluster_name
@@ -339,6 +374,7 @@ pub async fn reconcile_compute(
     signing_key: Option<(Volume, PathBuf)>,
 ) -> Result<(), Error> {
     let ss_api: Api<StatefulSet> = Api::namespaced(ctx.client.clone(), namespace);
+    let cm_api: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), namespace);
     let pvc_api: Api<PersistentVolumeClaim> = Api::namespaced(ctx.client.clone(), namespace);
     let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), namespace);
     let svcacc_api: Api<ServiceAccount> = Api::namespaced(ctx.client.clone(), namespace);
@@ -358,6 +394,10 @@ pub async fn reconcile_compute(
         ),
     )
     .await?;
+
+    let cm = restate_configmap(base_metadata, spec.config.as_deref());
+    let cm_name: String = cm.metadata.name.as_ref().unwrap().into();
+    apply_configmap(namespace, &cm_api, cm).await?;
 
     let mut pod_annotations: Option<BTreeMap<String, String>> = None;
 
@@ -467,7 +507,7 @@ pub async fn reconcile_compute(
     let ss = apply_stateful_set(
         namespace,
         &ss_api,
-        restate_statefulset(base_metadata, spec, pod_annotations, signing_key),
+        restate_statefulset(base_metadata, spec, pod_annotations, signing_key, cm_name),
     )
     .await?;
 
@@ -498,6 +538,18 @@ async fn apply_service_account(
     svcacc_api
         .patch(name, &params, &Patch::Apply(&svcacc))
         .await?;
+    Ok(())
+}
+
+async fn apply_configmap(
+    namespace: &str,
+    cm_api: &Api<ConfigMap>,
+    cm: ConfigMap,
+) -> Result<(), Error> {
+    let name = cm.metadata.name.as_ref().unwrap();
+    let params: PatchParams = PatchParams::apply("restate-operator").force();
+    debug!("Applying ConfigMap {} in namespace {}", name, namespace);
+    cm_api.patch(name, &params, &Patch::Apply(&cm)).await?;
     Ok(())
 }
 
