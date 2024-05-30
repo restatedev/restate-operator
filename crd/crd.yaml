@@ -208,6 +208,10 @@ spec:
                 required:
                 - image
                 type: object
+              config:
+                description: TOML-encoded Restate config file
+                nullable: true
+                type: string
               security:
                 description: Security configuration
                 nullable: true
