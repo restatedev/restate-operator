@@ -153,10 +153,9 @@ fn restate_service(
 
 fn env(cluster_name: &str, custom: Option<&[EnvVar]>) -> Vec<EnvVar> {
     let defaults = [
-        ("RESTATE_OBSERVABILITY__LOG__FORMAT", "Json"), // todo: old env var can be removed soon
         ("RESTATE_LOG_FORMAT", "json"),
         ("RESTATE_CLUSTER_NAME", cluster_name),
-        ("RESTATE_BASE_DIR", "/target"),
+        ("RESTATE_BASE_DIR", "/restate-data"),
         ("RUST_BACKTRACE", "1"),
         ("RUST_LIB_BACKTRACE", "0"),
         ("RESTATE_CONFIG", "/config/config.toml"),
@@ -206,7 +205,7 @@ fn restate_statefulset(
     let mut volume_mounts = vec![
         VolumeMount {
             name: "storage".into(),
-            mount_path: "/target".into(),
+            mount_path: "/restate-data".into(),
             ..Default::default()
         },
         VolumeMount {
