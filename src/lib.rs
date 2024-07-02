@@ -32,8 +32,15 @@ pub enum Error {
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 impl Error {
-    pub fn metric_label(&self) -> String {
-        format!("{self:?}").to_lowercase()
+    pub fn metric_label(&self) -> &'static str {
+        match self {
+            Error::SerializationError(_) => "SerializationError",
+            Error::KubeError(_) => "KubeError",
+            Error::FinalizerError(_) => "FinalizerError",
+            Error::NameConflict => "NameConflict",
+            Error::NotReady { .. } => "NotReady",
+            Error::InvalidSigningKeyError(_) => "InvalidSigningKeyError",
+        }
     }
 }
 

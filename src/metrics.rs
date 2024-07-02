@@ -50,7 +50,7 @@ impl Metrics {
 
     pub fn reconcile_failure(&self, rc: &RestateCluster, e: &Error) {
         self.failures
-            .with_label_values(&[rc.name_any().as_ref(), e.metric_label().as_ref()])
+            .with_label_values(&[rc.name_any().as_ref(), e.metric_label()])
             .inc()
     }
 
