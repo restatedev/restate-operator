@@ -11,7 +11,7 @@ use k8s_openapi::api::apps::v1::StatefulSet;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{
     ConfigMap, EnvVar, Namespace, PersistentVolumeClaim, PodDNSConfig, ResourceRequirements,
-    Service, ServiceAccount,
+    Service, ServiceAccount, Toleration,
 };
 use k8s_openapi::api::networking::v1;
 use k8s_openapi::api::networking::v1::{NetworkPolicy, NetworkPolicyPeer, NetworkPolicyPort};
@@ -191,6 +191,8 @@ pub struct RestateClusterCompute {
     pub dns_config: Option<PodDNSConfig>,
     /// Set DNS policy for the pod. Defaults to "ClusterFirst". Valid values are 'ClusterFirstWithHostNet', 'ClusterFirst', 'Default' or 'None'. DNS parameters given in DNSConfig will be merged with the policy selected with DNSPolicy.
     pub dns_policy: Option<String>,
+    /// If specified, the pod's tolerations.
+    pub tolerations: Option<Vec<Toleration>>,
 }
 
 fn env_schema(g: &mut schemars::gen::SchemaGenerator) -> Schema {
@@ -499,6 +501,7 @@ impl RestateCluster {
 
         Ok(())
     }
+
     async fn reconcile_status(&self, ctx: Arc<Context>) -> Result<Action> {
         let rcs: Api<RestateCluster> = Api::all(ctx.client.clone());
 

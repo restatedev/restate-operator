@@ -44,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
 
     let args: Arguments = Arguments::parse();
 
-    // Initiatilize Kubernetes controller state
+    // Initialize Kubernetes controller state
     let state = State::default().with_aws_pod_identity_association_cluster(
         args.aws_pod_identity_association_cluster
             .and_then(|s| s.to_str().map(|s| s.to_string())),
