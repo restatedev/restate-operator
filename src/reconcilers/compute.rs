@@ -332,6 +332,7 @@ fn restate_statefulset(
                     service_account_name: Some("restate".into()),
                     termination_grace_period_seconds: Some(60),
                     volumes: Some(volumes),
+                    tolerations: spec.compute.tolerations.clone(),
                     ..Default::default()
                 }),
             },
