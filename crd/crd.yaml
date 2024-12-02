@@ -166,6 +166,12 @@ spec:
                     description: 'Image pull policy. One of Always, Never, IfNotPresent. Defaults to Always if :latest tag is specified, or IfNotPresent otherwise. More info: https://kubernetes.io/docs/concepts/containers/images#updating-images'
                     nullable: true
                     type: string
+                  nodeSelector:
+                    additionalProperties:
+                      type: string
+                    description: If specified, a node selector for the pod
+                    type: object
+                    x-kubernetes-map-type: atomic
                   replicas:
                     description: replicas is the desired number of Restate nodes. If unspecified, defaults to 1.
                     format: int32

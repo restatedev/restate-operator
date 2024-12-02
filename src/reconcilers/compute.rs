@@ -8,7 +8,7 @@ use k8s_openapi::api::core::v1::{
     ConfigMap, ConfigMapVolumeSource, Container, ContainerPort, EnvVar, HTTPGetAction,
     PersistentVolumeClaim, PersistentVolumeClaimSpec, Pod, PodSecurityContext, PodSpec,
     PodTemplateSpec, Probe, SeccompProfile, SecurityContext, Service, ServiceAccount, ServicePort,
-    ServiceSpec, Volume, VolumeMount, VolumeResourceRequirements,
+    ServiceSpec, Toleration, Volume, VolumeMount, VolumeResourceRequirements,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -333,6 +333,7 @@ fn restate_statefulset(
                     termination_grace_period_seconds: Some(60),
                     volumes: Some(volumes),
                     tolerations: spec.compute.tolerations.clone(),
+                    node_selector: spec.compute.node_selector.clone(),
                     ..Default::default()
                 }),
             },
