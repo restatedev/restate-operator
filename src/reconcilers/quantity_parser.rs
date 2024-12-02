@@ -51,22 +51,6 @@ impl QuantityMemoryUnits {
 /// The parser will fails if encounters an invalid unit letters or failed to parse String to i64
 
 pub trait QuantityParser {
-    /// This method will parse the cpu resource values returned by Kubernetes Api
-    ///
-    /// ```rust
-    /// # use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
-    /// # use k8s_quantity_parser::QuantityParser;
-    /// #
-    /// let cpu = Quantity("4".into());
-    /// let ret: i64 = 4000;
-    /// assert_eq!(cpu.to_milli_cpus().ok().flatten().unwrap(), ret)
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// The parser will fails if encounters an invalid unit letters or failed to parse String to i64
-    ///
-    fn to_milli_cpus(&self) -> Result<Option<i64>, ParseError>;
     /// This method will parse the memory resource values returned by Kubernetes Api
     ///
     /// ```rust
@@ -94,20 +78,6 @@ pub enum ParseError {
 }
 
 impl QuantityParser for Quantity {
-    fn to_milli_cpus(&self) -> Result<Option<i64>, ParseError> {
-        let unit_str = &self.0;
-        static REGEX: OnceLock<Regex> = OnceLock::new();
-        let cap = REGEX
-            .get_or_init(|| Regex::new(r"([m]{1}$)").unwrap())
-            .captures(unit_str);
-        if cap.is_none() {
-            return Ok(Some(unit_str.parse::<i64>()? * 1000));
-        };
-        let mt = cap.unwrap().get(0).unwrap();
-        let unit_str = unit_str.replace(mt.as_str(), "");
-        Ok(Some(unit_str.parse::<i64>()?))
-    }
-
     fn to_bytes(&self) -> Result<Option<i64>, ParseError> {
         let unit_str = &self.0;
         static REGEX: OnceLock<Regex> = OnceLock::new();
@@ -213,16 +183,6 @@ mod tests {
     }
 
     #[test]
-    fn to_milli_cpus_works() {
-        assert!(Quantity("12345m".into()).to_milli_cpus().is_ok())
-    }
-
-    #[test]
-    fn to_milli_cpus_is_some() {
-        assert!(Quantity("12345m".into()).to_milli_cpus().unwrap().is_some())
-    }
-
-    #[test]
     fn invalid_unit_fails() {
         assert!(Quantity("12345r".into()).to_bytes().is_err())
     }
@@ -249,19 +209,5 @@ mod tests {
         let mib = Quantity("1G".into());
         let ret: i64 = 1000000000;
         assert_eq!(mib.to_bytes().ok().flatten().unwrap(), ret);
-    }
-
-    #[test]
-    fn cpu_units_value_to_millis() {
-        let cpu = Quantity("1536m".into());
-        let ret: i64 = 1536;
-        assert_eq!(cpu.to_milli_cpus().ok().flatten().unwrap(), ret)
-    }
-
-    #[test]
-    fn cpu_cores_value_to_millis() {
-        let cpu = Quantity("4".into());
-        let ret: i64 = 4000;
-        assert_eq!(cpu.to_milli_cpus().ok().flatten().unwrap(), ret)
     }
 }

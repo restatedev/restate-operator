@@ -8,7 +8,7 @@ use k8s_openapi::api::core::v1::{
     ConfigMap, ConfigMapVolumeSource, Container, ContainerPort, EnvVar, HTTPGetAction,
     PersistentVolumeClaim, PersistentVolumeClaimSpec, Pod, PodSecurityContext, PodSpec,
     PodTemplateSpec, Probe, SeccompProfile, SecurityContext, Service, ServiceAccount, ServicePort,
-    ServiceSpec, Volume, VolumeMount, VolumeResourceRequirements,
+    ServiceSpec, Toleration, Volume, VolumeMount, VolumeResourceRequirements,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -333,6 +333,7 @@ fn restate_statefulset(
                     termination_grace_period_seconds: Some(60),
                     volumes: Some(volumes),
                     tolerations: spec.compute.tolerations.clone(),
+                    node_selector: spec.compute.node_selector.clone(),
                     ..Default::default()
                 }),
             },
@@ -427,7 +428,14 @@ pub async fn reconcile_compute(
                 return Err(Error::NotReady { reason: "PodIdentityAssociationNotSynced".into(), message: "Waiting for the AWS ACK controller to provision the Pod Identity Association with IAM".into(), requeue_after: None });
             }
 
-            check_pia(namespace, base_metadata, &job_api, &pod_api).await?;
+            check_pia(
+                namespace,
+                base_metadata,
+                spec.compute.tolerations.as_ref(),
+                &job_api,
+                &pod_api,
+            )
+            .await?;
 
             // Pods MUST roll when these change, so we will apply these parameters as annotations to the pod meta
             let pod_annotations = pod_annotations.get_or_insert_with(Default::default);
@@ -570,6 +578,7 @@ async fn apply_pod_identity_association(
 async fn check_pia(
     namespace: &str,
     base_metadata: &ObjectMeta,
+    tolerations: Option<&Vec<Toleration>>,
     job_api: &Api<Job>,
     pod_api: &Api<Pod>,
 ) -> Result<(), Error> {
@@ -613,6 +622,7 @@ async fn check_pia(
                                 ]),
                                 ..Default::default()
                             }],
+                            tolerations: tolerations.cloned(),
                             restart_policy: Some("Never".into()),
                             ..Default::default()
                         }),

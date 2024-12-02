@@ -193,6 +193,9 @@ pub struct RestateClusterCompute {
     pub dns_policy: Option<String>,
     /// If specified, the pod's tolerations.
     pub tolerations: Option<Vec<Toleration>>,
+    // If specified, a node selector for the pod
+    #[schemars(default, schema_with = "node_selector_schema")]
+    pub node_selector: Option<BTreeMap<String, String>>,
 }
 
 fn env_schema(g: &mut schemars::gen::SchemaGenerator) -> Schema {
@@ -202,6 +205,18 @@ fn env_schema(g: &mut schemars::gen::SchemaGenerator) -> Schema {
         "type": "array",
         "x-kubernetes-list-map-keys": ["name"],
         "x-kubernetes-list-type": "map"
+    }))
+    .unwrap()
+}
+
+fn node_selector_schema(_g: &mut schemars::gen::SchemaGenerator) -> Schema {
+    serde_json::from_value(json!({
+        "description": "If specified, a node selector for the pod",
+        "additionalProperties": {
+            "type": "string"
+        },
+        "type": "object",
+        "x-kubernetes-map-type": "atomic"
     }))
     .unwrap()
 }
@@ -385,7 +400,7 @@ pub struct Context {
 #[instrument(skip(ctx, rc), fields(trace_id))]
 async fn reconcile(rc: Arc<RestateCluster>, ctx: Arc<Context>) -> Result<Action> {
     if let Some(trace_id) = telemetry::get_trace_id() {
-        Span::current().record("trace_id", &field::display(&trace_id));
+        Span::current().record("trace_id", field::display(&trace_id));
     }
     let recorder = ctx
         .diagnostics
