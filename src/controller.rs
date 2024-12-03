@@ -781,15 +781,22 @@ pub async fn run(state: State) {
 
     let np_watcher = metadata_watcher(np_api, cfg.clone())
         .touched_objects()
-        // netpols are really bad for apply-loops for some reason?
+        .predicate_filter(changed_predicate);
+
+    let ns_watcher = metadata_watcher(ns_api, cfg.clone())
+        .touched_objects()
+        .predicate_filter(changed_predicate);
+
+    let svcacc_watcher = metadata_watcher(svcacc_api, cfg.clone())
+        .touched_objects()
         .predicate_filter(changed_predicate);
 
     let controller = Controller::new(rc_api, rc_cfg.clone())
         .shutdown_on_signal()
-        .owns(ns_api, cfg.clone())
         .owns(svc_api, cfg.clone())
-        .owns(svcacc_api, cfg.clone())
         .owns(cm_api, cfg.clone())
+        .owns_stream(ns_watcher)
+        .owns_stream(svcacc_watcher)
         .owns_stream(np_watcher)
         .owns_stream(ss_reflector)
         .watches_stream(
