@@ -2038,6 +2038,7 @@ dependencies = [
  "regex",
  "schemars",
  "serde",
+ "serde-hashkey",
  "serde_json",
  "serde_yaml",
  "sha2",
@@ -2231,6 +2232,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6513c1ad0b11a9376da888e3e0baa0077f1aed55c17f50e7b2397136129fb88f"
 dependencies = [
  "serde_derive",
+]
+
+[[package]]
+name = "serde-hashkey"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c13a90d3c31ebd0b83e38600c8117083ec4c4e1a7a0cab364e79e19706ade04e"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
