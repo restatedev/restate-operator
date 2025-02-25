@@ -5,7 +5,6 @@ metadata:
 spec:
   group: restate.dev
   names:
-    categories: []
     kind: RestateCluster
     plural: restateclusters
     shortNames:

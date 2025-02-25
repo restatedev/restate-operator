@@ -47,7 +47,7 @@ spec:
               value: {{ .Values.awsPodIdentityAssociationCluster }}
           {{- end }}
           {{- with .Values.env }}
-          {{- toYaml . | nindent 8 }}
+            {{- toYaml . | nindent 12 }}
           {{- end }}
           readinessProbe:
             httpGet:
