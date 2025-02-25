@@ -46,7 +46,7 @@ _resolved_target := if target != _default_target { target } else { "" }
 _target-option := if _resolved_target != "" { "--target " + _resolved_target } else { "" }
 
 generate:
-  cargo run --bin crdgen > crd/crd.yaml
+  cargo run --bin crdgen | grep -vF 'categories: []' > crd/crd.yaml
 
 generate-pkl:
   cargo run --bin schemagen | pkl eval crd/pklgen/generate.pkl -m crd
