@@ -34,6 +34,8 @@ logging:
 
 env: []
 
+affinity: {}
+
 service:
   type: ClusterIP
   port: 80

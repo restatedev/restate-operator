@@ -276,6 +276,7 @@ fn restate_statefulset(
                     ..Default::default()
                 }),
                 spec: Some(PodSpec {
+                    affinity: spec.compute.affinity.clone(),
                     automount_service_account_token: Some(false),
                     dns_policy: spec.compute.dns_policy.clone(),
                     dns_config: spec.compute.dns_config.clone(),

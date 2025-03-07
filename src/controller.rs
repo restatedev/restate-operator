@@ -11,7 +11,7 @@ use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetStatus};
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{
     ConfigMap, EnvVar, Namespace, PersistentVolumeClaim, PodDNSConfig, ResourceRequirements,
-    Service, ServiceAccount, ServiceSpec, Toleration,
+    Service, ServiceAccount, ServiceSpec, Toleration, Affinity,
 };
 use k8s_openapi::api::networking::v1;
 use k8s_openapi::api::networking::v1::{NetworkPolicy, NetworkPolicyPeer, NetworkPolicyPort};
@@ -196,6 +196,9 @@ pub struct RestateClusterCompute {
     // If specified, a node selector for the pod
     #[schemars(default, schema_with = "node_selector_schema")]
     pub node_selector: Option<BTreeMap<String, String>>,
+    // If specified, pod affinity
+    pub affinity: Option<Affinity>,
+
 }
 
 fn env_schema(g: &mut schemars::gen::SchemaGenerator) -> Schema {
