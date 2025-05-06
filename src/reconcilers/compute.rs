@@ -145,7 +145,6 @@ fn restate_service(
                     ..Default::default()
                 },
             ]),
-            cluster_ip: Some("None".into()), // headless service
             ..Default::default()
         }),
         status: None,

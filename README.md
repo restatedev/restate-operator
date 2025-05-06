@@ -55,7 +55,6 @@ spec:
     type = "replicated"
 
     [metadata-client]
-    type = "replicated"
     addresses = ["http://restate:5122/"]
 ```
 
