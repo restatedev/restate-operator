@@ -5,10 +5,11 @@ use std::path::PathBuf;
 use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetSpec, StatefulSetStatus};
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    ConfigMap, ConfigMapVolumeSource, Container, ContainerPort, EnvVar, HTTPGetAction,
-    PersistentVolumeClaim, PersistentVolumeClaimSpec, Pod, PodSecurityContext, PodSpec,
-    PodTemplateSpec, Probe, SeccompProfile, SecurityContext, Service, ServiceAccount, ServicePort,
-    ServiceSpec, Toleration, Volume, VolumeMount, VolumeResourceRequirements,
+    ConfigMap, ConfigMapVolumeSource, Container, ContainerPort, EnvVar, EnvVarSource,
+    HTTPGetAction, ObjectFieldSelector, PersistentVolumeClaim, PersistentVolumeClaimSpec, Pod,
+    PodSecurityContext, PodSpec, PodTemplateSpec, Probe, SeccompProfile, SecurityContext, Service,
+    ServiceAccount, ServicePort, ServiceSpec, Toleration, Volume, VolumeMount,
+    VolumeResourceRequirements,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -121,7 +122,7 @@ fn restate_service(
     }
 
     Service {
-        metadata: object_meta(base_metadata, "restate"),
+        metadata,
         spec: Some(ServiceSpec {
             selector: label_selector(base_metadata).match_labels,
             ports: Some(vec![
@@ -151,6 +152,28 @@ fn restate_service(
     }
 }
 
+fn restate_cluster_service(base_metadata: &ObjectMeta) -> Service {
+    Service {
+        metadata: object_meta(base_metadata, "restate-cluster"),
+        spec: Some(ServiceSpec {
+            selector: label_selector(base_metadata).match_labels,
+            ports: Some(vec![ServicePort {
+                app_protocol: Some("kubernetes.io/h2c".into()),
+                port: 5122,
+                name: Some("node".into()),
+                ..Default::default()
+            }]),
+            // We want all pods in the StatefulSet to have their addresses published for
+            // the sake of the other Restate pods even before they're ready, since they
+            // have to be able to talk to each other in order to become ready.
+            publish_not_ready_addresses: Some(true),
+            cluster_ip: Some("None".into()), // headless service
+            ..Default::default()
+        }),
+        status: None,
+    }
+}
+
 fn env(cluster_name: &str, custom: Option<&[EnvVar]>) -> Vec<EnvVar> {
     let defaults = [
         ("RESTATE_LOG_FORMAT", "json"),
@@ -159,6 +182,11 @@ fn env(cluster_name: &str, custom: Option<&[EnvVar]>) -> Vec<EnvVar> {
         ("RUST_BACKTRACE", "1"),
         ("RUST_LIB_BACKTRACE", "0"),
         ("RESTATE_CONFIG", "/config/config.toml"),
+        (
+            "RESTATE_ADVERTISED_ADDRESS",
+            // POD_NAME comes from the downward api, below
+            "http://$(POD_NAME).restate-cluster:5122",
+        ),
     ];
 
     // allow crd to override our defaults
@@ -174,6 +202,22 @@ fn env(cluster_name: &str, custom: Option<&[EnvVar]>) -> Vec<EnvVar> {
             value: Some(v.into()),
             value_from: None,
         });
+
+    let defaults = Some(EnvVar {
+        name: "POD_NAME".into(),
+        value: None,
+        value_from: Some(EnvVarSource {
+            config_map_key_ref: None,
+            field_ref: Some(ObjectFieldSelector {
+                api_version: None,
+                field_path: "metadata.name".into(),
+            }),
+            resource_field_ref: None,
+            secret_key_ref: None,
+        }),
+    })
+    .into_iter()
+    .chain(defaults);
 
     if let Some(custom) = custom {
         defaults.chain(custom.iter().cloned()).collect()
@@ -268,7 +312,7 @@ fn restate_statefulset(
         spec: Some(StatefulSetSpec {
             replicas: spec.compute.replicas,
             selector: label_selector(base_metadata),
-            service_name: "restate".into(),
+            service_name: "restate-cluster".into(),
             template: PodTemplateSpec {
                 metadata: Some(ObjectMeta {
                     labels,
@@ -490,17 +534,16 @@ pub async fn reconcile_compute(
         None | Some(_) => {}
     }
 
-    apply_service(
-        namespace,
-        &svc_api,
-        restate_service(
-            base_metadata,
-            spec.security
-                .as_ref()
-                .and_then(|s| s.service_annotations.as_ref()),
-        ),
-    )
-    .await?;
+    let restate_service = restate_service(
+        base_metadata,
+        spec.security
+            .as_ref()
+            .and_then(|s| s.service_annotations.as_ref()),
+    );
+    apply_service(namespace, &svc_api, restate_service).await?;
+
+    let restate_cluster_service = restate_cluster_service(base_metadata);
+    apply_service(namespace, &svc_api, restate_cluster_service).await?;
 
     resize_statefulset_storage(
         namespace,

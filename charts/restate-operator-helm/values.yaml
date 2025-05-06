@@ -1,6 +1,6 @@
 replicaCount: 1
 nameOverride: "restate-operator"
-version: "" # pin a specific version
+version: "local" # pin a specific version
 
 image:
   repository: ghcr.io/restatedev/restate-operator
@@ -20,14 +20,13 @@ podSecurityContext:
   fsGroupChangePolicy: "OnRootMismatch"
 securityContext:
   capabilities:
-   drop:
-   - ALL
+    drop:
+      - ALL
   readOnlyRootFilesystem: true
   allowPrivilegeEscalation: false
   runAsNonRoot: true
   runAsUser: 1000
   runAsGroup: 3000
-
 
 logging:
   env_filter: info,restate=debug

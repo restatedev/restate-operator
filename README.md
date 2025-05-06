@@ -21,7 +21,7 @@ helm install restate-operator oci://ghcr.io/restatedev/restate-operator-helm --n
 The operator watches `RestateCluster` objects, which are not namespaced. A Namespace with the same name as the
 `RestateCluster` will be created, in which a StatefulSet, Service, and NetworkPolicies are created.
 
-An example `RestateCluster`:
+An example `RestateCluster` with one node:
 
 ```yaml
 apiVersion: restate.dev/v1
@@ -30,9 +30,39 @@ metadata:
   name: restate-test
 spec:
   compute:
-    image: restatedev/restate:0.8.0
+    image: restatedev/restate:1.3.2
   storage:
     storageRequestBytes: 2147483648 # 2 GiB
+```
+
+An example `RestateCluster` with 3 nodes using the Raft metastore:
+
+```yaml
+apiVersion: restate.dev/v1
+kind: RestateCluster
+metadata:
+  name: restate-test
+spec:
+  compute:
+    replicas: 3
+    image: restatedev/restate:1.3.2
+  storage:
+    storageRequestBytes: 2147483648 # 2 GiB
+  config: |
+    auto-provision = false
+
+    [metadata-server]
+    type = "replicated"
+
+    [metadata-client]
+    type = "replicated"
+    addresses = ["http://restate:5122/"]
+```
+
+You would then need to provision the cluster eg with:
+
+```bash
+kubectl -n restate-test exec -it restate-0 -- restatectl provision --log-provider replicated --log-replication 2 --partition-replication 3
 ```
 
 For the full schema as a [Pkl](https://pkl-lang.org/) template see [`crd/RestateCluster.pkl`](./crd/RestateCluster.pkl).

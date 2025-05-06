@@ -1,9 +1,8 @@
+/// Adapted from https://github.com/sombralibre/k8s-quantity-parser to resolve dependency conflict
+/// MIT licensed, Copyright (c) 2022 Alejandro Llanes
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use regex::Regex;
 use std::{num::ParseIntError, sync::OnceLock};
-
-/// Adapted from https://github.com/sombralibre/k8s-quantity-parser to resolve dependency conflict
-/// MIT licensed, Copyright (c) 2022 Alejandro Llanes
 
 #[allow(non_camel_case_types)]
 enum QuantityMemoryUnits {
@@ -49,7 +48,6 @@ impl QuantityMemoryUnits {
 ///
 /// # Errors
 /// The parser will fails if encounters an invalid unit letters or failed to parse String to i64
-
 pub trait QuantityParser {
     /// This method will parse the memory resource values returned by Kubernetes Api
     ///
