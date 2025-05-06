@@ -69,4 +69,4 @@ build *flags:
     cargo build {{ _target-option }} {{ _features }} {{ flags }}
 
 docker:
-    docker build . --tag={{ image }} --progress='{{ DOCKER_PROGRESS }}' --load
+    docker build . -f docker/Dockerfile --tag={{ image }} --progress='{{ DOCKER_PROGRESS }}' --load
