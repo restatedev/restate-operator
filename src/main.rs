@@ -4,9 +4,11 @@ use actix_web::{
     get, middleware, web::Data, App, HttpRequest, HttpResponse, HttpServer, Responder,
 };
 use clap::Parser;
+use kube::Client;
 use prometheus::{Encoder, TextEncoder};
 
-pub use restate_operator::{self, telemetry, State};
+use restate_operator::controllers::State;
+pub use restate_operator::{self, telemetry};
 
 #[derive(Debug, clap::Parser)]
 struct Arguments {
@@ -49,8 +51,26 @@ async fn main() -> anyhow::Result<()> {
         args.aws_pod_identity_association_cluster
             .and_then(|s| s.to_str().map(|s| s.to_string())),
     );
-    let controller = restate_operator::run(state.clone());
-    tokio::pin!(controller);
+
+    let client = Client::try_default()
+        .await
+        .expect("failed to create kube Client");
+
+    let metric = restate_operator::Metrics::default()
+        .register(&state.registry)
+        .unwrap();
+
+    // Start both controllers
+    let cluster_controller = restate_operator::controllers::restatecluster::run(
+        client.clone(),
+        metric.clone(),
+        state.clone(),
+    );
+    let service_controller =
+        restate_operator::controllers::restateservice::run(client, metric, state.clone());
+
+    tokio::pin!(cluster_controller);
+    tokio::pin!(service_controller);
 
     // Start web server
     let server = HttpServer::new(move || {
@@ -68,6 +88,6 @@ async fn main() -> anyhow::Result<()> {
     tokio::pin!(server);
 
     // Both runtimes implements graceful shutdown, so poll until both are done
-    tokio::join!(controller, server).1?;
+    tokio::join!(cluster_controller, service_controller, server).2?;
     Ok(())
 }
