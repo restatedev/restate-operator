@@ -15,8 +15,10 @@ use kube::{
 };
 use tracing::debug;
 
-use crate::reconcilers::{label_selector, object_meta};
-use crate::{Error, RestateClusterNetworkPeers};
+use crate::resources::restateclusters::RestateClusterNetworkPeers;
+use crate::Error;
+
+use super::{label_selector, object_meta};
 
 fn deny_all(base_metadata: &ObjectMeta) -> NetworkPolicy {
     NetworkPolicy {
@@ -171,7 +173,7 @@ fn allow_access(
 
 fn allow_egress(
     base_metadata: &ObjectMeta,
-    egress: Option<&[crate::NetworkPolicyEgressRule]>,
+    egress: Option<&[crate::resources::restateclusters::NetworkPolicyEgressRule]>,
 ) -> NetworkPolicy {
     NetworkPolicy {
         metadata: object_meta(base_metadata, "allow-restate-egress"),
@@ -189,7 +191,7 @@ pub async fn reconcile_network_policies(
     namespace: &str,
     base_metadata: &ObjectMeta,
     network_peers: Option<&RestateClusterNetworkPeers>,
-    network_egress_rules: Option<&[crate::NetworkPolicyEgressRule]>,
+    network_egress_rules: Option<&[crate::resources::restateclusters::NetworkPolicyEgressRule]>,
     aws_pod_identity_enabled: bool,
 ) -> Result<(), Error> {
     let np_api: Api<NetworkPolicy> = Api::namespaced(client, namespace);

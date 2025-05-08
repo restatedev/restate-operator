@@ -47,6 +47,7 @@ _target-option := if _resolved_target != "" { "--target " + _resolved_target } e
 
 generate:
   cargo run --bin crdgen | grep -vF 'categories: []' > crd/crd.yaml
+  cargo run --bin service_crdgen | grep -vF 'categories: []' > crd/restateservice.yaml
 
 generate-pkl:
   cargo run --bin schemagen | pkl eval crd/pklgen/generate.pkl -m crd

@@ -1,4 +1,4 @@
-use reconcilers::signing_key::InvalidSigningKeyError;
+use controllers::restatecluster::InvalidSigningKeyError;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -25,6 +25,16 @@ pub enum Error {
         requeue_after: Option<Duration>,
     },
 
+    #[error("Service is not yet Ready: {message}")]
+    ServiceNotReady {
+        message: String,
+        reason: String,
+        requeue_after: Option<Duration>,
+    },
+
+    #[error("Invalid Restate configuration: {0}")]
+    InvalidRestateConfig(String),
+
     #[error(transparent)]
     InvalidSigningKeyError(#[from] InvalidSigningKeyError),
 }
@@ -39,15 +49,14 @@ impl Error {
             Error::FinalizerError(_) => "FinalizerError",
             Error::NameConflict => "NameConflict",
             Error::NotReady { .. } => "NotReady",
+            Error::ServiceNotReady { .. } => "ServiceNotReady",
+            Error::InvalidRestateConfig(_) => "InvalidRestateConfig",
             Error::InvalidSigningKeyError(_) => "InvalidSigningKeyError",
         }
     }
 }
 
-/// Expose all controller components used by main
-pub mod controller;
-
-pub use crate::controller::*;
+pub mod controllers;
 
 /// Log and trace integrations
 pub mod telemetry;
@@ -57,10 +66,5 @@ mod metrics;
 
 pub use metrics::Metrics;
 
-/// Reconcilers
-mod reconcilers;
-
 /// External CRDs
-mod podidentityassociations;
-mod secretproviderclasses;
-mod securitygrouppolicies;
+pub mod resources;
