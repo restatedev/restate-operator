@@ -46,13 +46,20 @@ _resolved_target := if target != _default_target { target } else { "" }
 _target-option := if _resolved_target != "" { "--target " + _resolved_target } else { "" }
 
 generate:
-  cargo run --bin crdgen | grep -vF 'categories: []' > crd/crd.yaml
+  cargo run --bin cluster_crdgen | grep -vF 'categories: []' > crd/restateclusters.yaml
+  cargo run --bin deployment_crdgen | grep -vF 'categories: []' > crd/restatedeployments.yaml
 
 generate-pkl:
-  cargo run --bin schemagen | pkl eval crd/pklgen/generate.pkl -m crd
+  cargo run --bin cluster_schemagen | pkl eval crd/pklgen/generate-cluster.pkl -m crd
+  cargo run --bin deployment_schemagen | pkl eval crd/pklgen/generate-deployment.pkl -m crd
 
-install-crd: generate
-  kubectl apply -f crd/crd.yaml
+generate-examples:
+  pkl eval crd/examples/restatedeployment.pkl > crd/examples/restatedeployment.yaml
+  pkl eval crd/examples/restatecluster.pkl > crd/examples/restatecluster.yaml
+
+install-crds: generate
+  kubectl create -f crd/restateclusters.yaml
+  kubectl create -f crd/restatedeployments.yaml
 
 # Extract dependencies
 chef-prepare:

@@ -1,0 +1,9 @@
+apiVersion: restate.dev/v1
+kind: RestateCluster
+metadata:
+  name: restate-test
+spec:
+  compute:
+    image: restatedev/restate:1.3.2
+  storage:
+    storageRequestBytes: 2147483648

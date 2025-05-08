@@ -1,0 +1,139 @@
+/// Auto-generated derived type for RestateDeploymentSpec via `CustomResource`
+///
+/// This module was generated from the CustomResourceDefinition at <file:./crd/restatedeployments.yaml>.
+module dev.restate.v1beta1.RestateDeployment
+
+extends "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/K8sResource.pkl"
+
+import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/apimachinery/pkg/apis/meta/v1/ObjectMeta.pkl"
+import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/apimachinery/pkg/apis/meta/v1/LabelSelector.pkl"
+import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/PodTemplateSpec.pkl"
+
+fixed apiVersion: "restate.dev/v1beta1"
+
+fixed kind: "RestateDeployment"
+
+/// Standard object's metadata.
+///
+/// More info: <https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata>.
+metadata: ObjectMeta?
+
+/// RestateDeployment is similar to a Kubernetes Deployment but tailored for Restate services. It
+/// maintains ReplicaSets and Services for each version to support Restate's versioning requirements,
+/// ensuring old versions remain available until all invocations against them are complete.
+spec: Spec
+
+/// Status of the RestateDeployment This is set and managed automatically by the controller
+status: Status?
+
+/// RestateDeployment is similar to a Kubernetes Deployment but tailored for Restate services. It
+/// maintains ReplicaSets and Services for each version to support Restate's versioning requirements,
+/// ensuring old versions remain available until all invocations against them are complete.
+class Spec {
+  /// Minimum number of seconds for which a newly created pod should be ready.
+  minReadySeconds: Int(isPositive)?
+
+  /// Number of desired pods. Defaults to 1.
+  ///
+  /// Default if undefined: `1`
+  replicas: Int(isPositive)?
+
+  /// Restate specific configuration
+  restate: Restate
+
+  /// The number of old ReplicaSets to retain to allow rollback. Defaults to 10.
+  ///
+  /// Default if undefined: `10`
+  revisionHistoryLimit: Int(isPositive)?
+
+  /// Label selector for pods. Must match the pod template's labels.
+  selector: LabelSelector
+
+  /// Template describes the pods that will be created.
+  template: PodTemplateSpec
+}
+
+/// Restate specific configuration
+class Restate {
+  /// The location of the Restate Admin API to register this deployment against
+  register: Register
+}
+
+/// The location of the Restate Admin API to register this deployment against
+class Register {
+  /// The name of a RestateCluster against which to register the deployment. Exactly one of `cluster`,
+  /// `service` or `url` must be specified
+  cluster: String?
+
+  /// A reference to a Service pointing against which to register the deployment. Exactly one of
+  /// `cluster`, `service` or `url` must be specified
+  service: Service?
+
+  /// A url of the restate admin endpoint against which to register the deployment Exactly one of
+  /// `cluster`, `service` or `url` must be specified
+  url: String?
+}
+
+/// A reference to a Service pointing against which to register the deployment. Exactly one of `cluster`,
+/// `service` or `url` must be specified
+class Service {
+  /// `name` is the name of the service. Required
+  name: String
+
+  /// `namespace` is the namespace of the service. Required
+  namespace: String
+
+  /// `path` is an optional URL path which will be prepended before admin api paths. Should not end in a
+  /// /.
+  path: String?
+
+  /// If specified, the port on the service that hosts the admin api. Defaults to 9070. `port` should be
+  /// a valid port number (1-65535, inclusive).
+  port: Int(isBetween(1.0, 65535.0))?
+}
+
+/// Status of the RestateDeployment This is set and managed automatically by the controller
+class Status {
+  /// Total number of updated available pods (ready for at least minReadySeconds)
+  availableReplicas: Int?
+
+  /// Count of hash collisions for the RestateDeployment. The controller uses this field as a collision
+  /// avoidance mechanism when it needs to create the name for the newest ReplicaSet.
+  collisionCount: Int?
+
+  /// Represents the latest available observations of current state
+  conditions: Listing<Condition>?
+
+  /// The label selector of the RestateDeployment as a string, for `kubectl get rsd -o wide`
+  labelSelector: String?
+
+  /// The generation observed by the controller
+  observedGeneration: Int?
+
+  /// Total number of updated ready pods
+  readyReplicas: Int?
+
+  /// Total number of updated non-terminated pods targeted by this RestateDeployment
+  replicas: Int
+
+  /// Total number of updated unavailable pods
+  unavailableReplicas: Int?
+}
+
+/// Conditions for the RestateDeployment status
+class Condition {
+  /// Last time the condition transitioned from one status to another
+  lastTransitionTime: String?
+
+  /// Human-readable message indicating details about last transition
+  message: String?
+
+  /// Reason for the condition's last transition
+  reason: String?
+
+  /// Status is the status of the condition (True, False, Unknown)
+  status: String
+
+  /// Type of condition (Ready, Progressing, Available)
+  type: String
+}
