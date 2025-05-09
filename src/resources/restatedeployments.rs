@@ -1,6 +1,5 @@
 use std::borrow::Cow;
 
-use k8s_openapi::api::apps::v1::DeploymentStrategy;
 use k8s_openapi::api::core::v1::PodTemplateSpec;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 use kube::CustomResource;
@@ -9,15 +8,15 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-pub static RESTATE_SERVICE_FINALIZER: &str = "services.restate.dev";
+pub static RESTATE_DEPLOYMENT_FINALIZER: &str = "deployments.restate.dev";
 
-/// RestateService is similar to a Kubernetes Deployment but tailored for Restate services.
+/// RestateDeployment is similar to a Kubernetes Deployment but tailored for Restate services.
 /// It maintains ReplicaSets and Services for each version to support Restate's versioning requirements,
 /// ensuring old versions remain available until all invocations against them are complete.
 #[derive(CustomResource, Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[cfg_attr(test, derive(Default))]
 #[kube(
-    kind = "RestateService",
+    kind = "RestateDeployment",
     group = "restate.dev",
     version = "v1",
     schema = "manual",
@@ -27,17 +26,14 @@ pub static RESTATE_SERVICE_FINALIZER: &str = "services.restate.dev";
     printcolumn = r#"{"name":"Available", "type":"integer", "jsonPath":".status.availableReplicas"}"#,
     printcolumn = r#"{"name":"Age", "type":"date", "jsonPath":".metadata.creationTimestamp"}"#
 )]
-#[kube(status = "RestateServiceStatus", shortname = "rss")]
+#[kube(status = "RestateDeploymentStatus", shortname = "rsd")]
 #[serde(rename_all = "camelCase")]
-pub struct RestateServiceSpec {
+pub struct RestateDeploymentSpec {
     /// Number of desired pods. Defaults to 1.
     pub replicas: Option<i32>,
 
     /// The number of old ReplicaSets to retain to allow rollback. Defaults to 10.
     pub revision_history_limit: Option<i32>,
-
-    /// The maximum time in seconds for a deployment to make progress before it is considered to be failed.
-    pub progress_deadline_seconds: Option<i32>,
 
     /// Minimum number of seconds for which a newly created pod should be ready.
     pub min_ready_seconds: Option<i32>,
@@ -48,20 +44,17 @@ pub struct RestateServiceSpec {
     /// Template describes the pods that will be created.
     pub template: PodTemplateSpec,
 
-    /// The deployment strategy to use to replace existing pods with new ones.
-    pub strategy: Option<DeploymentStrategy>,
-
     /// Configuration specific to Restate integration
     pub restate: RestateConfig,
 }
 
-// Hoisted from the derived implementation for RestateService
-impl schemars::JsonSchema for RestateService {
+// Hoisted from the derived implementation for RestateDeployment
+impl schemars::JsonSchema for RestateDeployment {
     fn schema_name() -> String {
-        "RestateService".to_owned()
+        "RestateDeployment".to_owned()
     }
     fn schema_id() -> Cow<'static, str> {
-        "restate_operator::restateservice::RestateService".into()
+        "restate_operator::RestateDeployment::RestateDeployment".into()
     }
     fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> Schema {
         {
@@ -71,7 +64,7 @@ impl schemars::JsonSchema for RestateService {
                 ),
                 metadata: Some(Box::new(schemars::schema::Metadata {
                     description: Some(
-                        "RestateService manages deployments of Restate services with proper versioning".to_owned(),
+                        "RestateDeployment manages deployments of Restate services with proper versioning".to_owned(),
                     ),
                     ..Default::default()
                 })),
@@ -97,14 +90,15 @@ impl schemars::JsonSchema for RestateService {
                 );
             object_validation.required.insert("metadata".to_owned());
 
-            object_validation
-                .properties
-                .insert("spec".to_owned(), gen.subschema_for::<RestateServiceSpec>());
+            object_validation.properties.insert(
+                "spec".to_owned(),
+                gen.subschema_for::<RestateDeploymentSpec>(),
+            );
             object_validation.required.insert("spec".to_owned());
 
             object_validation.properties.insert(
                 "status".to_owned(),
-                gen.subschema_for::<Option<RestateServiceStatus>>(),
+                gen.subschema_for::<Option<RestateDeploymentStatus>>(),
             );
             Schema::Object(schema_object)
         }
@@ -117,16 +111,6 @@ impl schemars::JsonSchema for RestateService {
 pub struct RestateConfig {
     /// Reference to the Restate cluster
     pub cluster_ref: String,
-
-    /// Service name to register with Restate
-    pub service_name: String,
-
-    /// Whether to make the service private (not publicly callable)
-    #[serde(default)]
-    pub private: bool,
-
-    /// Service endpoints to register with Restate
-    pub endpoints: Option<Vec<RestateEndpoint>>,
 }
 
 /// Endpoint definition for Restate services
@@ -143,11 +127,11 @@ pub struct RestateEndpoint {
     pub path: Option<String>,
 }
 
-/// Status of the RestateService
+/// Status of the RestateDeployment
 /// This is set and managed automatically by the controller
 #[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
-pub struct RestateServiceStatus {
-    /// Total number of non-terminated pods targeted by this RestateService
+pub struct RestateDeploymentStatus {
+    /// Total number of non-terminated pods targeted by this RestateDeployment
     pub replicas: Option<i32>,
 
     /// Total number of available pods (ready for at least minReadySeconds)
@@ -163,24 +147,18 @@ pub struct RestateServiceStatus {
     pub observed_generation: Option<i64>,
 
     /// Information about active ReplicaSets and their versions
-    pub versions: Option<Vec<RestateServiceVersion>>,
+    pub versions: Option<Vec<RestateDeploymentVersion>>,
 
     /// Represents the latest available observations of current state
-    pub conditions: Option<Vec<RestateServiceCondition>>,
+    pub conditions: Option<Vec<RestateDeploymentCondition>>,
 }
 
 /// Information about active versions and their resources
 #[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct RestateServiceVersion {
-    /// Version identifier
-    pub version: String,
-
-    /// Name of the ReplicaSet for this version
-    pub replicaset_name: String,
-
-    /// Name of the Service for this version
-    pub service_name: String,
+pub struct RestateDeploymentVersion {
+    /// Name of the ReplicaSet/Service for this version
+    pub name: String,
 
     /// Number of replicas
     pub replicas: i32,
@@ -194,17 +172,14 @@ pub struct RestateServiceVersion {
     /// Whether this is the current active version
     pub current: bool,
 
-    /// Status of this version (Active, Retiring, Inactive)
+    /// Status of this version (Active, Draining, Drained, Inactive)
     pub status: String,
-
-    /// Count of active invocations against this version (if known)
-    pub active_invocations: Option<i32>,
 }
 
-/// Conditions for the RestateService status
+/// Conditions for the RestateDeployment status
 #[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct RestateServiceCondition {
+pub struct RestateDeploymentCondition {
     /// Last time the condition transitioned from one status to another
     pub last_transition_time: Option<k8s_openapi::apimachinery::pkg::apis::meta::v1::Time>,
 

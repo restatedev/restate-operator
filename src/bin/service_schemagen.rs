@@ -10,7 +10,9 @@ fn main() {
     print!(
         "{}",
         serde_json::to_string_pretty(
-            &restate_operator::resources::restateservices::RestateService::json_schema(&mut gen)
+            &restate_operator::resources::restatedeployments::RestateDeployment::json_schema(
+                &mut gen
+            )
         )
         .unwrap()
     )

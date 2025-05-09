@@ -67,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
         state.clone(),
     );
     let service_controller =
-        restate_operator::controllers::restateservice::run(client, metric, state.clone());
+        restate_operator::controllers::restatedeployment::run(client, metric, state.clone());
 
     tokio::pin!(cluster_controller);
     tokio::pin!(service_controller);
