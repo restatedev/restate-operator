@@ -37,6 +37,9 @@ pub enum Error {
 
     #[error(transparent)]
     InvalidSigningKeyError(#[from] InvalidSigningKeyError),
+
+    #[error("Failed to make Restate admin API call: {0}")]
+    AdminCallFailed(reqwest::Error),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -52,6 +55,7 @@ impl Error {
             Error::ServiceNotReady { .. } => "ServiceNotReady",
             Error::InvalidRestateConfig(_) => "InvalidRestateConfig",
             Error::InvalidSigningKeyError(_) => "InvalidSigningKeyError",
+            Error::AdminCallFailed(_) => "AdminCallFailed",
         }
     }
 }

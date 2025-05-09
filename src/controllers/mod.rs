@@ -9,7 +9,7 @@ use serde::Serialize;
 use tokio::sync::RwLock;
 
 pub mod restatecluster;
-pub mod restateservice;
+pub mod restatedeployment;
 
 /// Diagnostics to be exposed by the web server
 #[derive(Clone, Serialize)]
