@@ -30,8 +30,8 @@ impl Default for Diagnostics {
 }
 
 impl Diagnostics {
-    fn recorder(&self, client: Client, rc: &impl kube::Resource<DynamicType = ()>) -> Recorder {
-        Recorder::new(client, self.reporter.clone(), rc.object_ref(&()))
+    fn recorder(&self, client: Client) -> Recorder {
+        Recorder::new(client, self.reporter.clone())
     }
 }
 

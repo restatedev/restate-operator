@@ -40,6 +40,9 @@ pub enum Error {
 
     #[error("Failed to make Restate admin API call: {0}")]
     AdminCallFailed(reqwest::Error),
+
+    #[error("Encounter a ReplicaSet hash collision, will retry with a new template hash")]
+    HashCollision,
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -56,6 +59,7 @@ impl Error {
             Error::InvalidRestateConfig(_) => "InvalidRestateConfig",
             Error::InvalidSigningKeyError(_) => "InvalidSigningKeyError",
             Error::AdminCallFailed(_) => "AdminCallFailed",
+            Error::HashCollision => "HashCollision",
         }
     }
 }
