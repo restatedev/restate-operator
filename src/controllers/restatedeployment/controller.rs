@@ -1,11 +1,11 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
 use futures::StreamExt;
 
-use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
+use k8s_openapi::api::apps::v1::ReplicaSet;
 use k8s_openapi::api::core::v1::Service;
 
 use kube::api::{Api, ListParams, Patch, PatchParams, ResourceExt};
@@ -16,6 +16,7 @@ use kube::runtime::events::{Event, EventType};
 use kube::runtime::finalizer::{finalizer, Event as Finalizer};
 use kube::runtime::watcher::Config;
 
+use kube::Resource;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::RwLock;
@@ -25,8 +26,8 @@ use crate::controllers::{Diagnostics, State};
 use crate::metrics::Metrics;
 use crate::resources::restateclusters::RestateCluster;
 use crate::resources::restatedeployments::{
-    RestateDeployment, RestateDeploymentCondition, RestateDeploymentStatus,
-    RestateDeploymentVersion, RESTATE_DEPLOYMENT_FINALIZER,
+    RestateDeployment, RestateDeploymentCondition, RestateDeploymentVersion,
+    RESTATE_DEPLOYMENT_FINALIZER,
 };
 use crate::telemetry;
 use crate::{Error, Result};
@@ -34,7 +35,9 @@ use crate::{Error, Result};
 // Import our reconcilers
 use crate::controllers::restatedeployment::reconcilers;
 
-use super::reconcilers::replicaset::RESTATE_REMOVE_VERSION_AT_ANNOTATION;
+use super::reconcilers::replicaset::{
+    POD_TEMPLATE_HASH_LABEL, RESTATE_POD_TEMPLATE_ANNOTATION, RESTATE_REMOVE_VERSION_AT_ANNOTATION,
+};
 
 pub(super) struct Context {
     /// Kubernetes client
@@ -62,25 +65,29 @@ async fn reconcile(rs: Arc<RestateDeployment>, ctx: Arc<Context>) -> Result<Acti
     if let Some(trace_id) = telemetry::get_trace_id() {
         Span::current().record("trace_id", field::display(&trace_id));
     }
-    let recorder = ctx
-        .diagnostics
-        .read()
-        .await
-        .recorder(ctx.client.clone(), rs.as_ref());
+    let recorder = ctx.diagnostics.read().await.recorder(ctx.client.clone());
     let _timer = ctx.metrics.count_and_measure::<RestateDeployment>();
     ctx.diagnostics.write().await.last_event = Utc::now();
-    let services_api: Api<RestateDeployment> =
-        Api::namespaced(ctx.client.clone(), rs.namespace().as_ref().unwrap());
 
-    info!("Reconciling RestateDeployment \"{}\"", rs.name_any());
+    let namespace = match rs.metadata.namespace.as_deref() {
+        Some("") | None => "default",
+        Some(ns) => ns,
+    };
+
+    let services_api: Api<RestateDeployment> = Api::namespaced(ctx.client.clone(), namespace);
+
+    info!(
+        "Reconciling RestateDeployment {} in namespace {namespace}",
+        rs.name_any(),
+    );
     match finalizer(
         &services_api,
         RESTATE_DEPLOYMENT_FINALIZER,
         rs.clone(),
         |event| async {
             match event {
-                Finalizer::Apply(rs) => rs.reconcile(ctx.clone()).await,
-                Finalizer::Cleanup(rs) => rs.cleanup(ctx.clone()).await,
+                Finalizer::Apply(rs) => rs.reconcile(ctx.clone(), namespace).await,
+                Finalizer::Cleanup(rs) => rs.cleanup(ctx.clone(), namespace).await,
             }
         },
     )
@@ -91,13 +98,16 @@ async fn reconcile(rs: Arc<RestateDeployment>, ctx: Arc<Context>) -> Result<Acti
             warn!("reconcile failed: {:?}", err);
 
             recorder
-                .publish(Event {
-                    type_: EventType::Warning,
-                    reason: "FailedReconcile".into(),
-                    note: Some(err.to_string()),
-                    action: "Reconcile".into(),
-                    secondary: None,
-                })
+                .publish(
+                    &Event {
+                        type_: EventType::Warning,
+                        reason: "FailedReconcile".into(),
+                        note: Some(err.to_string()),
+                        action: "Reconcile".into(),
+                        secondary: None,
+                    },
+                    &rs.object_ref(&()),
+                )
                 .await?;
 
             let err = Error::FinalizerError(Box::new(err));
@@ -107,20 +117,18 @@ async fn reconcile(rs: Arc<RestateDeployment>, ctx: Arc<Context>) -> Result<Acti
     }
 }
 
-fn error_policy<K, C>(_rs: Arc<K>, _error: &Error, _ctx: C) -> Action {
-    Action::requeue(Duration::from_secs(30))
+fn error_policy<K, C>(_rs: Arc<K>, error: &Error, _ctx: C) -> Action {
+    match error {
+        Error::HashCollision => Action::requeue(Duration::ZERO),
+        _ => Action::requeue(Duration::from_secs(30)),
+    }
 }
 
 impl RestateDeployment {
     // Reconcile (for non-finalizer related changes)
-    async fn reconcile(&self, ctx: Arc<Context>) -> Result<Action> {
-        let namespace = match self.metadata.namespace.as_deref() {
-            Some("") | None => "default",
-            Some(ns) => ns,
-        };
-
+    async fn reconcile(&self, ctx: Arc<Context>, namespace: &str) -> Result<Action> {
         let rsc_api: Api<RestateCluster> = Api::all(ctx.client.clone());
-        let rss_api = Api::<RestateDeployment>::all(ctx.client.clone());
+        let rsd_api = Api::<RestateDeployment>::namespaced(ctx.client.clone(), namespace);
         let rs_api = Api::<ReplicaSet>::namespaced(ctx.client.clone(), namespace);
         let svc_api = Api::<Service>::namespaced(ctx.client.clone(), namespace);
 
@@ -153,20 +161,103 @@ impl RestateDeployment {
             });
         }
 
-        // Generate a hash for the pod template
-        let hash = reconcilers::replicaset::generate_pod_template_hash(self);
+        let pod_template_annotation = reconcilers::replicaset::pod_template_annotation(self);
 
-        let versioned_name = format!("{}-{}", self.name_any(), hash);
+        // Generate a hash for the pod template
+        let hash = reconcilers::replicaset::generate_pod_template_hash(
+            &pod_template_annotation,
+            self.status.as_ref().and_then(|s| s.collision_count),
+        );
+        let deployment_name = self.name_any();
+        let versioned_name = format!("{deployment_name}-{hash}");
+
+        let replicaset_selector = match &self.spec.selector.match_labels {
+            None => BTreeMap::from([(POD_TEMPLATE_HASH_LABEL.to_owned(), hash.to_owned())]),
+            Some(match_labels) => {
+                let mut match_labels = match_labels.clone();
+                match_labels.insert(POD_TEMPLATE_HASH_LABEL.to_owned(), hash.to_owned());
+                match_labels
+            }
+        };
 
         // Create/update the ReplicaSet for this version
-        let (replicaset, replicaset_selector) = reconcilers::replicaset::reconcile_replicaset(
+        let reconcile_result = reconcilers::replicaset::reconcile_replicaset(
             &rs_api,
             self,
             namespace,
             &versioned_name,
+            replicaset_selector.clone(),
             &hash,
+            &pod_template_annotation,
         )
-        .await?;
+        .await;
+
+        let replicaset = match reconcile_result {
+            Ok(replicaset) => replicaset,
+            Err(Error::KubeError(kube::Error::Api(err))) if err.reason == "AlreadyExists" => {
+                let existing_replicaset = rs_api.get(&versioned_name).await?;
+
+                let controller = existing_replicaset
+                    .metadata
+                    .owner_references
+                    .as_ref()
+                    .and_then(|r| r.first());
+
+                let existing_pod_template_annotation = existing_replicaset
+                    .annotations()
+                    .get(RESTATE_POD_TEMPLATE_ANNOTATION);
+
+                let my_uid = self.uid().expect("RestateDeployment to have a uid");
+
+                if controller.as_ref().map(|c| c.uid.as_str()) == Some(my_uid.as_str())
+                    && existing_pod_template_annotation == Some(&pod_template_annotation)
+                {
+                    debug!(
+                        "Found an existing ReplicaSet {versioned_name} in namespace {namespace}, ensuring its scaled to match the deployment",
+                    );
+
+                    // the replicaset already exists, ensure its scaled appropriately
+                    let params: PatchParams = PatchParams::apply("restate-operator");
+                    rs_api
+                        .patch_scale(
+                            &versioned_name,
+                            &params,
+                            &Patch::Merge(
+                                serde_json::json!({"spec": { "replicas": self.spec.replicas }}),
+                            ),
+                        )
+                        .await?;
+
+                    existing_replicaset
+                } else {
+                    debug!(
+                        "Found a hash collision ({versioned_name}) for deployment {deployment_name} in namespace {namespace}, incrementing collision count",
+                    );
+
+                    let collision_count = self
+                        .status
+                        .as_ref()
+                        .and_then(|s| s.collision_count)
+                        .unwrap_or(0);
+
+                    let new_status = json!({
+                        "apiVersion": RestateDeployment::api_version(&()),
+                        "kind": RestateDeployment::kind(&()),
+                        "status": {
+                            "collision_count": collision_count + 1,
+                        }
+                    });
+
+                    let ps = PatchParams::apply("restate-operator");
+                    rsd_api
+                        .patch_status(&deployment_name, &ps, &Patch::Merge(new_status))
+                        .await?;
+
+                    return Err(Error::HashCollision);
+                }
+            }
+            Err(err) => return Err(err),
+        };
 
         // Create/update the Service for this version
         reconcilers::service::reconcile_service(
@@ -178,18 +269,26 @@ impl RestateDeployment {
         )
         .await?;
 
-        let admin_endpoint = format!("http://restate.{}.svc.cluster.local:9070", cluster_name);
+        let admin_endpoint = format!("http://restate.{cluster_name}.svc.cluster.local:9070");
         let service_endpoint =
-            format!("http://{versioned_name}.{namespace}.svc.cluster.local:9080");
+            format!("http://{versioned_name}.{namespace}.svc.cluster.local:9080/");
 
-        let active_endpoints = self.list_active_endpoints(&admin_endpoint).await?;
+        let mut active_endpoints = self.list_active_endpoints(&admin_endpoint).await?;
 
-        // Register with Restate cluster using the service URL
-        Self::register_service_with_restate(&ctx.http_client, &admin_endpoint, &service_endpoint)
+        if !active_endpoints.contains(&service_endpoint) {
+            // Register the latest version with Restate cluster using the service URL
+            Self::register_service_with_restate(
+                &ctx.http_client,
+                &admin_endpoint,
+                &service_endpoint,
+            )
             .await?;
+            // if registration succeeded, treat this as an active endpoint
+            active_endpoints.insert(service_endpoint.clone());
+        }
 
         // Clean up old ReplicaSets that are no longer needed
-        let (_active_count, _next_removal) = reconcilers::replicaset::cleanup_old_replicasets(
+        let (_active_count, next_removal) = reconcilers::replicaset::cleanup_old_replicasets(
             namespace,
             &rs_api,
             self,
@@ -198,17 +297,20 @@ impl RestateDeployment {
         .await?;
 
         // Update status based on ReplicaSets
-        self.update_status_with_replicasets(&rss_api, &rs_api, replicaset)
+        self.update_status_with_replicasets(&rsd_api, &rs_api, replicaset)
             .await?;
 
-        // If no events were received, check back every 5 minutes
-        Ok(Action::requeue(Duration::from_secs(5 * 60)))
+        let next_requeue = match next_removal {
+            Some(next_removal) if next_removal < Duration::from_secs(5 * 60) => next_removal,
+            _ => Duration::from_secs(5 * 60),
+        };
+        Ok(Action::requeue(next_requeue))
     }
 
     /// Update status with information from all ReplicaSets
     async fn update_status_with_replicasets(
         &self,
-        rss_api: &Api<RestateDeployment>,
+        rsd_api: &Api<RestateDeployment>,
         rs_api: &Api<ReplicaSet>,
         current_replicaset: ReplicaSet,
     ) -> Result<()> {
@@ -272,7 +374,12 @@ impl RestateDeployment {
         let status_replicas = current_replicaset
             .status
             .as_ref()
-            .map(|spec| spec.replicas)
+            .map(|s| s.replicas)
+            .unwrap_or(0);
+        let ready_replicas = current_replicaset
+            .status
+            .as_ref()
+            .and_then(|s| s.ready_replicas)
             .unwrap_or(0);
         let available_replicas = current_replicaset
             .status
@@ -319,24 +426,28 @@ impl RestateDeployment {
         let desired_replicas = self.spec.replicas.unwrap_or(1);
         let unavailable_replicas = desired_replicas - available_replicas;
 
-        // Create the status update
-        let new_status = Patch::Apply(json!({
-            "apiVersion": "restate.dev/v1",
-            "kind": "RestateDeployment",
-            "status": RestateDeploymentStatus {
-                replicas: Some(status_replicas),
-                available_replicas: Some(available_replicas),
-                unavailable_replicas: Some(if unavailable_replicas < 0 { 0 } else { unavailable_replicas }),
-                updated_replicas: Some(status_replicas),
-                observed_generation: Some(self.metadata.generation.unwrap_or(0)),
-                versions: Some(versions),
-                conditions: Some(vec![ready_condition, progressing_condition]),
-            }
-        }));
+        let selector: Option<kube::core::Selector> = self.spec.selector.clone().try_into().ok();
 
-        let ps = PatchParams::apply("restate-operator").force();
-        let _o = rss_api
-            .patch_status(&self.name_any(), &ps, &new_status)
+        // Create the status update
+        let new_status = json!({
+            "apiVersion": RestateDeployment::api_version(&()),
+            "kind": RestateDeployment::kind(&()),
+            "status": {
+                "replicas": Some(status_replicas),
+                "readyReplicas": Some(ready_replicas),
+                "availableReplicas": Some(available_replicas),
+                "unavailableReplicas": Some(if unavailable_replicas < 0 { 0 } else { unavailable_replicas }),
+                "updatedReplicas": Some(status_replicas),
+                "observedGeneration": Some(self.metadata.generation.unwrap_or(0)),
+                "versions": Some(versions),
+                "conditions": Some(vec![ready_condition, progressing_condition]),
+                "labelSelector": selector.as_ref().map(ToString::to_string),
+            }
+        });
+
+        let ps = PatchParams::apply("restate-operator");
+        let _o = rsd_api
+            .patch_status(&self.name_any(), &ps, &Patch::Merge(new_status))
             .await?;
 
         Ok(())
@@ -348,10 +459,10 @@ impl RestateDeployment {
         admin_endpoint: &str,
         service_endpoint: &str,
     ) -> Result<()> {
-        info!("Registering endpoint '{service_endpoint}' to Restate at '{admin_endpoint}'",);
+        debug!("Registering endpoint '{service_endpoint}' to Restate at '{admin_endpoint}'",);
 
         let _ = client
-            .post(format!("{}/deployments/register", admin_endpoint))
+            .post(&format!("{}/deployments", admin_endpoint))
             .json(&serde_json::json!({
                 "uri": service_endpoint,
             }))
@@ -387,7 +498,7 @@ impl RestateDeployment {
 
         let client = reqwest::Client::new();
         let response: DeploymentQueryResult = client
-            .post(format!("{}/query", admin_endpoint))
+            .post(&format!("{}/query", admin_endpoint))
             .header(reqwest::header::ACCEPT, "application/json")
             .json(&serde_json::json!({
                 "query": sql_query
@@ -401,31 +512,25 @@ impl RestateDeployment {
             .await
             .map_err(Error::AdminCallFailed)?;
 
-        Ok(response.rows.into_iter().map(|row| row.endpoint).collect())
+        return Ok(response.rows.into_iter().map(|row| row.endpoint).collect());
     }
 
     // Finalizer cleanup (the object was deleted, ensure nothing is orphaned)
-    async fn cleanup(&self, ctx: Arc<Context>) -> Result<Action> {
-        let recorder = ctx
-            .diagnostics
-            .read()
-            .await
-            .recorder(ctx.client.clone(), self);
+    async fn cleanup(&self, ctx: Arc<Context>, namespace: &str) -> Result<Action> {
+        let recorder = ctx.diagnostics.read().await.recorder(ctx.client.clone());
 
         recorder
-            .publish(Event {
-                type_: EventType::Normal,
-                reason: "DeleteRequested".into(),
-                note: Some(format!("Delete `{}`", self.name_any())),
-                action: "Deleting".into(),
-                secondary: None,
-            })
+            .publish(
+                &Event {
+                    type_: EventType::Normal,
+                    reason: "DeleteRequested".into(),
+                    note: Some(format!("Delete `{}`", self.name_any())),
+                    action: "Deleting".into(),
+                    secondary: None,
+                },
+                &self.object_ref(&()),
+            )
             .await?;
-
-        let namespace = match self.metadata.namespace.as_deref() {
-            Some("") | None => "default",
-            Some(ns) => ns,
-        };
 
         let rsc_api = Api::<RestateCluster>::all(ctx.client.clone());
         let rs_api = Api::<ReplicaSet>::namespaced(ctx.client.clone(), namespace);
@@ -460,7 +565,8 @@ impl RestateDeployment {
         if active_count > 0 {
             info!(
                 "Cannot process deletion of RestateDeployment '{}' from Restate as there are {} active deployments that rely on it",
-                self.name_any(), active_count
+                self.name_any(),
+                active_count
             );
             return Ok(Action::requeue(Duration::from_secs(60 * 5)));
         }
@@ -479,25 +585,25 @@ impl RestateDeployment {
 
 /// Run the RestateDeployment controller
 pub async fn run(client: Client, metrics: Metrics, state: State) {
-    let services: Api<RestateDeployment> = Api::all(client.clone());
-    let deployments: Api<Deployment> = Api::all(client.clone());
+    let deployments: Api<RestateDeployment> = Api::all(client.clone());
     let replicasets: Api<ReplicaSet> = Api::all(client.clone());
-    let kube_services: Api<Service> = Api::all(client.clone());
+    let services: Api<Service> = Api::all(client.clone());
 
     if let Err(e) = services.list(&ListParams::default().limit(1)).await {
         error!("RestateDeployment is not queryable; {e:?}. Is the CRD installed?");
         std::process::exit(1);
     }
 
-    // Common label selector for all resources
-    let config = Config::default().labels("app.kubernetes.io/managed-by=restate-operator");
+    // all resources we create have this label
+    let cfg = Config::default().labels("app.kubernetes.io/managed-by=restate-operator");
+    // but restatedeployments themselves dont
+    let rsd_cfg = Config::default();
 
     // Create a controller for RestateDeployment
-    controller::Controller::new(services, config.clone())
+    controller::Controller::new(deployments, rsd_cfg)
         .shutdown_on_signal()
-        .owns(deployments, config.clone())
-        .owns(replicasets, config.clone())
-        .owns(kube_services, config.clone())
+        .owns(replicasets, cfg.clone())
+        .owns(services, cfg.clone())
         .run(
             reconcile,
             error_policy,

@@ -66,11 +66,11 @@ async fn main() -> anyhow::Result<()> {
         metric.clone(),
         state.clone(),
     );
-    let service_controller =
+    let deployment_controller =
         restate_operator::controllers::restatedeployment::run(client, metric, state.clone());
 
     tokio::pin!(cluster_controller);
-    tokio::pin!(service_controller);
+    tokio::pin!(deployment_controller);
 
     // Start web server
     let server = HttpServer::new(move || {
@@ -88,6 +88,6 @@ async fn main() -> anyhow::Result<()> {
     tokio::pin!(server);
 
     // Both runtimes implements graceful shutdown, so poll until both are done
-    tokio::join!(cluster_controller, service_controller, server).2?;
+    tokio::join!(cluster_controller, deployment_controller, server).2?;
     Ok(())
 }

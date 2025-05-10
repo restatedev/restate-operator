@@ -277,7 +277,7 @@ fn restate_statefulset(
         Volume {
             name: "config".into(),
             config_map: Some(ConfigMapVolumeSource {
-                name: Some(cm_name),
+                name: cm_name,
                 ..Default::default()
             }),
             ..Default::default()

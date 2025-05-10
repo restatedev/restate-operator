@@ -1,6 +1,6 @@
 /// RestateCluster describes the configuration and status of a Restate cluster.
 ///
-/// This module was generated from the CustomResourceDefinition at <file:./crd/crd.yaml>.
+/// This module was generated from the CustomResourceDefinition at <file:./crd/restateclusters.yaml>.
 module dev.restate.v1.RestateCluster
 
 extends "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/K8sResource.pkl"

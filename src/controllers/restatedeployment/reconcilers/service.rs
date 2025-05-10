@@ -82,7 +82,7 @@ pub async fn reconcile_service(
     };
 
     // Apply the service
-    info!("Creating/updating Service {versioned_name} in namespace {namespace}",);
+    debug!("Applying Service {versioned_name} in namespace {namespace}",);
 
     apply_service(namespace, svc_api, &service).await?;
 

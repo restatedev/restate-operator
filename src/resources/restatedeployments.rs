@@ -21,10 +21,15 @@ pub static RESTATE_DEPLOYMENT_FINALIZER: &str = "deployments.restate.dev";
     version = "v1",
     schema = "manual",
     namespaced,
-    printcolumn = r#"{"name":"Ready", "type":"string", "jsonPath":".status.conditions[?(@.type==\"Ready\")].status"}"#,
-    printcolumn = r#"{"name":"UpToDate", "type":"integer", "jsonPath":".status.updatedReplicas"}"#,
+    scale = r#"{"specReplicasPath": ".spec.replicas", "statusReplicasPath": ".status.replicas"}"#,
+    printcolumn = r#"{"name":"Desired", "type":"integer", "jsonPath":".spec.replicas"}"#,
+    printcolumn = r#"{"name":"Up-To-Date", "type":"integer", "jsonPath":".status.updatedReplicas"}"#,
+    printcolumn = r#"{"name":"Ready", "type":"integer", "jsonPath":".status.readyReplicas"}"#,
     printcolumn = r#"{"name":"Available", "type":"integer", "jsonPath":".status.availableReplicas"}"#,
-    printcolumn = r#"{"name":"Age", "type":"date", "jsonPath":".metadata.creationTimestamp"}"#
+    printcolumn = r#"{"name":"Age", "type":"date", "jsonPath":".metadata.creationTimestamp"}"#,
+    printcolumn = r#"{"name":"Containers", "type":"string", "jsonPath":".spec.template.spec.containers[*].name", "priority": 1}"#,
+    printcolumn = r#"{"name":"Images", "type":"string", "jsonPath":".spec.template.spec.containers[*].image", "priority": 1}"#,
+    printcolumn = r#"{"name":"Selector", "type":"string", "jsonPath":".status.labelSelector", "priority": 1}"#
 )]
 #[kube(status = "RestateDeploymentStatus", shortname = "rsd")]
 #[serde(rename_all = "camelCase")]
@@ -56,7 +61,7 @@ impl schemars::JsonSchema for RestateDeployment {
     fn schema_id() -> Cow<'static, str> {
         "restate_operator::RestateDeployment::RestateDeployment".into()
     }
-    fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> Schema {
+    fn json_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> Schema {
         {
             let mut schema_object = SchemaObject {
                 instance_type: Some(
@@ -92,13 +97,13 @@ impl schemars::JsonSchema for RestateDeployment {
 
             object_validation.properties.insert(
                 "spec".to_owned(),
-                gen.subschema_for::<RestateDeploymentSpec>(),
+                generator.subschema_for::<RestateDeploymentSpec>(),
             );
             object_validation.required.insert("spec".to_owned());
 
             object_validation.properties.insert(
                 "status".to_owned(),
-                gen.subschema_for::<Option<RestateDeploymentStatus>>(),
+                generator.subschema_for::<Option<RestateDeploymentStatus>>(),
             );
             Schema::Object(schema_object)
         }
@@ -130,15 +135,22 @@ pub struct RestateEndpoint {
 /// Status of the RestateDeployment
 /// This is set and managed automatically by the controller
 #[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct RestateDeploymentStatus {
     /// Total number of non-terminated pods targeted by this RestateDeployment
     pub replicas: Option<i32>,
+
+    /// Total number of ready pods
+    pub ready_replicas: Option<i32>,
 
     /// Total number of available pods (ready for at least minReadySeconds)
     pub available_replicas: Option<i32>,
 
     /// Total number of unavailable pods
     pub unavailable_replicas: Option<i32>,
+
+    /// Count of hash collisions for the Deployment. The Deployment controller uses this field as a collision avoidance mechanism when it needs to create the name for the newest ReplicaSet.
+    pub collision_count: Option<i32>,
 
     /// Total number of pods that have the desired template spec
     pub updated_replicas: Option<i32>,
@@ -151,6 +163,9 @@ pub struct RestateDeploymentStatus {
 
     /// Represents the latest available observations of current state
     pub conditions: Option<Vec<RestateDeploymentCondition>>,
+
+    // The label selector of the deployment as a string, for `kubectl get rsd -o wide`
+    pub label_selector: Option<String>,
 }
 
 /// Information about active versions and their resources

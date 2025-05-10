@@ -24,7 +24,8 @@ use kube::{
         events::{Event, EventType},
         finalizer::{finalizer, Event as Finalizer},
         watcher::Config,
-    }, Resource,
+    },
+    Resource,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -97,11 +98,7 @@ async fn reconcile(rc: Arc<RestateCluster>, ctx: Arc<Context>) -> Result<Action>
     if let Some(trace_id) = telemetry::get_trace_id() {
         Span::current().record("trace_id", field::display(&trace_id));
     }
-    let recorder = ctx
-        .diagnostics
-        .read()
-        .await
-        .recorder(ctx.client.clone(), rc.as_ref());
+    let recorder = ctx.diagnostics.read().await.recorder(ctx.client.clone());
     let _timer = ctx.metrics.count_and_measure::<RestateCluster>();
     ctx.diagnostics.write().await.last_event = Utc::now();
     let rcs: Api<RestateCluster> = Api::all(ctx.client.clone());
@@ -120,13 +117,16 @@ async fn reconcile(rc: Arc<RestateCluster>, ctx: Arc<Context>) -> Result<Action>
             warn!("reconcile failed: {:?}", err);
 
             recorder
-                .publish(Event {
-                    type_: EventType::Warning,
-                    reason: "FailedReconcile".into(),
-                    note: Some(err.to_string()),
-                    action: "Reconcile".into(),
-                    secondary: None,
-                })
+                .publish(
+                    &Event {
+                        type_: EventType::Warning,
+                        reason: "FailedReconcile".into(),
+                        note: Some(err.to_string()),
+                        action: "Reconcile".into(),
+                        secondary: None,
+                    },
+                    &rc.object_ref(&()),
+                )
                 .await?;
 
             let err = Error::FinalizerError(Box::new(err));
@@ -297,20 +297,19 @@ impl RestateCluster {
 
     // Finalizer cleanup (the object was deleted, ensure nothing is orphaned)
     async fn cleanup(&self, ctx: Arc<Context>) -> Result<Action> {
-        let recorder = ctx
-            .diagnostics
-            .read()
-            .await
-            .recorder(ctx.client.clone(), self);
+        let recorder = ctx.diagnostics.read().await.recorder(ctx.client.clone());
         // RestateCluster doesn't have any real cleanup, so we just publish an event
         recorder
-            .publish(Event {
-                type_: EventType::Normal,
-                reason: "DeleteRequested".into(),
-                note: Some(format!("Delete `{}`", self.name_any())),
-                action: "Deleting".into(),
-                secondary: None,
-            })
+            .publish(
+                &Event {
+                    type_: EventType::Normal,
+                    reason: "DeleteRequested".into(),
+                    note: Some(format!("Delete `{}`", self.name_any())),
+                    action: "Deleting".into(),
+                    secondary: None,
+                },
+                &self.object_ref(&()),
+            )
             .await?;
         Ok(Action::await_change())
     }
