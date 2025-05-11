@@ -14,6 +14,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::{APIGroup, ObjectMeta};
 
 use kube::core::object::HasStatus;
 use kube::core::PartialObjectMeta;
+use kube::runtime::events::Recorder;
 use kube::runtime::reflector::{ObjectRef, Store};
 use kube::runtime::{metadata_watcher, reflector, watcher, Predicate, WatchStreamExt};
 use kube::{
@@ -50,14 +51,21 @@ use super::reconcilers::signing_key::reconcile_signing_key;
 #[derive(Clone)]
 pub(super) struct Context {
     /// Kubernetes client
-    // Store for pvc metadata
     pub client: Client,
+    /// Kubernetes event recorder
+    pub recorder: Recorder,
     // Store for pvc metadata
     pub pvc_meta_store: Store<PartialObjectMeta<PersistentVolumeClaim>>,
     // Store for statefulsets
     pub ss_store: Store<StatefulSet>,
     // If set, watch PodIdentityAssociation resources, and if requested create them against this cluster
     pub aws_pod_identity_association_cluster: Option<String>,
+    // Our namespace, needed to support the case where restate clusters need to be reached by the operator
+    pub operator_namespace: Option<String>,
+    // The name of a label that can select the operator, needed to support the case where restate clusters need to be reached by the operator
+    pub operator_label_name: Option<String>,
+    // The value of the label named operator_label_name that will select the operator, needed to support the case where restate clusters need to be reached by the operator
+    pub operator_label_value: Option<String>,
     // Whether the EKS SecurityGroupPolicy CRD is installed
     pub security_group_policy_installed: bool,
     // Whether the SecretProviderClass CRD is installed
@@ -79,12 +87,16 @@ impl Context {
         secret_provider_class_installed: bool,
     ) -> Arc<Context> {
         Arc::new(Context {
-            client,
+            client: client.clone(),
+            recorder: Recorder::new(client, "restate-operator".into()),
             pvc_meta_store,
             ss_store,
             aws_pod_identity_association_cluster: state
                 .aws_pod_identity_association_cluster
                 .clone(),
+            operator_namespace: state.operator_namespace.clone(),
+            operator_label_name: state.operator_label_name.clone(),
+            operator_label_value: state.operator_label_value.clone(),
             security_group_policy_installed,
             secret_provider_class_installed,
             diagnostics: state.diagnostics.clone(),
@@ -98,7 +110,6 @@ async fn reconcile(rc: Arc<RestateCluster>, ctx: Arc<Context>) -> Result<Action>
     if let Some(trace_id) = telemetry::get_trace_id() {
         Span::current().record("trace_id", field::display(&trace_id));
     }
-    let recorder = ctx.diagnostics.read().await.recorder(ctx.client.clone());
     let _timer = ctx.metrics.count_and_measure::<RestateCluster>();
     ctx.diagnostics.write().await.last_event = Utc::now();
     let rcs: Api<RestateCluster> = Api::all(ctx.client.clone());
@@ -116,7 +127,7 @@ async fn reconcile(rc: Arc<RestateCluster>, ctx: Arc<Context>) -> Result<Action>
         Err(err) => {
             warn!("reconcile failed: {:?}", err);
 
-            recorder
+            ctx.recorder
                 .publish(
                     &Event {
                         type_: EventType::Warning,
@@ -178,13 +189,18 @@ impl RestateCluster {
         .await?;
 
         reconcile_network_policies(
-            ctx.client.clone(),
+            &ctx,
             name,
             &base_metadata,
             self.spec
                 .security
                 .as_ref()
                 .and_then(|s| s.network_peers.as_ref()),
+            self.spec
+                .security
+                .as_ref()
+                .and_then(|s| s.allow_operator_access_to_admin)
+                .unwrap_or(true),
             self.spec
                 .security
                 .as_ref()
@@ -297,9 +313,8 @@ impl RestateCluster {
 
     // Finalizer cleanup (the object was deleted, ensure nothing is orphaned)
     async fn cleanup(&self, ctx: Arc<Context>) -> Result<Action> {
-        let recorder = ctx.diagnostics.read().await.recorder(ctx.client.clone());
         // RestateCluster doesn't have any real cleanup, so we just publish an event
-        recorder
+        ctx.recorder
             .publish(
                 &Event {
                     type_: EventType::Normal,

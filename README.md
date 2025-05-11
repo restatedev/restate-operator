@@ -68,17 +68,18 @@ For the full schema as a [Pkl](https://pkl-lang.org/) template see [`crd/Restate
 
 ### Creating a Deployment
 ```yaml
-apiVersion: restate.dev/v1
+apiVersion: restate.dev/v1beta1
 kind: RestateDeployment
 metadata:
   name: my-deployment
 spec:
   replicas: 1
+  restate:
+    register:
+      cluster: restate-test
   selector:
     matchLabels:
       app: my-deployment
-  restate:
-    clusterRef: restate-test
   template:
     metadata:
       labels:
@@ -86,11 +87,13 @@ spec:
     spec:
       containers:
       - name: app
-        image: nginx:1.14.2
+        image: my-restate-service-image:main
         ports:
-        - containerPort: 9080
-          name: restate
+        - name: restate
+          containerPort: 9080
 ```
+
+For the full schema as a [Pkl](https://pkl-lang.org/) template see [`crd/RestateDeployment.pkl`](./crd/RestateCluster.pkl).
 
 
 ### EKS Pod Identity

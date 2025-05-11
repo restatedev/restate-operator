@@ -1,4 +1,5 @@
 use controllers::restatecluster::InvalidSigningKeyError;
+use k8s_openapi::api::apps::v1::ReplicaSetStatus;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -25,11 +26,12 @@ pub enum Error {
         requeue_after: Option<Duration>,
     },
 
-    #[error("Service is not yet Ready: {message}")]
-    ServiceNotReady {
+    #[error("RestateDeployment is not yet Ready: {message}")]
+    DeploymentNotReady {
         message: String,
         reason: String,
         requeue_after: Option<Duration>,
+        replica_set_status: Option<ReplicaSetStatus>,
     },
 
     #[error("Invalid Restate configuration: {0}")]
@@ -41,8 +43,14 @@ pub enum Error {
     #[error("Failed to make Restate admin API call: {0}")]
     AdminCallFailed(reqwest::Error),
 
-    #[error("Encounter a ReplicaSet hash collision, will retry with a new template hash")]
+    #[error("Encountered a ReplicaSet hash collision, will retry with a new template hash")]
     HashCollision,
+
+    #[error("This RestateDeployment is backing active versions in Restate. If you want to delete the RestateDeployment, either register new endpoints for the relevant services or delete the Restate versions.")]
+    DeploymentInUse,
+
+    #[error("This RestateDeployment is backing recently-active versions in Restate. It will be removed after the drain delay period.")]
+    DeploymentDraining { requeue_after: Option<Duration> },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -55,11 +63,13 @@ impl Error {
             Error::FinalizerError(_) => "FinalizerError",
             Error::NameConflict => "NameConflict",
             Error::NotReady { .. } => "NotReady",
-            Error::ServiceNotReady { .. } => "ServiceNotReady",
+            Error::DeploymentNotReady { .. } => "ServiceNotReady",
             Error::InvalidRestateConfig(_) => "InvalidRestateConfig",
             Error::InvalidSigningKeyError(_) => "InvalidSigningKeyError",
             Error::AdminCallFailed(_) => "AdminCallFailed",
             Error::HashCollision => "HashCollision",
+            Error::DeploymentInUse => "DeploymentInUse",
+            Error::DeploymentDraining { .. } => "DeploymentDraining",
         }
     }
 }

@@ -1,10 +1,6 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use kube::{
-    runtime::events::{Recorder, Reporter},
-    Client,
-};
 use serde::Serialize;
 use tokio::sync::RwLock;
 
@@ -16,22 +12,13 @@ pub mod restatedeployment;
 pub struct Diagnostics {
     #[serde(deserialize_with = "from_ts")]
     pub last_event: DateTime<Utc>,
-    #[serde(skip)]
-    pub reporter: Reporter,
 }
 
 impl Default for Diagnostics {
     fn default() -> Self {
         Self {
             last_event: Utc::now(),
-            reporter: "restate-operator".into(),
         }
-    }
-}
-
-impl Diagnostics {
-    fn recorder(&self, client: Client) -> Recorder {
-        Recorder::new(client, self.reporter.clone())
     }
 }
 
@@ -44,6 +31,13 @@ pub struct State {
     pub registry: prometheus::Registry,
     /// If set, watch AWS PodIdentityAssociation resources, and if requested create them against this cluster
     aws_pod_identity_association_cluster: Option<String>,
+
+    /// Our namespace, needed to support the case where restate clusters need to be reached by the operator
+    operator_namespace: Option<String>,
+    /// The name of a label that can select the operator, needed to support the case where restate clusters need to be reached by the operator
+    operator_label_name: Option<String>,
+    /// The value of the label named operator_label_name that will select the operator, needed to support the case where restate clusters need to be reached by the operator
+    operator_label_value: Option<String>,
 }
 
 /// State wrapper around the controller outputs for the web server
@@ -64,6 +58,27 @@ impl State {
     ) -> Self {
         Self {
             aws_pod_identity_association_cluster,
+            ..self
+        }
+    }
+
+    pub fn with_operator_namespace(self, operator_namespace: Option<String>) -> Self {
+        Self {
+            operator_namespace,
+            ..self
+        }
+    }
+
+    pub fn with_operator_label_name(self, operator_label_name: Option<String>) -> Self {
+        Self {
+            operator_label_name,
+            ..self
+        }
+    }
+
+    pub fn with_operator_label_value(self, operator_label_value: Option<String>) -> Self {
+        Self {
+            operator_label_value,
             ..self
         }
     }

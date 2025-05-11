@@ -47,10 +47,15 @@ _target-option := if _resolved_target != "" { "--target " + _resolved_target } e
 
 generate:
   cargo run --bin cluster_crdgen | grep -vF 'categories: []' > crd/restateclusters.yaml
-  cargo run --bin service_crdgen | grep -vF 'categories: []' > crd/restatedeployments.yaml
+  cargo run --bin deployment_crdgen | grep -vF 'categories: []' > crd/restatedeployments.yaml
 
 generate-pkl:
   cargo run --bin cluster_schemagen | pkl eval crd/pklgen/generate-cluster.pkl -m crd
+  cargo run --bin deployment_schemagen | pkl eval crd/pklgen/generate-deployment.pkl -m crd
+
+generate-examples:
+  pkl eval crd/examples/restatedeployment.pkl > crd/examples/restatedeployment.yaml
+  pkl eval crd/examples/restatecluster.pkl > crd/examples/restatecluster.yaml
 
 install-crds: generate
   kubectl create -f crd/restateclusters.yaml

@@ -1,94 +1,83 @@
-use std::collections::{BTreeMap, HashSet};
-use std::time::Duration;
+use std::collections::{BTreeMap, HashMap};
 
-use k8s_openapi::api::apps::v1::{ReplicaSet, ReplicaSetSpec};
+use k8s_openapi::api::apps::v1::ReplicaSet;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
 
-use kube::api::{Api, Patch, PatchParams, PostParams};
+use kube::api::{
+    Api, ApiResource, DynamicObject, PartialObjectMetaExt, Patch, PatchParams, PostParams,
+};
+use kube::core::subresource::Scale;
+use kube::runtime::reflector::Store;
 use kube::{Resource, ResourceExt};
+use serde_json::json;
 use tracing::*;
 
+use crate::controllers::restatedeployment::controller::{
+    APP_MANAGED_BY_LABEL, OWNED_BY_LABEL, RESTATE_DEPLOYMENT_ID_ANNOTATION,
+};
 use crate::resources::restatedeployments::RestateDeployment;
-use crate::Result;
+use crate::{Error, Result};
 
-// Label keys used to track and identify resources
-const APP_INSTANCE_LABEL: &str = "app.kubernetes.io/instance";
-const APP_NAME_LABEL: &str = "app.kubernetes.io/name";
-const APP_MANAGED_BY_LABEL: &str = "app.kubernetes.io/managed-by";
 pub const POD_TEMPLATE_HASH_LABEL: &str = "pod-template-hash";
-
 pub const RESTATE_POD_TEMPLATE_ANNOTATION: &str = "restate.dev/pod-template";
 pub const RESTATE_REMOVE_VERSION_AT_ANNOTATION: &str = "restate.dev/remove-version-at";
 
 /// Ensure a ReplicaSet exists for the latest RestateDeployment version
 pub async fn reconcile_replicaset(
-    rs_api: &Api<ReplicaSet>,
+    client: &kube::Client,
     rsd: &RestateDeployment,
     namespace: &str,
     versioned_name: &str,
     match_labels: BTreeMap<String, String>,
+    annotations: BTreeMap<String, String>,
     hash: &str,
-    pod_template_annotation: &str,
 ) -> Result<ReplicaSet> {
-    // Create replicaset labels
-    let mut labels = BTreeMap::new();
-    labels.insert(APP_INSTANCE_LABEL.to_string(), rsd.name_any());
-    labels.insert(APP_NAME_LABEL.to_string(), "restate-service".to_string());
-    labels.insert(
-        APP_MANAGED_BY_LABEL.to_string(),
-        "restate-operator".to_string(),
-    );
-    labels.insert(POD_TEMPLATE_HASH_LABEL.to_string(), hash.to_string());
-
-    let mut annotations = BTreeMap::new();
-    annotations.insert(
-        RESTATE_POD_TEMPLATE_ANNOTATION.to_string(),
-        pod_template_annotation.to_string(),
-    );
-
     // Add version and hash to pod template
-    let mut template = rsd.spec.template.clone();
-    let template_labels = template
-        .metadata
-        .get_or_insert(ObjectMeta::default())
+    let mut template_metadata = rsd.spec.template.metadata.clone();
+    let template_labels = template_metadata
+        .get_or_insert_default()
         .labels
         .get_or_insert(BTreeMap::new());
 
     template_labels.insert(POD_TEMPLATE_HASH_LABEL.to_string(), hash.to_string());
 
-    // Create replicaset specification
-    let replicaset_spec = ReplicaSetSpec {
-        replicas: rsd.spec.replicas,
-        selector: LabelSelector {
-            match_expressions: rsd.spec.selector.match_expressions.clone(),
-            match_labels: Some(match_labels.clone()),
-        },
-        template: Some(template),
-        min_ready_seconds: rsd.spec.min_ready_seconds,
-    };
+    // in native deployment controller, replicaset labels always match their template labels.
+    let mut replicaset_labels = template_labels.clone();
+    // but we want to add some extras to make it easier to find replicasets we own
+    replicaset_labels.insert(OWNED_BY_LABEL.to_string(), rsd.name_any());
+    replicaset_labels.insert(
+        APP_MANAGED_BY_LABEL.to_string(),
+        "restate-operator".to_owned(),
+    );
 
     // Create replicaset ownership reference
     let owner_reference = rsd.controller_owner_ref(&()).unwrap();
 
-    // Create replicaset metadata
-    let metadata = ObjectMeta {
-        name: Some(versioned_name.to_owned()),
-        namespace: Some(namespace.to_owned()),
-        labels: Some(labels),
-        annotations: Some(annotations),
-        owner_references: Some(vec![owner_reference]),
-        ..Default::default()
-    };
+    // Create the replicaset - the pod template should be passed through directly so we can't use the proper type
+    let rs_resource = ApiResource::erase::<ReplicaSet>(&());
+    let mut replicaset = DynamicObject::new(versioned_name, &rs_resource).within(namespace);
+    replicaset.metadata.labels = Some(replicaset_labels);
+    // annotations match the owning deployment
+    replicaset.metadata.annotations = Some(annotations);
+    replicaset.metadata.owner_references = Some(vec![owner_reference]);
 
-    // Create the replicaset object
-    let replicaset = ReplicaSet {
-        metadata,
-        spec: Some(replicaset_spec),
-        status: None,
-    };
+    replicaset.data = json!({
+        "spec": {
+            "replicas": rsd.spec.replicas,
+            "selector": LabelSelector {
+                match_expressions: rsd.spec.selector.match_expressions.clone(),
+                match_labels: Some(match_labels.clone()),
+            },
+            "template": {
+                "metadata": template_metadata,
+                "spec": rsd.spec.template.spec,
+            },
+            "minReadySeconds": rsd.spec.min_ready_seconds,
+        }
+    });
 
-    // Create the replicaset
-    let applied_rs = rs_api
+    let rs_api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &rs_resource);
+    let applied_rs: DynamicObject = rs_api
         .create(
             &PostParams {
                 dry_run: false,
@@ -97,6 +86,8 @@ pub async fn reconcile_replicaset(
             &replicaset,
         )
         .await?;
+    let applied_rs: ReplicaSet = serde_json::from_value(serde_json::to_value(applied_rs)?)?;
+
     debug!("Created ReplicaSet {versioned_name} in namespace {namespace}");
 
     Ok(applied_rs)
@@ -132,40 +123,50 @@ fn safe_encode_u32(mut val: u32) -> String {
     const NUMBER_MAP: &[char] = &['4', '5', '6', '7', '8', '9', 'b', 'c', 'd', 'f'];
 
     // 10^10 - 1 > 2^32 - 1
-    let mut buf: Vec<char> = vec!['\0'; 10];
-    let mut curr = buf.len();
-    // read out base 10 values and look them up in the map
-    loop {
+    let mut out = String::with_capacity(10);
+
+    // this gets decimal digits in reverse, because it doesn't really matter.
+    while val > 0 {
         let n = val % 10;
         val = val / 10;
-        curr -= 1;
-        buf[curr] = NUMBER_MAP[n as usize];
-        if val == 0 {
-            break;
-        };
+        out.push(NUMBER_MAP[n as usize]);
     }
 
-    String::from_iter(buf[curr..].into_iter())
+    out
 }
 
 /// Delete ReplicaSets that are no longer needed
 pub async fn cleanup_old_replicasets(
     namespace: &str,
     rs_api: &Api<ReplicaSet>,
+    replicasets_store: &Store<ReplicaSet>,
+    http_client: &reqwest::Client,
+    admin_endpoint: &str,
     rsd: &RestateDeployment,
-    active_endpoints: &HashSet<String>,
-) -> Result<(i32, Option<Duration>)> {
-    // List replicasets with the instance selector
-    let label_selector = format!("{}={}", APP_INSTANCE_LABEL, rsd.name_any());
-    let list_params = kube::api::ListParams::default().labels(&label_selector);
-    let replicaset_list = rs_api.list(&list_params).await?;
+    endpoints: &HashMap<String, bool>,
+) -> Result<(i32, Option<chrono::DateTime<chrono::Utc>>)> {
+    let owner_name = rsd.name_any();
 
-    // Get revision history limit
-    let revision_history_limit = rsd.spec.revision_history_limit.unwrap_or(10);
+    let replicasets_cell = std::cell::Cell::new(Vec::new());
+
+    let _ = replicasets_store.find(|rs| {
+        if rs
+            .labels()
+            .get(OWNED_BY_LABEL)
+            .is_some_and(|o| o == &owner_name)
+        {
+            // for some reason find only takes a Fn, not FnMut.
+            let mut replicasets = replicasets_cell.take();
+            replicasets.push(rs.clone());
+            replicasets_cell.set(replicasets);
+        }
+        false
+    });
+
+    let mut replicasets = replicasets_cell.into_inner();
 
     // Sort replicasets by creation time (newest first)
-    let mut sorted_replicasets = replicaset_list.items;
-    sorted_replicasets.sort_by(|a, b| {
+    replicasets.sort_by(|a, b| {
         b.metadata
             .creation_timestamp
             .cmp(&a.metadata.creation_timestamp)
@@ -177,134 +178,179 @@ pub async fn cleanup_old_replicasets(
     let mut historic_count = 0;
     let mut next_removal = None;
 
-    for mut rs in sorted_replicasets {
+    let now = chrono::Utc::now();
+
+    for rs in replicasets {
         let rs_name = rs.name_any();
         let service_endpoint = format!("http://{}.{}.svc.cluster.local:9080/", rs_name, namespace);
 
         // Skip active versions
-        if active_endpoints.contains(&service_endpoint) {
+        let endpoint = endpoints.get(&service_endpoint).cloned();
+        let endpoint_exists = endpoint.is_some();
+        let endpoint_active = endpoint.unwrap_or(false);
+
+        if endpoint_active {
+            active_count += 1;
+
             if rs
-                .metadata
-                .annotations
-                .get_or_insert_default()
+                .annotations()
                 .get(RESTATE_REMOVE_VERSION_AT_ANNOTATION)
-                .is_some()
+                .is_none()
             {
-                debug!(
-                    "Unscheduling removal of active ReplicaSet {} in namespace {namespace}",
-                    rs_name,
-                );
-
-                // if we previously scheduled it for removal, but it now seems active, reset the timer.
-                let patch = serde_json::json!({
-                    "apiVersion": ReplicaSet::api_version(&()),
-                    "kind": ReplicaSet::kind(&()),
-                    "metadata": {
-                        "annotations": {
-                            RESTATE_REMOVE_VERSION_AT_ANNOTATION: null,
-                        }
-                    },
-                });
-
-                let params: PatchParams = PatchParams::apply("restate-operator");
-                rs_api
-                    .patch(&rs.name_any(), &params, &Patch::Merge(patch))
-                    .await?;
+                // not scheduled for removal; all good.
+                continue;
             }
 
-            active_count += 1;
+            debug!(
+                "Unscheduling removal of active ReplicaSet {} in namespace {namespace}",
+                rs_name,
+            );
+
+            // if we previously scheduled it for removal, but it now seems active, reset the timer by removing the annotation
+            let params: PatchParams =
+                PatchParams::apply("restate-operator/remove-version-at").force();
+            rs_api
+                .patch_metadata(
+                    &rs_name,
+                    &params,
+                    &Patch::Apply(json!({
+                        "apiVersion": ReplicaSet::api_version(&()),
+                        "kind": ReplicaSet::kind(&()),
+                        "metadata": {
+                            "annotations": {
+                                RESTATE_REMOVE_VERSION_AT_ANNOTATION: null,
+                            }
+                        }
+                    })),
+                )
+                .await?;
+
             continue;
         }
 
-        match rs
-            .metadata
-            .annotations
-            .get_or_insert_default()
+        let current_remove_at = rs
+            .annotations()
             .get(RESTATE_REMOVE_VERSION_AT_ANNOTATION)
             .and_then(|remove_at| {
                 chrono::DateTime::parse_from_rfc3339(remove_at)
                     .map(|t| t.to_utc())
                     .ok()
-            }) {
-            Some(remove_at) => {
-                let seconds_until_remove = (remove_at - chrono::Utc::now()).num_seconds();
+            });
 
-                if seconds_until_remove < 0 {
-                    // we are past the remove at time
+        let current_remove_at_in_past = current_remove_at.is_some_and(|c| c < now);
 
-                    // If this version has active pods, scale it down to 0 first
-                    if let Some(replicas) = rs
-                        .spec
-                        .as_mut()
-                        .and_then(|s| s.replicas.as_mut())
-                        .filter(|r| **r > 0)
-                    {
-                        debug!(
-                            "Scaling down old ReplicaSet {} to 0 replicas in namespace {namespace}",
-                            rs_name,
-                        );
+        match (
+            current_remove_at,
+            current_remove_at_in_past,
+            endpoint_exists,
+        ) {
+            (_, true, _) | (_, _, false) => {
+                // we are past the remove at time, or the endpoint was removed by other means; can now scale it down
 
-                        *replicas = 0;
+                // If this version has active pods, scale it down to 0 first
+                if rs
+                    .spec
+                    .as_ref()
+                    .and_then(|s| s.replicas.as_ref())
+                    .is_some_and(|r| *r > 0)
+                {
+                    debug!(
+                        "Scaling down old ReplicaSet {} to 0 replicas in namespace {namespace}",
+                        rs_name,
+                    );
 
-                        let params: PatchParams = PatchParams::apply("restate-operator");
-                        rs_api
-                            .patch_scale(
-                                &rs_name,
-                                &params,
-                                &Patch::Merge(serde_json::json!({"spec": { "replicas": 0 }})),
-                            )
-                            .await?;
-                    }
+                    let params: PatchParams =
+                        PatchParams::apply("restate-operator/scale-down").force();
+                    rs_api
+                        .patch_scale(
+                            &rs_name,
+                            &params,
+                            &Patch::Apply(serde_json::json!({
+                                "apiVersion": Scale::api_version(&()),
+                                "kind": Scale::kind(&()),
+                                "spec": { "replicas": 0 }
+                            })),
+                        )
+                        .await?;
+                }
 
-                    // If we are here, there is a 0 sized replicaset which should be subject to the history limit
-                    if historic_count < revision_history_limit {
-                        historic_count += 1;
-                        // we haven't hit that limit yet, so we don't need to delete this rs
-                        continue;
-                    }
-
-                    debug!("Deleting old ReplicaSet {rs_name} in namespace {namespace}");
-                    rs_api.delete(&rs_name, &Default::default()).await?;
-
-                    continue;
-                } else {
-                    // remove at time is in the future, ensure we keep track of the soonest such time
-                    let seconds_until_remove = Duration::from_secs(seconds_until_remove as u64);
-                    next_removal = match next_removal {
-                        None => Some(seconds_until_remove),
-                        Some(next_removal) if next_removal > seconds_until_remove => {
-                            Some(seconds_until_remove)
-                        }
-                        els => els,
-                    };
-
+                // If we are here, there is a 0 sized replicaset which should be subject to the history limit
+                if historic_count < rsd.spec.revision_history_limit {
+                    historic_count += 1;
+                    // we haven't hit that limit yet, so we don't need to delete this rs
                     continue;
                 }
+
+                if endpoint_exists {
+                    if let Some(deployment_id) =
+                        rs.annotations().get(RESTATE_DEPLOYMENT_ID_ANNOTATION)
+                    {
+                        debug!("Force-deleting Restate deployment {deployment_id} as its associated with old ReplicaSet {rs_name} in namespace {namespace}");
+
+                        let resp = http_client
+                            .delete(&format!(
+                                "{admin_endpoint}/deployments/{deployment_id}?force=true"
+                            ))
+                            .send()
+                            .await
+                            .map_err(Error::AdminCallFailed)?;
+
+                        // for idempotency we have to allow 404
+                        if resp.status() != reqwest::StatusCode::NOT_FOUND {
+                            let _ = resp.error_for_status().map_err(Error::AdminCallFailed)?;
+                        }
+                    }
+                }
+
+                debug!("Deleting old ReplicaSet {rs_name} in namespace {namespace}");
+                rs_api.delete(&rs_name, &Default::default()).await?;
+
+                continue;
             }
-            None => {
-                // no valid remove_version_at annotation, create one
+            (Some(remove_at), false, true) => {
+                // endpoint exists and remove at time is in the future, ensure we keep track of the soonest such time
+                next_removal = match next_removal {
+                    None => Some(remove_at),
+                    Some(next_removal) if next_removal > remove_at => Some(remove_at),
+                    els => els,
+                };
+
+                continue;
+            }
+            (None, _, true) => {
+                // endpoint exists and there's no valid remove_version_at annotation, create one
                 debug!(
                     "Scheduling removal (after drain delay) of old ReplicaSet {} in namespace {namespace}",
                     rs_name,
                 );
 
-                let patch = serde_json::json!({
-                    "apiVersion": ReplicaSet::api_version(&()),
-                    "kind": ReplicaSet::kind(&()),
-                    "metadata": {
-                        "annotations": {
-                            RESTATE_REMOVE_VERSION_AT_ANNOTATION: chrono::Utc::now()
-                                .checked_add_signed(chrono::TimeDelta::minutes(5)) // todo configurable?
-                                .expect("remove_version_at in bounds")
-                                .to_rfc3339()
-                        }
-                    },
-                });
+                let remove_at = chrono::Utc::now()
+                    .checked_add_signed(chrono::TimeDelta::minutes(5)) // todo configurable?
+                    .expect("remove_version_at in bounds");
 
-                let params: PatchParams = PatchParams::apply("restate-operator");
+                let params = PatchParams::apply("restate-operator/remove-version-at").force();
+                let patch = ObjectMeta {
+                    annotations: Some(
+                        [(
+                            RESTATE_REMOVE_VERSION_AT_ANNOTATION.to_string(),
+                            remove_at.to_rfc3339(),
+                        )]
+                        .into(),
+                    ),
+                    ..Default::default()
+                }
+                .into_request_partial::<ReplicaSet>();
+
                 rs_api
-                    .patch(&rs.name_any(), &params, &Patch::Merge(patch))
+                    .patch_metadata(&rs_name, &params, &Patch::Apply(patch))
                     .await?;
+
+                // ensure we keep track of the soonest remove_at
+                next_removal = match next_removal {
+                    None => Some(remove_at),
+                    Some(next_removal) if next_removal > remove_at => Some(remove_at),
+                    els => els,
+                };
 
                 continue;
             }

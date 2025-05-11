@@ -8,7 +8,7 @@ use k8s_openapi::api::core::v1::{
 use k8s_openapi::api::networking::v1;
 use k8s_openapi::api::networking::v1::{NetworkPolicyPeer, NetworkPolicyPort};
 
-use kube::CustomResource;
+use kube::{CELSchema, CustomResource};
 use schemars::schema::{Schema, SchemaObject};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -17,7 +17,7 @@ use serde_json::json;
 pub static RESTATE_CLUSTER_FINALIZER: &str = "clusters.restate.dev";
 
 /// Represents the configuration of a Restate Cluster
-#[derive(CustomResource, Deserialize, Serialize, Clone, Debug, JsonSchema)]
+#[derive(CustomResource, CELSchema, Deserialize, Serialize, Clone, Debug)]
 #[cfg_attr(test, derive(Default))]
 #[kube(
     kind = "RestateCluster",
@@ -98,44 +98,18 @@ impl schemars::JsonSchema for RestateCluster {
 }
 
 /// Storage configuration
-#[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
+#[derive(Deserialize, Serialize, Clone, Default, Debug, CELSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RestateClusterStorage {
-    /// storageClassName is the name of the StorageClass required by the claim. More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#class-1
-    /// this field is immutable
-    #[schemars(default, schema_with = "immutable_storage_class_name")]
+    /// storageClassName is the name of the StorageClass required by the claim. More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#class-1.
+    /// This field is immutable
+    #[schemars(default)]
+    #[cel_validate(rule = Rule::new("self == oldSelf").message("storageClassName is immutable"))]
     pub storage_class_name: Option<String>,
     /// storageRequestBytes is the amount of storage to request in volume claims. It is allowed to increase but not decrease.
-    #[schemars(schema_with = "expanding_volume_request", range(min = 1))]
+    #[schemars(range(min = 1))]
+    #[cel_validate(rule = Rule::new("self >= oldSelf").message("storageRequestBytes cannot be decreased"))]
     pub storage_request_bytes: i64,
-}
-
-fn immutable_storage_class_name(
-    _: &mut schemars::gen::SchemaGenerator,
-) -> schemars::schema::Schema {
-    serde_json::from_value(json!({
-        "nullable": true,
-        "type": "string",
-        "x-kubernetes-validations": [{
-            "rule": "self == oldSelf",
-            "message": "storageClassName is immutable"
-        }]
-    }))
-    .unwrap()
-}
-
-fn expanding_volume_request(_: &mut schemars::gen::SchemaGenerator) -> Schema {
-    serde_json::from_value(json!({
-        "format": "int64",
-        "type": "integer",
-        "x-kubernetes-validations": [
-            {
-                "rule": "self >= oldSelf",
-                "message": "storageRequestBytes cannot be decreased"
-            }
-        ]
-    }))
-    .unwrap()
 }
 
 /// Compute configuration
@@ -205,6 +179,11 @@ pub struct RestateClusterSecurity {
     /// Network peers to allow inbound access to restate ports
     /// If unset, will not allow any new traffic. Set any of these to [] to allow all traffic - not recommended.
     pub network_peers: Option<RestateClusterNetworkPeers>,
+    /// If set to true, add a rule to the allow-admin-access NetworkPolicy allowing traffic from this operator.
+    /// This is needed when using RestateDeployments which rely on the operator calling the admin API to
+    /// register your service.
+    /// Defaults to true.
+    pub allow_operator_access_to_admin: Option<bool>,
     /// Egress rules to allow the cluster to make outbound requests; this is in addition to the default
     /// of allowing public internet access and cluster DNS access. Providing a single empty rule will allow
     /// all outbound traffic - not recommended

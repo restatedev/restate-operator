@@ -25,13 +25,13 @@ path = "src/bin/cluster_schemagen.rs"
 
 [[bin]]
 doc = false
-name = "service_crdgen"
-path = "src/bin/service_crdgen.rs"
+name = "deployment_crdgen"
+path = "src/bin/deployment_crdgen.rs"
 
 [[bin]]
 doc = false
-name = "service_schemagen"
-path = "src/bin/service_schemagen.rs"
+name = "deployment_schemagen"
+path = "src/bin/deployment_schemagen.rs"
 
 [lib]
 name = "restate_operator"
@@ -72,7 +72,7 @@ anyhow = "1.0.75"
 clap = { version = "4.1", features = ["derive", "env"] }
 regex = "1.10.4"
 sha2 = "0.10.8"
-reqwest = { version = "0.12.15", features = ["json"] }
+reqwest = { version = "0.12.15", default-features = false, features = ["json", "rustls-tls"] }
 fnv = "1.0.7"
 
 [dev-dependencies]
