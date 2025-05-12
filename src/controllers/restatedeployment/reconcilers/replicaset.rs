@@ -128,7 +128,7 @@ fn safe_encode_u32(mut val: u32) -> String {
     // this gets decimal digits in reverse, because it doesn't really matter.
     while val > 0 {
         let n = val % 10;
-        val = val / 10;
+        val /= 10;
         out.push(NUMBER_MAP[n as usize]);
     }
 
@@ -288,7 +288,7 @@ pub async fn cleanup_old_replicasets(
                         debug!("Force-deleting Restate deployment {deployment_id} as its associated with old ReplicaSet {rs_name} in namespace {namespace}");
 
                         let resp = http_client
-                            .delete(&format!(
+                            .delete(format!(
                                 "{admin_endpoint}/deployments/{deployment_id}?force=true"
                             ))
                             .send()

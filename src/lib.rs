@@ -31,7 +31,7 @@ pub enum Error {
         message: String,
         reason: String,
         requeue_after: Option<Duration>,
-        replica_set_status: Option<ReplicaSetStatus>,
+        replica_set_status: Option<Box<ReplicaSetStatus>>,
     },
 
     #[error("Invalid Restate configuration: {0}")]

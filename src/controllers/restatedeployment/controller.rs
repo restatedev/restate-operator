@@ -400,7 +400,7 @@ impl RestateDeployment {
                 status_from_replica_set(
                     self.spec.replicas,
                     &mut rsd_status,
-                    replica_set_status.as_ref(),
+                    replica_set_status.as_deref(),
                 );
 
                 (
@@ -434,11 +434,11 @@ impl RestateDeployment {
         };
 
         let last_transition_time = if existing_ready.is_none_or(|r| r.status != status) {
-            Time(now.clone())
+            Time(now)
         } else {
             existing_ready
                 .and_then(|r| r.last_transition_time.clone())
-                .unwrap_or_else(|| Time(now.clone()))
+                .unwrap_or(Time(now))
         };
 
         let ready_condition = RestateDeploymentCondition {
@@ -488,7 +488,7 @@ impl RestateDeployment {
         }
 
         let resp: DeploymentResponse = client
-            .post(&format!("{}/deployments", admin_endpoint))
+            .post(format!("{}/deployments", admin_endpoint))
             .json(&serde_json::json!({
                 "uri": service_endpoint,
             }))
@@ -529,7 +529,7 @@ impl RestateDeployment {
         }
 
         let response: DeploymentQueryResult = http_client
-            .post(&format!("{}/query", admin_endpoint))
+            .post(format!("{}/query", admin_endpoint))
             .header(reqwest::header::ACCEPT, "application/json")
             .json(&serde_json::json!({
                 "query": sql_query
@@ -582,7 +582,7 @@ impl RestateDeployment {
         let rs_api = Api::<ReplicaSet>::namespaced(ctx.client.clone(), namespace);
 
         if let Some(cluster) = &self.spec.restate.register.cluster {
-            match rsc_api.get_opt(&cluster).await {
+            match rsc_api.get_opt(cluster).await {
                 Ok(Some(_)) => {}
                 Ok(None) => {
                     // cluster is deleted; no point blocking deletion of the services registered against it.
@@ -668,7 +668,7 @@ pub fn validate_replica_set_status(
             message: "ReplicaSetNoStatus".into(),
             reason: "ReplicaSet has no status set; it may have just been created".into(),
             requeue_after: None,
-            replica_set_status: status.cloned(),
+            replica_set_status: status.cloned().map(Box::new),
         });
     };
 
@@ -678,20 +678,23 @@ pub fn validate_replica_set_status(
         available_replicas,
         ..
     } = status;
+
+    let replica_set_status = Some(Box::new(status.clone()));
+
     if replicas != &expected_replicas {
-        return Err(Error::DeploymentNotReady { reason: "ReplicaSetScaling".into(), message: format!("ReplicaSet has {replicas} replicas instead of the expected {expected_replicas}; it may be scaling up or down"), requeue_after: None, replica_set_status: Some(status.clone()) });
+        return Err(Error::DeploymentNotReady { reason: "ReplicaSetScaling".into(), message: format!("ReplicaSet has {replicas} replicas instead of the expected {expected_replicas}; it may be scaling up or down"), requeue_after: None, replica_set_status });
     };
 
     let ready_replicas = ready_replicas.unwrap_or(0);
 
     if ready_replicas < expected_replicas {
-        return Err(Error::DeploymentNotReady { reason: "ReplicaSetPodNotReady".into(), message: format!("ReplicaSet has {ready_replicas} ready replicas instead of the expected {expected_replicas}; a pod may not be ready"), requeue_after: None, replica_set_status: Some(status.clone()) });
+        return Err(Error::DeploymentNotReady { reason: "ReplicaSetPodNotReady".into(), message: format!("ReplicaSet has {ready_replicas} ready replicas instead of the expected {expected_replicas}; a pod may not be ready"), requeue_after: None, replica_set_status });
     }
 
     let available_replicas = available_replicas.unwrap_or(0);
 
     if available_replicas < expected_replicas {
-        return Err(Error::DeploymentNotReady { reason: "ReplicaSetPodNotAvailable".into(), message: format!("ReplicaSet has {available_replicas} available replicas instead of the expected {expected_replicas}; a pod may not be available"), requeue_after: None, replica_set_status: Some(status.clone()) });
+        return Err(Error::DeploymentNotReady { reason: "ReplicaSetPodNotAvailable".into(), message: format!("ReplicaSet has {available_replicas} available replicas instead of the expected {expected_replicas}; a pod may not be available"), requeue_after: None, replica_set_status });
     }
 
     Ok(())

@@ -85,12 +85,9 @@ pub async fn reconcile_service(
 fn find_service_port(pod_spec: Option<&k8s_openapi::api::core::v1::PodSpec>) -> i32 {
     let mut all_ports = pod_spec
         .iter()
-        .map(|t| t.containers.iter())
-        .flatten()
-        .map(|c| c.ports.iter())
-        .flatten()
-        .map(|p| p.iter())
-        .flatten();
+        .flat_map(|t| t.containers.iter())
+        .flat_map(|c| c.ports.iter())
+        .flat_map(|p| p.iter());
 
     let Some(first_port) = all_ports.next() else {
         // default to 9080 if there are no ports
@@ -106,5 +103,5 @@ fn find_service_port(pod_spec: Option<&k8s_openapi::api::core::v1::PodSpec>) -> 
     }
 
     // default to the first port if none are named restate
-    return first_port.container_port;
+    first_port.container_port
 }
