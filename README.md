@@ -66,6 +66,36 @@ kubectl -n restate-test exec -it restate-0 -- restatectl provision --log-provide
 
 For the full schema as a [Pkl](https://pkl-lang.org/) template see [`crd/RestateCluster.pkl`](./crd/RestateCluster.pkl).
 
+### Creating a Deployment
+```yaml
+apiVersion: restate.dev/v1beta1
+kind: RestateDeployment
+metadata:
+  name: my-deployment
+spec:
+  replicas: 1
+  restate:
+    register:
+      cluster: restate-test
+  selector:
+    matchLabels:
+      app: my-deployment
+  template:
+    metadata:
+      labels:
+        app: my-deployment
+    spec:
+      containers:
+      - name: app
+        image: my-restate-service-image:main
+        ports:
+        - name: restate
+          containerPort: 9080
+```
+
+For the full schema as a [Pkl](https://pkl-lang.org/) template see [`crd/RestateDeployment.pkl`](./crd/RestateCluster.pkl).
+
+
 ### EKS Pod Identity
 
 [EKS Pod Identity](https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html) is a convenient way to have a

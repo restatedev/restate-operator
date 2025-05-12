@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::convert::Into;
 use std::string::ToString;
 
@@ -11,12 +12,15 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::DeleteParams;
 use kube::{
     api::{Patch, PatchParams},
-    Api, Client,
+    Api,
 };
 use tracing::debug;
 
-use crate::reconcilers::{label_selector, object_meta};
-use crate::{Error, RestateClusterNetworkPeers};
+use crate::controllers::restatecluster::controller::Context;
+use crate::resources::restateclusters::RestateClusterNetworkPeers;
+use crate::Error;
+
+use super::{label_selector, object_meta};
 
 fn deny_all(base_metadata: &ObjectMeta) -> NetworkPolicy {
     NetworkPolicy {
@@ -171,7 +175,7 @@ fn allow_access(
 
 fn allow_egress(
     base_metadata: &ObjectMeta,
-    egress: Option<&[crate::NetworkPolicyEgressRule]>,
+    egress: Option<&[crate::resources::restateclusters::NetworkPolicyEgressRule]>,
 ) -> NetworkPolicy {
     NetworkPolicy {
         metadata: object_meta(base_metadata, "allow-restate-egress"),
@@ -185,14 +189,15 @@ fn allow_egress(
 }
 
 pub async fn reconcile_network_policies(
-    client: Client,
+    ctx: &Context,
     namespace: &str,
     base_metadata: &ObjectMeta,
     network_peers: Option<&RestateClusterNetworkPeers>,
-    network_egress_rules: Option<&[crate::NetworkPolicyEgressRule]>,
+    allow_operator_access_to_admin: bool,
+    network_egress_rules: Option<&[crate::resources::restateclusters::NetworkPolicyEgressRule]>,
     aws_pod_identity_enabled: bool,
 ) -> Result<(), Error> {
-    let np_api: Api<NetworkPolicy> = Api::namespaced(client, namespace);
+    let np_api: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), namespace);
 
     apply_network_policy(namespace, &np_api, deny_all(base_metadata)).await?;
     apply_network_policy(namespace, &np_api, allow_dns(base_metadata)).await?;
@@ -223,15 +228,44 @@ pub async fn reconcile_network_policies(
     )
     .await?;
 
+    let admin_peers: Option<std::borrow::Cow<[NetworkPolicyPeer]>> = match (
+        allow_operator_access_to_admin,
+        ctx.operator_namespace.as_ref(),
+        ctx.operator_label_name.as_ref(),
+        ctx.operator_label_value.as_ref(),
+    ) {
+        (true, Some(operator_namespace), Some(operator_label_name), Some(operator_label_value)) => {
+            let mut peers = network_peers
+                .and_then(|peers| peers.admin.clone())
+                .unwrap_or_default();
+
+            peers.push(NetworkPolicyPeer {
+                ip_block: None,
+                namespace_selector: Some(LabelSelector {
+                    match_expressions: None,
+                    match_labels: Some(BTreeMap::from([(
+                        "kubernetes.io/metadata.name".into(),
+                        operator_namespace.clone(),
+                    )])),
+                }),
+                pod_selector: Some(LabelSelector {
+                    match_expressions: None,
+                    match_labels: Some(BTreeMap::from([(
+                        operator_label_name.clone(),
+                        operator_label_value.clone(),
+                    )])),
+                }),
+            });
+
+            Some(peers.into())
+        }
+        _ => network_peers.and_then(|peers| peers.admin.as_deref().map(|a| a.into())),
+    };
+
     apply_network_policy(
         namespace,
         &np_api,
-        allow_access(
-            "admin",
-            9070,
-            base_metadata,
-            network_peers.and_then(|peers| peers.admin.as_deref()),
-        ),
+        allow_access("admin", 9070, base_metadata, admin_peers.as_deref()),
     )
     .await?;
 

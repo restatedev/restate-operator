@@ -9,7 +9,9 @@ fn main() {
         .into_generator();
     print!(
         "{}",
-        serde_json::to_string_pretty(&restate_operator::RestateCluster::json_schema(&mut gen))
-            .unwrap()
+        serde_json::to_string_pretty(
+            &restate_operator::resources::restateclusters::RestateCluster::json_schema(&mut gen)
+        )
+        .unwrap()
     )
 }

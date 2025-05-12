@@ -1,12 +1,12 @@
-use std::ffi::OsString;
-
 use actix_web::{
     get, middleware, web::Data, App, HttpRequest, HttpResponse, HttpServer, Responder,
 };
 use clap::Parser;
+use kube::Client;
 use prometheus::{Encoder, TextEncoder};
 
-pub use restate_operator::{self, telemetry, State};
+use restate_operator::controllers::State;
+pub use restate_operator::{self, telemetry};
 
 #[derive(Debug, clap::Parser)]
 struct Arguments {
@@ -15,7 +15,28 @@ struct Arguments {
         env = "AWS_POD_IDENTITY_ASSOCIATION_CLUSTER",
         value_name = "CLUSTERNAME"
     )]
-    aws_pod_identity_association_cluster: Option<OsString>,
+    aws_pod_identity_association_cluster: Option<String>,
+
+    #[arg(
+        long = "operator-namespace",
+        env = "OPERATOR_NAMESPACE",
+        value_name = "NAMESPACE"
+    )]
+    operator_namespace: Option<String>,
+
+    #[arg(
+        long = "operator-label-name",
+        env = "OPERATOR_LABEL_NAME",
+        value_name = "LABEL_NAME"
+    )]
+    operator_label_name: Option<String>,
+
+    #[arg(
+        long = "operator-label-value",
+        env = "OPERATOR_LABEL_VALUE",
+        value_name = "LABEL_VALUE"
+    )]
+    operator_label_value: Option<String>,
 }
 
 #[get("/metrics")]
@@ -45,12 +66,31 @@ async fn main() -> anyhow::Result<()> {
     let args: Arguments = Arguments::parse();
 
     // Initialize Kubernetes controller state
-    let state = State::default().with_aws_pod_identity_association_cluster(
-        args.aws_pod_identity_association_cluster
-            .and_then(|s| s.to_str().map(|s| s.to_string())),
+    let state = State::default()
+        .with_aws_pod_identity_association_cluster(args.aws_pod_identity_association_cluster)
+        .with_operator_namespace(args.operator_namespace)
+        .with_operator_label_name(args.operator_label_name)
+        .with_operator_label_value(args.operator_label_value);
+
+    let client = Client::try_default()
+        .await
+        .expect("failed to create kube Client");
+
+    let metric = restate_operator::Metrics::default()
+        .register(&state.registry)
+        .unwrap();
+
+    // Start both controllers
+    let cluster_controller = restate_operator::controllers::restatecluster::run(
+        client.clone(),
+        metric.clone(),
+        state.clone(),
     );
-    let controller = restate_operator::run(state.clone());
-    tokio::pin!(controller);
+    let deployment_controller =
+        restate_operator::controllers::restatedeployment::run(client, metric, state.clone());
+
+    tokio::pin!(cluster_controller);
+    tokio::pin!(deployment_controller);
 
     // Start web server
     let server = HttpServer::new(move || {
@@ -68,6 +108,6 @@ async fn main() -> anyhow::Result<()> {
     tokio::pin!(server);
 
     // Both runtimes implements graceful shutdown, so poll until both are done
-    tokio::join!(controller, server).1?;
+    tokio::join!(cluster_controller, deployment_controller, server).2?;
     Ok(())
 }
