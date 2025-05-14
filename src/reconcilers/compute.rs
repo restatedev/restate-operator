@@ -186,6 +186,11 @@ fn env(cluster_name: &str, custom: Option<&[EnvVar]>) -> Vec<EnvVar> {
             // POD_NAME comes from the downward api, below
             "http://$(POD_NAME).restate-cluster:5122",
         ),
+        (
+            "RESTATE_NODE_NAME",
+            // POD_NAME comes from the downward api, below
+            "$(POD_NAME)",
+        ),
     ];
 
     // allow crd to override our defaults

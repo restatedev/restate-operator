@@ -10,8 +10,8 @@ use futures::StreamExt;
 use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetStatus};
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{
-    ConfigMap, EnvVar, Namespace, PersistentVolumeClaim, PodDNSConfig, ResourceRequirements,
-    Service, ServiceAccount, ServiceSpec, Toleration, Affinity,
+    Affinity, ConfigMap, EnvVar, Namespace, PersistentVolumeClaim, PodDNSConfig,
+    ResourceRequirements, Service, ServiceAccount, ServiceSpec, Toleration,
 };
 use k8s_openapi::api::networking::v1;
 use k8s_openapi::api::networking::v1::{NetworkPolicy, NetworkPolicyPeer, NetworkPolicyPort};
@@ -198,7 +198,6 @@ pub struct RestateClusterCompute {
     pub node_selector: Option<BTreeMap<String, String>>,
     // If specified, pod affinity
     pub affinity: Option<Affinity>,
-
 }
 
 fn env_schema(g: &mut schemars::gen::SchemaGenerator) -> Schema {
