@@ -386,6 +386,9 @@ fn restate_statefulset(
                     ..Default::default()
                 }),
             },
+            // It's important to start multiple pods at the same time in case multiple pods died.
+            // Otherwise, we risk unavailability of an already configured metadata cluster
+            pod_management_policy: Some("Parallel".to_owned()),
             volume_claim_templates: Some(vec![PersistentVolumeClaim {
                 metadata: ObjectMeta {
                     name: Some("storage".into()),
