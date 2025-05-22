@@ -499,7 +499,7 @@ impl RestateCluster {
             self.spec
                 .security
                 .as_ref()
-                .map_or(false, |s| s.aws_pod_identity_association_role_arn.is_some()),
+                .is_some_and(|s| s.aws_pod_identity_association_role_arn.is_some()),
         )
         .await?;
 
