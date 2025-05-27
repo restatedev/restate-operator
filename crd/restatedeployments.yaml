@@ -1,0 +1,272 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: restatedeployments.restate.dev
+spec:
+  group: restate.dev
+  names:
+    kind: RestateDeployment
+    plural: restatedeployments
+    shortNames:
+    - rsd
+    singular: restatedeployment
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.replicas
+      name: Desired
+      type: integer
+    - jsonPath: .status.replicas
+      name: Up-To-Date
+      type: integer
+    - jsonPath: .status.readyReplicas
+      name: Ready
+      type: integer
+    - jsonPath: .status.availableReplicas
+      name: Available
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    - jsonPath: .spec.template.spec.containers[*].name
+      name: Containers
+      priority: 1
+      type: string
+    - jsonPath: .spec.template.spec.containers[*].image
+      name: Images
+      priority: 1
+      type: string
+    - jsonPath: .status.labelSelector
+      name: Selector
+      priority: 1
+      type: string
+    name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for RestateDeploymentSpec via `CustomResource`
+        properties:
+          spec:
+            description: RestateDeployment is similar to a Kubernetes Deployment but tailored for Restate services. It maintains ReplicaSets and Services for each version to support Restate's versioning requirements, ensuring old versions remain available until all invocations against them are complete.
+            properties:
+              minReadySeconds:
+                description: Minimum number of seconds for which a newly created pod should be ready.
+                format: int32
+                minimum: 0.0
+                nullable: true
+                type: integer
+              replicas:
+                default: 1
+                description: Number of desired pods. Defaults to 1.
+                format: int32
+                minimum: 0.0
+                type: integer
+              restate:
+                description: Restate specific configuration
+                properties:
+                  register:
+                    description: The location of the Restate Admin API to register this deployment against
+                    oneOf:
+                    - required:
+                      - cluster
+                    - required:
+                      - service
+                    - required:
+                      - url
+                    properties:
+                      cluster:
+                        description: The name of a RestateCluster against which to register the deployment. Exactly one of `cluster`, `service` or `url` must be specified
+                        type: string
+                      service:
+                        description: A reference to a Service pointing against which to register the deployment. Exactly one of `cluster`, `service` or `url` must be specified
+                        properties:
+                          name:
+                            description: '`name` is the name of the service. Required'
+                            type: string
+                          namespace:
+                            description: '`namespace` is the namespace of the service. Required'
+                            type: string
+                          path:
+                            description: '`path` is an optional URL path which will be prepended before admin api paths. Should not end in a /.'
+                            nullable: true
+                            type: string
+                          port:
+                            description: If specified, the port on the service that hosts the admin api. Defaults to 9070. `port` should be a valid port number (1-65535, inclusive).
+                            format: int32
+                            maximum: 65535.0
+                            minimum: 1.0
+                            nullable: true
+                            type: integer
+                        required:
+                        - name
+                        - namespace
+                        type: object
+                      url:
+                        description: A url of the restate admin endpoint against which to register the deployment Exactly one of `cluster`, `service` or `url` must be specified
+                        type: string
+                    type: object
+                required:
+                - register
+                type: object
+              revisionHistoryLimit:
+                default: 10
+                description: The number of old ReplicaSets to retain to allow rollback. Defaults to 10.
+                format: int32
+                minimum: 0.0
+                type: integer
+              selector:
+                description: Label selector for pods. Must match the pod template's labels.
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements. The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
+              template:
+                description: Template describes the pods that will be created.
+                properties:
+                  metadata:
+                    description: 'Standard object''s metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata'
+                    nullable: true
+                    properties:
+                      annotations:
+                        additionalProperties:
+                          type: string
+                        description: 'Annotations is an unstructured key value map stored with a resource that may be set by external tools to store and retrieve arbitrary metadata. They are not queryable and should be preserved when modifying objects. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations'
+                        nullable: true
+                        type: object
+                      labels:
+                        additionalProperties:
+                          type: string
+                        description: 'Map of string keys and values that can be used to organize and categorize (scope and select) objects. May match selectors of replication controllers and services. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels'
+                        nullable: true
+                        type: object
+                    type: object
+                  spec:
+                    description: 'Specification of the desired behavior of the pod. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status. The contents of this field are passed through directly from the operator to the created ReplicaSet and are not validated.'
+                    x-kubernetes-preserve-unknown-fields: true
+                required:
+                - spec
+                type: object
+            required:
+            - restate
+            - selector
+            - template
+            type: object
+            x-kubernetes-validations: []
+          status:
+            description: Status of the RestateDeployment This is set and managed automatically by the controller
+            nullable: true
+            properties:
+              availableReplicas:
+                description: Total number of updated available pods (ready for at least minReadySeconds)
+                format: int32
+                nullable: true
+                type: integer
+              collisionCount:
+                description: Count of hash collisions for the RestateDeployment. The controller uses this field as a collision avoidance mechanism when it needs to create the name for the newest ReplicaSet.
+                format: int32
+                nullable: true
+                type: integer
+              conditions:
+                description: Represents the latest available observations of current state
+                items:
+                  description: Conditions for the RestateDeployment status
+                  properties:
+                    lastTransitionTime:
+                      description: Last time the condition transitioned from one status to another
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      description: Human-readable message indicating details about last transition
+                      nullable: true
+                      type: string
+                    reason:
+                      description: Reason for the condition's last transition
+                      nullable: true
+                      type: string
+                    status:
+                      description: Status is the status of the condition (True, False, Unknown)
+                      type: string
+                    type:
+                      description: Type of condition (Ready, Progressing, Available)
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              labelSelector:
+                description: The label selector of the RestateDeployment as a string, for `kubectl get rsd -o wide`
+                nullable: true
+                type: string
+              observedGeneration:
+                description: The generation observed by the controller
+                format: int64
+                nullable: true
+                type: integer
+              readyReplicas:
+                description: Total number of updated ready pods
+                format: int32
+                nullable: true
+                type: integer
+              replicas:
+                description: Total number of updated non-terminated pods targeted by this RestateDeployment
+                format: int32
+                type: integer
+              unavailableReplicas:
+                description: Total number of updated unavailable pods
+                format: int32
+                nullable: true
+                type: integer
+            required:
+            - replicas
+            type: object
+        required:
+        - spec
+        title: RestateDeployment
+        type: object
+    served: true
+    storage: true
+    subresources:
+      scale:
+        specReplicasPath: .spec.replicas
+        statusReplicasPath: .status.replicas
+      status: {}

@@ -1,6 +1,6 @@
 replicaCount: 1
 nameOverride: "restate-operator"
-version: "local" # pin a specific version
+version: "" # pin a specific version
 
 image:
   repository: ghcr.io/restatedev/restate-operator

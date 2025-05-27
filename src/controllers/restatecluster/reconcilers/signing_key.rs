@@ -8,9 +8,14 @@ use kube::{
 use tracing::{debug, warn};
 
 use crate::{
-    secretproviderclasses::{SecretProviderClass, SecretProviderClassSpec},
-    Context, Error, RequestSigningPrivateKey, SecretProviderSigningKeySource,
-    SecretSigningKeySource,
+    controllers::restatecluster::controller::Context,
+    resources::{
+        restateclusters::{
+            RequestSigningPrivateKey, SecretProviderSigningKeySource, SecretSigningKeySource,
+        },
+        secretproviderclasses::{SecretProviderClass, SecretProviderClassSpec},
+    },
+    Error,
 };
 
 use super::object_meta;

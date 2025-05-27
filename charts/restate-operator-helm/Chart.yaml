@@ -2,4 +2,4 @@ apiVersion: v2
 name: restate-operator-helm
 description: An operator for Restate clusters
 type: application
-version: "1.6.0"
+version: "1.7.0"
