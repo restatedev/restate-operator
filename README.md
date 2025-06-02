@@ -58,7 +58,36 @@ spec:
     addresses = ["http://restate:5122/"]
 ```
 
-You would then need to provision the cluster eg with:
+Or with the S3 metastore (recommended if you're running in a single region):
+
+```yaml
+apiVersion: restate.dev/v1
+kind: RestateCluster
+metadata:
+  name: restate-test
+spec:
+  compute:
+    replicas: 3
+    image: restatedev/restate:1.3.2
+  storage:
+    storageRequestBytes: 2147483648 # 2 GiB
+  security:
+    serviceAccountAnnotations:
+      eks.amazonaws.com/role-arn: arn:aws:iam::111122223333:role/my-role-that-can-read-write-to-the-bucket
+  config: |
+    auto-provision = false
+    roles = [
+        "worker",
+        "admin",
+        "log-server",
+    ]
+
+    [metadata-client]
+    type = "object-store"
+    path = "s3://some-bucket/metadata"
+```
+
+In either case, you would then need to provision the cluster eg with:
 
 ```bash
 kubectl -n restate-test exec -it restate-0 -- restatectl provision --log-provider replicated --log-replication 2 --partition-replication 3
