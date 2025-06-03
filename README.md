@@ -90,7 +90,7 @@ spec:
 In either case, you would then need to provision the cluster eg with:
 
 ```bash
-kubectl -n restate-test exec -it restate-0 -- restatectl provision --log-provider replicated --log-replication 2 --partition-replication 3
+kubectl -n restate-test exec -it restate-0 -- restatectl provision --log-provider replicated --log-replication 2 --partition-replication 2 --num-partitions 128
 ```
 
 For the full schema as a [Pkl](https://pkl-lang.org/) template see [`crd/RestateCluster.pkl`](./crd/RestateCluster.pkl).
