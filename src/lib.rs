@@ -1,4 +1,5 @@
-use reconcilers::signing_key::InvalidSigningKeyError;
+use controllers::restatecluster::InvalidSigningKeyError;
+use k8s_openapi::api::apps::v1::ReplicaSetStatus;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -25,8 +26,31 @@ pub enum Error {
         requeue_after: Option<Duration>,
     },
 
+    #[error("RestateDeployment is not yet Ready: {message}")]
+    DeploymentNotReady {
+        message: String,
+        reason: String,
+        requeue_after: Option<Duration>,
+        replica_set_status: Option<Box<ReplicaSetStatus>>,
+    },
+
+    #[error("Invalid Restate configuration: {0}")]
+    InvalidRestateConfig(String),
+
     #[error(transparent)]
     InvalidSigningKeyError(#[from] InvalidSigningKeyError),
+
+    #[error("Failed to make Restate admin API call: {0}")]
+    AdminCallFailed(reqwest::Error),
+
+    #[error("Encountered a ReplicaSet hash collision, will retry with a new template hash")]
+    HashCollision,
+
+    #[error("This RestateDeployment is backing active versions in Restate. If you want to delete the RestateDeployment, either register new endpoints for the relevant services or delete the Restate versions.")]
+    DeploymentInUse,
+
+    #[error("This RestateDeployment is backing recently-active versions in Restate. It will be removed after the drain delay period.")]
+    DeploymentDraining { requeue_after: Option<Duration> },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -39,15 +63,18 @@ impl Error {
             Error::FinalizerError(_) => "FinalizerError",
             Error::NameConflict => "NameConflict",
             Error::NotReady { .. } => "NotReady",
+            Error::DeploymentNotReady { .. } => "ServiceNotReady",
+            Error::InvalidRestateConfig(_) => "InvalidRestateConfig",
             Error::InvalidSigningKeyError(_) => "InvalidSigningKeyError",
+            Error::AdminCallFailed(_) => "AdminCallFailed",
+            Error::HashCollision => "HashCollision",
+            Error::DeploymentInUse => "DeploymentInUse",
+            Error::DeploymentDraining { .. } => "DeploymentDraining",
         }
     }
 }
 
-/// Expose all controller components used by main
-pub mod controller;
-
-pub use crate::controller::*;
+pub mod controllers;
 
 /// Log and trace integrations
 pub mod telemetry;
@@ -57,10 +84,5 @@ mod metrics;
 
 pub use metrics::Metrics;
 
-/// Reconcilers
-mod reconcilers;
-
 /// External CRDs
-mod podidentityassociations;
-mod secretproviderclasses;
-mod securitygrouppolicies;
+pub mod resources;

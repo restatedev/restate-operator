@@ -46,6 +46,16 @@ spec:
           env:
             - name: RUST_LOG
               value: {{ .Values.logging.env_filter }}
+            - name: OPERATOR_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: OPERATOR_LABEL_NAME
+              value: app
+            - name: OPERATOR_LABEL_VALUE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['app']
           {{- if .Values.awsPodIdentityAssociationCluster }}
             - name: AWS_POD_IDENTITY_ASSOCIATION_CLUSTER
               value: {{ .Values.awsPodIdentityAssociationCluster }}

@@ -26,6 +26,9 @@ rules:
       - restateclusters
       - restateclusters/status
       - restateclusters/finalizers
+      - restatedeployments
+      - restatedeployments/status
+      - restatedeployments/finalizers
     verbs:
       - get
       - list
@@ -51,6 +54,8 @@ rules:
       - jobs
       - securitygrouppolicies
       - secretproviderclasses
+      - replicasets
+      - replicasets/scale
     verbs:
       - get
       - list
@@ -70,6 +75,7 @@ rules:
       - jobs
       - securitygrouppolicies
       - secretproviderclasses
+      - replicasets
     verbs:
       - delete
     apiGroups:
