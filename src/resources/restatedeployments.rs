@@ -49,7 +49,7 @@ pub struct RestateDeploymentSpec {
     pub template: PodTemplateSpec,
 
     /// Restate specific configuration
-    pub restate: RestateConfig,
+    pub restate: RestateSpec,
 }
 
 fn default_replicas() -> i32 {
@@ -139,7 +139,7 @@ pub struct PodTemplateMetadata {
 
 /// Restate specific configuration
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
-pub struct RestateConfig {
+pub struct RestateSpec {
     /// The location of the Restate Admin API to register this deployment against
     pub register: RestateAdminEndpoint,
 }

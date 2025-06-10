@@ -768,7 +768,7 @@ spec:
                     nullable: true
                     type: array
                   networkEgressRules:
-                    description: Egress rules to allow the cluster to make outbound requests; this is in addition to the default of allowing public internet access and cluster DNS access. Providing a single empty rule will allow all outbound traffic - not recommended
+                    description: 'Egress rules to allow the cluster to make outbound requests; this is in addition to the default of allowing public internet access, cluster DNS access and pods labelled with `allow.restate.dev/<cluster-name>: "true"`. Providing a single empty rule will allow all outbound traffic - not recommended'
                     items:
                       description: NetworkPolicyEgressRule describes a particular set of traffic that is allowed out of pods matched by a NetworkPolicySpec's podSelector. The traffic must match both ports and to. This type is beta-level in 1.8
                       properties:

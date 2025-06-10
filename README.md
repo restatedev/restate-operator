@@ -7,6 +7,8 @@ A Kubernetes operator that creates [Restate](https://restate.dev/) clusters. Sup
 - Manage credentials using [EKS Pod Identity](https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html)
 - Manage security groups using [Security Groups for Pods](https://docs.aws.amazon.com/eks/latest/userguide/security-groups-for-pods.html)
 - Sign requests using private keys from Secrets or CSI Secret Store
+- Deploy Restate SDK services using the `RestateDeployment` crd, the operator will manage their versions automatically, draining
+  old versions when there are no longer invocations running against them.
 
 ## Usage
 
