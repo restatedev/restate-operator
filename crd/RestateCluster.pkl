@@ -1,6 +1,6 @@
 /// RestateCluster describes the configuration and status of a Restate cluster.
 ///
-/// This module was generated from the CustomResourceDefinition at <file:./crd/crd.yaml>.
+/// This module was generated from the CustomResourceDefinition at <file:./crd/restateclusters.yaml>.
 module dev.restate.v1.RestateCluster
 
 extends "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/K8sResource.pkl"
@@ -87,6 +87,11 @@ class Compute {
 
 /// Security configuration
 class Security {
+  /// If set to true, add a rule to the allow-admin-access NetworkPolicy allowing traffic from this
+  /// operator. This is needed when using RestateDeployments which rely on the operator calling the admin
+  /// API to register your service. Defaults to true.
+  allowOperatorAccessToAdmin: Boolean?
+
   /// If set, create an AWS PodIdentityAssociation using the ACK CRD in order to give the Restate pod
   /// access to this role and allow the cluster to reach the Pod Identity agent.
   awsPodIdentityAssociationRoleArn: String?
@@ -96,8 +101,9 @@ class Security {
   awsPodSecurityGroups: Listing<String>?
 
   /// Egress rules to allow the cluster to make outbound requests; this is in addition to the default of
-  /// allowing public internet access and cluster DNS access. Providing a single empty rule will allow
-  /// all outbound traffic - not recommended
+  /// allowing public internet access, cluster DNS access and pods labelled with
+  /// `allow.restate.dev/<cluster-name>: "true"`. Providing a single empty rule will allow all outbound
+  /// traffic - not recommended
   networkEgressRules: Listing<NetworkPolicy.NetworkPolicyEgressRule>?
 
   /// Network peers to allow inbound access to restate ports If unset, will not allow any new traffic.
@@ -160,7 +166,7 @@ class SecretProvider {
 /// Storage configuration
 class Storage {
   /// storageClassName is the name of the StorageClass required by the claim. More info:
-  /// https://kubernetes.io/docs/concepts/storage/persistent-volumes#class-1 this field is immutable
+  /// https://kubernetes.io/docs/concepts/storage/persistent-volumes#class-1. This field is immutable
   storageClassName: String?
 
   /// storageRequestBytes is the amount of storage to request in volume claims. It is allowed to increase

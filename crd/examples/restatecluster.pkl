@@ -1,0 +1,24 @@
+import "../RestateCluster.pkl"
+
+cluster = (RestateCluster) {
+  metadata {
+    name = "restate-test"
+  }
+  spec {
+    compute {
+      image = "restatedev/restate:1.3.2"
+    }
+    storage {
+      storageRequestBytes = 2.gib.toUnit("b").value as Int
+    }
+  }
+}
+
+output {
+  renderer = new YamlRenderer {
+    isStream = true
+  }
+  value = new Listing {
+    cluster
+  }
+}

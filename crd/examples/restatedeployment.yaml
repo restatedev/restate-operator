@@ -1,0 +1,23 @@
+apiVersion: restate.dev/v1beta1
+kind: RestateDeployment
+metadata:
+  name: my-deployment
+spec:
+  replicas: 1
+  restate:
+    register:
+      cluster: restate-test
+  selector:
+    matchLabels:
+      app: my-deployment
+  template:
+    metadata:
+      labels:
+        app: my-deployment
+    spec:
+      containers:
+      - image: my-restate-service-image:main
+        ports:
+        - name: restate
+          containerPort: 9080
+        name: app

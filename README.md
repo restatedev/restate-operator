@@ -7,6 +7,8 @@ A Kubernetes operator that creates [Restate](https://restate.dev/) clusters. Sup
 - Manage credentials using [EKS Pod Identity](https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html)
 - Manage security groups using [Security Groups for Pods](https://docs.aws.amazon.com/eks/latest/userguide/security-groups-for-pods.html)
 - Sign requests using private keys from Secrets or CSI Secret Store
+- Deploy Restate SDK services using the `RestateDeployment` crd, the operator will manage their versions automatically, draining
+  old versions when there are no longer invocations running against them.
 
 ## Usage
 
@@ -94,6 +96,36 @@ kubectl -n restate-test exec -it restate-0 -- restatectl provision --log-provide
 ```
 
 For the full schema as a [Pkl](https://pkl-lang.org/) template see [`crd/RestateCluster.pkl`](./crd/RestateCluster.pkl).
+
+### Creating a Deployment
+```yaml
+apiVersion: restate.dev/v1beta1
+kind: RestateDeployment
+metadata:
+  name: my-deployment
+spec:
+  replicas: 1
+  restate:
+    register:
+      cluster: restate-test
+  selector:
+    matchLabels:
+      app: my-deployment
+  template:
+    metadata:
+      labels:
+        app: my-deployment
+    spec:
+      containers:
+      - name: app
+        image: my-restate-service-image:main
+        ports:
+        - name: restate
+          containerPort: 9080
+```
+
+For the full schema as a [Pkl](https://pkl-lang.org/) template see [`crd/RestateDeployment.pkl`](./crd/RestateCluster.pkl).
+
 
 ### EKS Pod Identity
 

@@ -24,14 +24,18 @@ use kube::{
 use sha2::Digest;
 use tracing::{debug, error, warn};
 
-use crate::podidentityassociations::{PodIdentityAssociation, PodIdentityAssociationSpec};
-use crate::reconcilers::{label_selector, mandatory_labels, object_meta};
-use crate::securitygrouppolicies::{
+use crate::controllers::restatecluster::controller::Context;
+use crate::resources::podidentityassociations::{
+    PodIdentityAssociation, PodIdentityAssociationSpec,
+};
+use crate::resources::restateclusters::{RestateClusterSpec, RestateClusterStorage};
+use crate::resources::securitygrouppolicies::{
     SecurityGroupPolicy, SecurityGroupPolicySecurityGroups, SecurityGroupPolicySpec,
 };
-use crate::{Context, Error, RestateClusterSpec, RestateClusterStorage};
+use crate::Error;
 
 use super::quantity_parser::QuantityParser;
+use super::{label_selector, mandatory_labels, object_meta};
 
 fn restate_service_account(
     base_metadata: &ObjectMeta,
@@ -278,7 +282,7 @@ fn restate_statefulset(
         Volume {
             name: "config".into(),
             config_map: Some(ConfigMapVolumeSource {
-                name: Some(cm_name),
+                name: cm_name,
                 ..Default::default()
             }),
             ..Default::default()
@@ -493,11 +497,11 @@ pub async fn reconcile_compute(
             let pod_annotations = pod_annotations.get_or_insert_with(Default::default);
             pod_annotations.insert(
                 "restate.dev/aws-pod-identity-association-cluster".into(),
-                aws_pod_identity_association_cluster.clone(),
+                aws_pod_identity_association_cluster.to_owned(),
             );
             pod_annotations.insert(
                 "restate.dev/aws-pod-identity-association-role-arn".into(),
-                aws_pod_identity_association_role_arn.clone(),
+                aws_pod_identity_association_role_arn.to_owned(),
             );
         }
         (Some(_), None) => {

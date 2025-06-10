@@ -1,0 +1,50 @@
+import "../RestateDeployment.pkl"
+
+deployment = (RestateDeployment) {
+    metadata {
+        name = "my-deployment"
+    }
+    spec {
+        replicas = 1
+        selector {
+            matchLabels {
+                ["app"] = "my-deployment"
+            }
+        }
+        restate {
+            register {
+                cluster = "restate-test"
+            }
+        }
+        template {
+            metadata {
+                labels {
+                    ["app"] = "my-deployment"
+                }
+            }
+            spec {
+                containers {
+                    new {
+                        name = "app"
+                        image = "my-restate-service-image:main"
+                        ports {
+                            new {
+                                containerPort = 9080
+                                name = "restate"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+output {
+  renderer = new YamlRenderer {
+    isStream = true
+  }
+  value = new Listing {
+      deployment
+  }
+}
