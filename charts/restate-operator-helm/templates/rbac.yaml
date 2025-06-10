@@ -47,6 +47,7 @@ rules:
       - services
       - configmaps
       - serviceaccounts
+      - poddisruptionbudgets
       - networkpolicies
       - statefulsets
       - persistentvolumeclaims
@@ -66,6 +67,7 @@ rules:
       - ''
       - batch
       - apps
+      - policy
       - networking.k8s.io
       - vpcresources.k8s.aws
       - secrets-store.csi.x-k8s.io

@@ -10,6 +10,7 @@ use k8s_openapi::api::core::v1::{
     ConfigMap, Namespace, PersistentVolumeClaim, Service, ServiceAccount, ServiceSpec,
 };
 use k8s_openapi::api::networking::v1::NetworkPolicy;
+use k8s_openapi::api::policy::v1::PodDisruptionBudget;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{APIGroup, ObjectMeta};
 
 use kube::core::object::HasStatus;
@@ -373,6 +374,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     let pvc_api = Api::<PersistentVolumeClaim>::all(client.clone());
     let svc_api = Api::<Service>::all(client.clone());
     let svcacc_api = Api::<ServiceAccount>::all(client.clone());
+    let pdb_api = Api::<PodDisruptionBudget>::all(client.clone());
     let cm_api = Api::<ConfigMap>::all(client.clone());
     let np_api = Api::<NetworkPolicy>::all(client.clone());
     let pia_api = Api::<PodIdentityAssociation>::all(client.clone());
@@ -417,6 +419,10 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         .touched_objects()
         .predicate_filter(changed_predicate);
 
+    let pdb_watcher = metadata_watcher(pdb_api, cfg.clone())
+        .touched_objects()
+        .predicate_filter(changed_predicate);
+
     let svc_watcher = watcher(svc_api, cfg.clone())
         .touched_objects()
         // svc has no generation so we hash the spec to check for changes
@@ -433,6 +439,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         .owns_stream(cm_watcher)
         .owns_stream(ns_watcher)
         .owns_stream(svcacc_watcher)
+        .owns_stream(pdb_watcher)
         .owns_stream(np_watcher)
         .owns_stream(ss_reflector)
         .watches_stream(
