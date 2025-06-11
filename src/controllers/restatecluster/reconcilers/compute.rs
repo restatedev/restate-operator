@@ -11,6 +11,7 @@ use k8s_openapi::api::core::v1::{
     ServiceAccount, ServicePort, ServiceSpec, Toleration, Volume, VolumeMount,
     VolumeResourceRequirements,
 };
+use k8s_openapi::api::policy::v1::{PodDisruptionBudget, PodDisruptionBudgetSpec};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
@@ -172,6 +173,23 @@ fn restate_cluster_service(base_metadata: &ObjectMeta) -> Service {
             publish_not_ready_addresses: Some(true),
             cluster_ip: Some("None".into()), // headless service
             ..Default::default()
+        }),
+        status: None,
+    }
+}
+
+fn restate_pod_disruption_budget(base_metadata: &ObjectMeta) -> PodDisruptionBudget {
+    PodDisruptionBudget {
+        metadata: object_meta(base_metadata, "restate"),
+        spec: Some(PodDisruptionBudgetSpec {
+            // 1 is a sane default for clusters of all sizes:
+            // cluster size one it will allow downtime, but this is unavoidable when draining nodes
+            // cluster size of 3 with r=2, it will prevent rollouts leading to unavailability
+            // cluster size of 5 with r=3, it is conservative but not unreasonable
+            max_unavailable: Some(IntOrString::Int(1)),
+            min_available: None,
+            selector: Some(label_selector(base_metadata)),
+            unhealthy_pod_eviction_policy: None,
         }),
         status: None,
     }
@@ -439,6 +457,7 @@ pub async fn reconcile_compute(
     let job_api: Api<Job> = Api::namespaced(ctx.client.clone(), namespace);
     let pod_api: Api<Pod> = Api::namespaced(ctx.client.clone(), namespace);
     let sgp_api: Api<SecurityGroupPolicy> = Api::namespaced(ctx.client.clone(), namespace);
+    let pdb_api: Api<PodDisruptionBudget> = Api::namespaced(ctx.client.clone(), namespace);
 
     apply_service_account(
         namespace,
@@ -555,6 +574,13 @@ pub async fn reconcile_compute(
 
     let restate_cluster_service = restate_cluster_service(base_metadata);
     apply_service(namespace, &svc_api, restate_cluster_service).await?;
+
+    apply_pod_disruption_budget(
+        namespace,
+        &pdb_api,
+        restate_pod_disruption_budget(base_metadata),
+    )
+    .await?;
 
     resize_statefulset_storage(
         namespace,
@@ -1001,4 +1027,18 @@ fn validate_stateful_set_status(
     }
 
     Ok(())
+}
+
+async fn apply_pod_disruption_budget(
+    namespace: &str,
+    pdb_api: &Api<PodDisruptionBudget>,
+    pdb: PodDisruptionBudget,
+) -> Result<PodDisruptionBudget, Error> {
+    let name = pdb.metadata.name.as_ref().unwrap();
+    let params: PatchParams = PatchParams::apply("restate-operator").force();
+    debug!(
+        "Applying Pod Disruption Budget {} in namespace {}",
+        name, namespace
+    );
+    Ok(pdb_api.patch(name, &params, &Patch::Apply(&pdb)).await?)
 }

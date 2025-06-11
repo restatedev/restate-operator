@@ -10,6 +10,7 @@ use k8s_openapi::api::core::v1::{
     ConfigMap, Namespace, PersistentVolumeClaim, Service, ServiceAccount, ServiceSpec,
 };
 use k8s_openapi::api::networking::v1::NetworkPolicy;
+use k8s_openapi::api::policy::v1::PodDisruptionBudget;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{APIGroup, ObjectMeta};
 
 use kube::core::object::HasStatus;
@@ -373,6 +374,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     let pvc_api = Api::<PersistentVolumeClaim>::all(client.clone());
     let svc_api = Api::<Service>::all(client.clone());
     let svcacc_api = Api::<ServiceAccount>::all(client.clone());
+    let pdb_api = Api::<PodDisruptionBudget>::all(client.clone());
     let cm_api = Api::<ConfigMap>::all(client.clone());
     let np_api = Api::<NetworkPolicy>::all(client.clone());
     let pia_api = Api::<PodIdentityAssociation>::all(client.clone());
@@ -401,28 +403,39 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
 
     let (ss_store, ss_writer) = reflector::store();
     let ss_reflector = reflector(ss_writer, watcher(ss_api, cfg.clone()))
+        .map(|event| ensure_deletion_change(event))
         .touched_objects()
         .default_backoff()
         .predicate_filter(changed_predicate.combine(status_predicate_serde));
 
     let np_watcher = metadata_watcher(np_api, cfg.clone())
+        .map(|event| ensure_deletion_change(event))
         .touched_objects()
         .predicate_filter(changed_predicate);
 
     let ns_watcher = metadata_watcher(ns_api, cfg.clone())
+        .map(|event| ensure_deletion_change(event))
         .touched_objects()
         .predicate_filter(changed_predicate);
 
     let svcacc_watcher = metadata_watcher(svcacc_api, cfg.clone())
+        .map(|event| ensure_deletion_change(event))
+        .touched_objects()
+        .predicate_filter(changed_predicate);
+
+    let pdb_watcher = metadata_watcher(pdb_api, cfg.clone())
+        .map(|event| ensure_deletion_change(event))
         .touched_objects()
         .predicate_filter(changed_predicate);
 
     let svc_watcher = watcher(svc_api, cfg.clone())
+        .map(|event| ensure_deletion_change(event))
         .touched_objects()
         // svc has no generation so we hash the spec to check for changes
         .predicate_filter(changed_predicate.combine(spec_predicate_serde));
 
     let cm_watcher = watcher(cm_api, cfg.clone())
+        .map(|event| ensure_deletion_change(event))
         .touched_objects()
         // cm has no generation so we hash the data to check for changes
         .predicate_filter(changed_predicate.combine(spec_predicate));
@@ -433,6 +446,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         .owns_stream(cm_watcher)
         .owns_stream(ns_watcher)
         .owns_stream(svcacc_watcher)
+        .owns_stream(pdb_watcher)
         .owns_stream(np_watcher)
         .owns_stream(ss_reflector)
         .watches_stream(
@@ -451,6 +465,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         );
     let controller = if pod_identity_association_installed {
         let pia_watcher = watcher(pia_api, cfg.clone())
+            .map(|event| ensure_deletion_change(event))
             .touched_objects()
             // avoid apply loops that seem to happen with crds
             .predicate_filter(changed_predicate.combine(status_predicate));
@@ -461,6 +476,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
             job_api,
             Config::default().labels("app.kubernetes.io/name=restate-pia-canary"),
         )
+        .map(|event| ensure_deletion_change(event))
         .touched_objects()
         .predicate_filter(changed_predicate);
 
@@ -470,6 +486,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     };
     let controller = if security_group_policy_installed {
         let sgp_watcher = metadata_watcher(sgp_api, cfg.clone())
+            .map(|event| ensure_deletion_change(event))
             .touched_objects()
             // avoid apply loops that seem to happen with crds
             .predicate_filter(changed_predicate);
@@ -480,6 +497,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     };
     let controller = if secret_provider_class_installed {
         let spc_watcher = metadata_watcher(spc_api, cfg.clone())
+            .map(|event| ensure_deletion_change(event))
             .touched_objects()
             // avoid apply loops that seem to happen with crds
             .predicate_filter(changed_predicate);
@@ -505,6 +523,21 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         .filter_map(|x| async move { Result::ok(x) })
         .for_each(|_| futures::future::ready(()))
         .await;
+}
+
+// deletion apparently doesn't lead to any change in metadata otherwise, which means the changed_predicate
+// would drop them.
+fn ensure_deletion_change<K: Resource, E>(
+    mut event: Result<kube::runtime::watcher::Event<K>, E>,
+) -> Result<kube::runtime::watcher::Event<K>, E> {
+    if let Ok(kube::runtime::watcher::Event::Delete(ref mut object)) = event {
+        let meta = object.meta_mut();
+        meta.generation = match meta.generation {
+            Some(val) => Some(val + 1),
+            None => Some(0),
+        }
+    }
+    event
 }
 
 fn changed_predicate<K: Resource>(obj: &K) -> Option<u64> {
