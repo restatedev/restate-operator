@@ -37,30 +37,7 @@ spec:
     storageRequestBytes: 2147483648 # 2 GiB
 ```
 
-An example `RestateCluster` with 3 nodes using the Raft metastore:
-
-```yaml
-apiVersion: restate.dev/v1
-kind: RestateCluster
-metadata:
-  name: restate-test
-spec:
-  compute:
-    replicas: 3
-    image: restatedev/restate:1.3.2
-  storage:
-    storageRequestBytes: 2147483648 # 2 GiB
-  config: |
-    auto-provision = false
-
-    [metadata-server]
-    type = "replicated"
-
-    [metadata-client]
-    addresses = ["http://restate:5122/"]
-```
-
-Or with the S3 metastore (recommended if you're running in a single region):
+An example `RestateCluster` with 3 nodes using S3 for metadata and [snapshots](https://docs.restate.dev/operate/snapshots/):
 
 ```yaml
 apiVersion: restate.dev/v1
@@ -77,22 +54,62 @@ spec:
     serviceAccountAnnotations:
       eks.amazonaws.com/role-arn: arn:aws:iam::111122223333:role/my-role-that-can-read-write-to-the-bucket
   config: |
-    auto-provision = false
     roles = [
         "worker",
         "admin",
         "log-server",
     ]
+    auto-provision = true
+    default-num-partitions = 128
+    default-replication = 2
 
     [metadata-client]
     type = "object-store"
     path = "s3://some-bucket/metadata"
+
+    [bifrost]
+    default-provider = "replicated"
+
+    [worker.snapshots]
+    destination = "s3://some-bucket/snapshots"
+    snapshot-interval-num-records = 10000
 ```
 
-In either case, you would then need to provision the cluster eg with:
+If you don't have access to an object store, you can run using the default Raft-based metadata store and without snapshots.
+Running a distributed cluster without snapshots is not recommended as they are used to speed up failover.
 
-```bash
-kubectl -n restate-test exec -it restate-0 -- restatectl provision --log-provider replicated --log-replication 2 --partition-replication 2 --num-partitions 128
+```yaml
+apiVersion: restate.dev/v1
+kind: RestateCluster
+metadata:
+  name: restate-test
+spec:
+  compute:
+    replicas: 3
+    image: restatedev/restate:1.3.2
+  storage:
+    storageRequestBytes: 2147483648 # 2 GiB
+  config: |
+    roles = [
+        "worker",
+        "admin",
+        "log-server",
+        "metadata-server",
+    ]
+    # auto-provision should not be turned on when using the raft metadata store
+    # provision with kubectl -n restate-test exec -it restate-0 -- restatectl provision
+    auto-provision = false
+    default-num-partitions = 128
+    default-replication = 2
+
+    [metadata-server]
+    type = "replicated"
+
+    [metadata-client]
+    addresses = ["http://restate:5122/"]
+
+    [bifrost]
+    default-provider = "replicated"
 ```
 
 For the full schema as a [Pkl](https://pkl-lang.org/) template see [`crd/RestateCluster.pkl`](./crd/RestateCluster.pkl).
