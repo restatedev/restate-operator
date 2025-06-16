@@ -151,7 +151,7 @@ fn allow_access(
     port_name: &str,
     port: i32,
     base_metadata: &ObjectMeta,
-    peers: Option<&[NetworkPolicyPeer]>,
+    peers: Option<Vec<NetworkPolicyPeer>>,
 ) -> NetworkPolicy {
     NetworkPolicy {
         metadata: object_meta(base_metadata, format!("allow-{port_name}-access")),
@@ -160,7 +160,7 @@ fn allow_access(
             policy_types: Some(vec!["Ingress".into()]),
             ingress: peers.map(|peers| {
                 vec![NetworkPolicyIngressRule {
-                    from: Some(peers.into()),
+                    from: Some(peers),
                     ports: Some(vec![NetworkPolicyPort {
                         protocol: Some("TCP".into()),
                         port: Some(IntOrString::Int(port)),
@@ -179,7 +179,7 @@ fn allow_egress(
     user_egress: Option<&[crate::resources::restateclusters::NetworkPolicyEgressRule]>,
 ) -> NetworkPolicy {
     let mut egress: Vec<NetworkPolicyEgressRule> =
-        Vec::with_capacity(user_egress.map(|e| e.len()).unwrap_or(0) + 1);
+        Vec::with_capacity(user_egress.map(|e| e.len()).unwrap_or(0) + 2);
     if let Some(user_egress) = user_egress {
         egress.extend(
             user_egress
@@ -188,6 +188,28 @@ fn allow_egress(
                 .map(NetworkPolicyEgressRule::from),
         );
     }
+
+    // allow egress to ourself on the node port
+    egress.push(NetworkPolicyEgressRule {
+        ports: Some(vec![NetworkPolicyPort {
+            end_port: None,
+            protocol: Some("TCP".into()),
+            port: Some(IntOrString::Int(5122)),
+        }]),
+        to: Some(vec![NetworkPolicyPeer {
+            ip_block: None,
+            // allow all namespaces
+            namespace_selector: Some(LabelSelector {
+                match_expressions: None,
+                match_labels: Some(BTreeMap::from([(
+                    "kubernetes.io/metadata.name".into(),
+                    namespace.into(),
+                )])),
+            }),
+            // select the labels of the cluster
+            pod_selector: Some(label_selector(base_metadata)),
+        }]),
+    });
 
     // allow egress to any pod labelled specifically to allow this cluster, in any namespace, on any port
     egress.push(NetworkPolicyEgressRule {
@@ -253,12 +275,12 @@ pub async fn reconcile_network_policies(
             "ingress",
             8080,
             base_metadata,
-            network_peers.and_then(|peers| peers.ingress.as_deref()),
+            network_peers.and_then(|peers| peers.ingress.clone()),
         ),
     )
     .await?;
 
-    let admin_peers: Option<std::borrow::Cow<[NetworkPolicyPeer]>> = match (
+    let admin_peers: Option<Vec<NetworkPolicyPeer>> = match (
         allow_operator_access_to_admin,
         ctx.operator_namespace.as_ref(),
         ctx.operator_label_name.as_ref(),
@@ -295,19 +317,35 @@ pub async fn reconcile_network_policies(
     apply_network_policy(
         namespace,
         &np_api,
-        allow_access("admin", 9070, base_metadata, admin_peers.as_deref()),
+        allow_access("admin", 9070, base_metadata, admin_peers),
     )
     .await?;
+
+    let mut node_peers = match network_peers.and_then(|peers| peers.metrics.as_deref()) {
+        Some(node_peers) => {
+            let mut node_peers_vec = Vec::with_capacity(node_peers.len() + 1);
+            node_peers_vec.extend_from_slice(node_peers);
+            node_peers_vec
+        }
+        None => Vec::with_capacity(1),
+    };
+    node_peers.push(NetworkPolicyPeer {
+        ip_block: None,
+        namespace_selector: Some(LabelSelector {
+            match_expressions: None,
+            match_labels: Some(BTreeMap::from([(
+                "kubernetes.io/metadata.name".into(),
+                namespace.into(),
+            )])),
+        }),
+        // select the labels of the cluster
+        pod_selector: Some(label_selector(base_metadata)),
+    });
 
     apply_network_policy(
         namespace,
         &np_api,
-        allow_access(
-            "metrics",
-            5122,
-            base_metadata,
-            network_peers.and_then(|peers| peers.metrics.as_deref()),
-        ),
+        allow_access("metrics", 5122, base_metadata, Some(node_peers)),
     )
     .await?;
 
