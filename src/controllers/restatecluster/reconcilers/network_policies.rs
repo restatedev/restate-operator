@@ -287,31 +287,28 @@ pub async fn reconcile_network_policies(
         ctx.operator_label_value.as_ref(),
     ) {
         (true, Some(operator_namespace), Some(operator_label_name), Some(operator_label_value)) => {
-            let mut peers = network_peers
-                .and_then(|peers| peers.admin.clone())
-                .unwrap_or_default();
-
-            peers.push(NetworkPolicyPeer {
-                ip_block: None,
-                namespace_selector: Some(LabelSelector {
-                    match_expressions: None,
-                    match_labels: Some(BTreeMap::from([(
-                        "kubernetes.io/metadata.name".into(),
-                        operator_namespace.clone(),
-                    )])),
-                }),
-                pod_selector: Some(LabelSelector {
-                    match_expressions: None,
-                    match_labels: Some(BTreeMap::from([(
-                        operator_label_name.clone(),
-                        operator_label_value.clone(),
-                    )])),
-                }),
-            });
-
-            Some(peers.into())
+            Some(add_peer(
+                network_peers.and_then(|peers| peers.admin.as_deref()),
+                NetworkPolicyPeer {
+                    ip_block: None,
+                    namespace_selector: Some(LabelSelector {
+                        match_expressions: None,
+                        match_labels: Some(BTreeMap::from([(
+                            "kubernetes.io/metadata.name".into(),
+                            operator_namespace.clone(),
+                        )])),
+                    }),
+                    pod_selector: Some(LabelSelector {
+                        match_expressions: None,
+                        match_labels: Some(BTreeMap::from([(
+                            operator_label_name.clone(),
+                            operator_label_value.clone(),
+                        )])),
+                    }),
+                },
+            ))
         }
-        _ => network_peers.and_then(|peers| peers.admin.as_deref().map(|a| a.into())),
+        _ => network_peers.and_then(|peers| peers.admin.clone()),
     };
 
     apply_network_policy(
@@ -321,26 +318,21 @@ pub async fn reconcile_network_policies(
     )
     .await?;
 
-    let mut node_peers = match network_peers.and_then(|peers| peers.metrics.as_deref()) {
-        Some(node_peers) => {
-            let mut node_peers_vec = Vec::with_capacity(node_peers.len() + 1);
-            node_peers_vec.extend_from_slice(node_peers);
-            node_peers_vec
-        }
-        None => Vec::with_capacity(1),
-    };
-    node_peers.push(NetworkPolicyPeer {
-        ip_block: None,
-        namespace_selector: Some(LabelSelector {
-            match_expressions: None,
-            match_labels: Some(BTreeMap::from([(
-                "kubernetes.io/metadata.name".into(),
-                namespace.into(),
-            )])),
-        }),
-        // select the labels of the cluster
-        pod_selector: Some(label_selector(base_metadata)),
-    });
+    let node_peers = add_peer(
+        network_peers.and_then(|peers| peers.metrics.as_deref()),
+        NetworkPolicyPeer {
+            ip_block: None,
+            namespace_selector: Some(LabelSelector {
+                match_expressions: None,
+                match_labels: Some(BTreeMap::from([(
+                    "kubernetes.io/metadata.name".into(),
+                    namespace.into(),
+                )])),
+            }),
+            // select the labels of the cluster
+            pod_selector: Some(label_selector(base_metadata)),
+        },
+    );
 
     apply_network_policy(
         namespace,
@@ -350,6 +342,26 @@ pub async fn reconcile_network_policies(
     .await?;
 
     Ok(())
+}
+
+fn add_peer(peers: Option<&[NetworkPolicyPeer]>, add: NetworkPolicyPeer) -> Vec<NetworkPolicyPeer> {
+    match peers {
+        None => {
+            // no peers specified; this will allow nothing, so we want to allow *only* the new peer
+            vec![add]
+        }
+        Some(peers) if peers.is_empty() => {
+            // empty peers specified; this will allow everything, so we have no reason to add the new peer
+            Vec::new()
+        }
+        Some(peers) => {
+            // some specific peers specified; we should add to the list of peers
+            let mut next_peers = Vec::with_capacity(peers.len() + 1);
+            next_peers.extend_from_slice(peers);
+            next_peers.push(add);
+            next_peers
+        }
+    }
 }
 
 async fn apply_network_policy(
