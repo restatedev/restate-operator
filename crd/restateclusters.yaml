@@ -767,6 +767,10 @@ spec:
                       type: string
                     nullable: true
                     type: array
+                  disableNetworkPolicies:
+                    description: If set, the operator will not create any network policies for this cluster. Defaults to false.
+                    nullable: true
+                    type: boolean
                   networkEgressRules:
                     description: 'Egress rules to allow the cluster to make outbound requests; this is in addition to the default of allowing public internet access, cluster DNS access and pods labelled with `allow.restate.dev/<cluster-name>: "true"`. Providing a single empty rule will allow all outbound traffic - not recommended'
                     items:

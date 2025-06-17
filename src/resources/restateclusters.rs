@@ -176,6 +176,9 @@ pub struct RestateClusterSecurity {
     pub aws_pod_identity_association_role_arn: Option<String>,
     /// If set, create an AWS SecurityGroupPolicy CRD object to place the Restate pod into these security groups
     pub aws_pod_security_groups: Option<Vec<String>>,
+    /// If set, the operator will not create any network policies for this cluster.
+    /// Defaults to false.
+    pub disable_network_policies: Option<bool>,
     /// Network peers to allow inbound access to restate ports
     /// If unset, will not allow any new traffic. Set any of these to [] to allow all traffic - not recommended.
     pub network_peers: Option<RestateClusterNetworkPeers>,

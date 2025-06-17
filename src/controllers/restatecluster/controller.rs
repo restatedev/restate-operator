@@ -189,29 +189,7 @@ impl RestateCluster {
         )
         .await?;
 
-        reconcile_network_policies(
-            &ctx,
-            name,
-            &base_metadata,
-            self.spec
-                .security
-                .as_ref()
-                .and_then(|s| s.network_peers.as_ref()),
-            self.spec
-                .security
-                .as_ref()
-                .and_then(|s| s.allow_operator_access_to_admin)
-                .unwrap_or(true),
-            self.spec
-                .security
-                .as_ref()
-                .and_then(|s| s.network_egress_rules.as_deref()),
-            self.spec
-                .security
-                .as_ref()
-                .is_some_and(|s| s.aws_pod_identity_association_role_arn.is_some()),
-        )
-        .await?;
+        reconcile_network_policies(&ctx, name, &base_metadata, self.spec.security.as_ref()).await?;
 
         let signing_key = reconcile_signing_key(
             &ctx,
@@ -403,39 +381,39 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
 
     let (ss_store, ss_writer) = reflector::store();
     let ss_reflector = reflector(ss_writer, watcher(ss_api, cfg.clone()))
-        .map(|event| ensure_deletion_change(event))
+        .map(ensure_deletion_change)
         .touched_objects()
         .default_backoff()
         .predicate_filter(changed_predicate.combine(status_predicate_serde));
 
     let np_watcher = metadata_watcher(np_api, cfg.clone())
-        .map(|event| ensure_deletion_change(event))
+        .map(ensure_deletion_change)
         .touched_objects()
         .predicate_filter(changed_predicate);
 
     let ns_watcher = metadata_watcher(ns_api, cfg.clone())
-        .map(|event| ensure_deletion_change(event))
+        .map(ensure_deletion_change)
         .touched_objects()
         .predicate_filter(changed_predicate);
 
     let svcacc_watcher = metadata_watcher(svcacc_api, cfg.clone())
-        .map(|event| ensure_deletion_change(event))
+        .map(ensure_deletion_change)
         .touched_objects()
         .predicate_filter(changed_predicate);
 
     let pdb_watcher = metadata_watcher(pdb_api, cfg.clone())
-        .map(|event| ensure_deletion_change(event))
+        .map(ensure_deletion_change)
         .touched_objects()
         .predicate_filter(changed_predicate);
 
     let svc_watcher = watcher(svc_api, cfg.clone())
-        .map(|event| ensure_deletion_change(event))
+        .map(ensure_deletion_change)
         .touched_objects()
         // svc has no generation so we hash the spec to check for changes
         .predicate_filter(changed_predicate.combine(spec_predicate_serde));
 
     let cm_watcher = watcher(cm_api, cfg.clone())
-        .map(|event| ensure_deletion_change(event))
+        .map(ensure_deletion_change)
         .touched_objects()
         // cm has no generation so we hash the data to check for changes
         .predicate_filter(changed_predicate.combine(spec_predicate));
@@ -465,7 +443,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         );
     let controller = if pod_identity_association_installed {
         let pia_watcher = watcher(pia_api, cfg.clone())
-            .map(|event| ensure_deletion_change(event))
+            .map(ensure_deletion_change)
             .touched_objects()
             // avoid apply loops that seem to happen with crds
             .predicate_filter(changed_predicate.combine(status_predicate));
@@ -476,7 +454,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
             job_api,
             Config::default().labels("app.kubernetes.io/name=restate-pia-canary"),
         )
-        .map(|event| ensure_deletion_change(event))
+        .map(ensure_deletion_change)
         .touched_objects()
         .predicate_filter(changed_predicate);
 
@@ -486,7 +464,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     };
     let controller = if security_group_policy_installed {
         let sgp_watcher = metadata_watcher(sgp_api, cfg.clone())
-            .map(|event| ensure_deletion_change(event))
+            .map(ensure_deletion_change)
             .touched_objects()
             // avoid apply loops that seem to happen with crds
             .predicate_filter(changed_predicate);
@@ -497,7 +475,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     };
     let controller = if secret_provider_class_installed {
         let spc_watcher = metadata_watcher(spc_api, cfg.clone())
-            .map(|event| ensure_deletion_change(event))
+            .map(ensure_deletion_change)
             .touched_objects()
             // avoid apply loops that seem to happen with crds
             .predicate_filter(changed_predicate);
