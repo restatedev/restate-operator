@@ -17,7 +17,7 @@ use kube::{
 use tracing::debug;
 
 use crate::controllers::restatecluster::controller::Context;
-use crate::resources::restateclusters::RestateClusterNetworkPeers;
+use crate::resources::restateclusters::RestateClusterSecurity;
 use crate::Error;
 
 use super::{label_selector, object_meta};
@@ -256,12 +256,19 @@ pub async fn reconcile_network_policies(
     ctx: &Context,
     namespace: &str,
     base_metadata: &ObjectMeta,
-    disable_network_policies: bool,
-    network_peers: Option<&RestateClusterNetworkPeers>,
-    allow_operator_access_to_admin: bool,
-    network_egress_rules: Option<&[crate::resources::restateclusters::NetworkPolicyEgressRule]>,
-    aws_pod_identity_enabled: bool,
+    security: Option<&RestateClusterSecurity>,
 ) -> Result<(), Error> {
+    let disable_network_policies = security
+        .and_then(|s| s.disable_network_policies)
+        .unwrap_or(false);
+    let network_peers = security.and_then(|s| s.network_peers.as_ref());
+    let allow_operator_access_to_admin = security
+        .and_then(|s| s.allow_operator_access_to_admin)
+        .unwrap_or(true);
+    let network_egress_rules = security.and_then(|s| s.network_egress_rules.as_deref());
+    let aws_pod_identity_enabled =
+        security.is_some_and(|s| s.aws_pod_identity_association_role_arn.is_some());
+
     let np_api: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), namespace);
 
     if disable_network_policies {
@@ -376,7 +383,7 @@ fn add_peer(peers: Option<&[NetworkPolicyPeer]>, add: NetworkPolicyPeer) -> Vec<
             // no peers specified; this will allow nothing, so we want to allow *only* the new peer
             vec![add]
         }
-        Some(peers) if peers.is_empty() => {
+        Some([]) => {
             // empty peers specified; this will allow everything, so we have no reason to add the new peer
             Vec::new()
         }
