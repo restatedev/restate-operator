@@ -51,6 +51,7 @@ spec:
   storage:
     storageRequestBytes: 2147483648 # 2 GiB
   security:
+    # this kind of annotation can be used to give your cluster an IAM role in EKS
     serviceAccountAnnotations:
       eks.amazonaws.com/role-arn: arn:aws:iam::111122223333:role/my-role-that-can-read-write-to-the-bucket
   config: |
@@ -66,6 +67,7 @@ spec:
     [metadata-client]
     type = "object-store"
     path = "s3://some-bucket/metadata"
+    # the same aws-* parameters as below are supported here
 
     [bifrost]
     default-provider = "replicated"
@@ -73,10 +75,19 @@ spec:
     [worker.snapshots]
     destination = "s3://some-bucket/snapshots"
     snapshot-interval-num-records = 10000
+    # you can also provide parameters here for non-S3 stores eg:
+    # aws-region = "local"
+    # aws-access-key-id = "minioadmin"
+    # aws-secret-access-key = "minioadmin"
+    # aws-endpoint-url = "http://localhost:9000"
+    # aws-allow-http = true
 ```
 
-If you don't have access to an object store, you can run using the default Raft-based metadata store and without snapshots.
+Note that if using an object store for metadata, it must support conditional PUTs. They are not available on all all object store implementations.
+If you don't have access to an object store with conditional PUTs, you can run using the default Raft-based metadata store, and if you don't
+have access to an object store of any kind you can also run without snapshots.
 Running a distributed cluster without snapshots is not recommended as they are used to speed up failover.
+A config for raft metadata and without snapshots is as follows:
 
 ```yaml
 apiVersion: restate.dev/v1
