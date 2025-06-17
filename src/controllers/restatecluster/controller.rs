@@ -189,27 +189,21 @@ impl RestateCluster {
         )
         .await?;
 
+        let security = self.spec.security.as_ref();
+
         reconcile_network_policies(
             &ctx,
             name,
             &base_metadata,
-            self.spec
-                .security
-                .as_ref()
-                .and_then(|s| s.network_peers.as_ref()),
-            self.spec
-                .security
-                .as_ref()
+            security
+                .and_then(|s| s.disable_network_policies)
+                .unwrap_or(false),
+            security.and_then(|s| s.network_peers.as_ref()),
+            security
                 .and_then(|s| s.allow_operator_access_to_admin)
                 .unwrap_or(true),
-            self.spec
-                .security
-                .as_ref()
-                .and_then(|s| s.network_egress_rules.as_deref()),
-            self.spec
-                .security
-                .as_ref()
-                .is_some_and(|s| s.aws_pod_identity_association_role_arn.is_some()),
+            security.and_then(|s| s.network_egress_rules.as_deref()),
+            security.is_some_and(|s| s.aws_pod_identity_association_role_arn.is_some()),
         )
         .await?;
 

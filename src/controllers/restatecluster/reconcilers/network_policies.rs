@@ -22,9 +22,11 @@ use crate::Error;
 
 use super::{label_selector, object_meta};
 
+const DENY_ALL_POLICY_NAME: &str = "deny-all";
+
 fn deny_all(base_metadata: &ObjectMeta) -> NetworkPolicy {
     NetworkPolicy {
-        metadata: object_meta(base_metadata, "deny-all"),
+        metadata: object_meta(base_metadata, DENY_ALL_POLICY_NAME),
         spec: Some(NetworkPolicySpec {
             policy_types: Some(vec!["Egress".into(), "Ingress".into()]),
             ..Default::default()
@@ -32,9 +34,11 @@ fn deny_all(base_metadata: &ObjectMeta) -> NetworkPolicy {
     }
 }
 
+const ALLOW_DNS_POLICY_NAME: &str = "allow-egress-to-kube-dns";
+
 fn allow_dns(base_metadata: &ObjectMeta) -> NetworkPolicy {
     NetworkPolicy {
-        metadata: object_meta(base_metadata, "allow-egress-to-kube-dns"),
+        metadata: object_meta(base_metadata, ALLOW_DNS_POLICY_NAME),
         spec: Some(NetworkPolicySpec {
             policy_types: Some(vec!["Egress".into()]),
             egress: Some(vec![NetworkPolicyEgressRule {
@@ -75,9 +79,11 @@ fn allow_dns(base_metadata: &ObjectMeta) -> NetworkPolicy {
     }
 }
 
+const ALLOW_PUBLIC_POLICY_NAME: &str = "allow-restate-egress-to-public-internet";
+
 fn allow_public(base_metadata: &ObjectMeta) -> NetworkPolicy {
     NetworkPolicy {
-        metadata: object_meta(base_metadata, "allow-restate-egress-to-public-internet"),
+        metadata: object_meta(base_metadata, ALLOW_PUBLIC_POLICY_NAME),
         spec: Some(NetworkPolicySpec {
             pod_selector: label_selector(base_metadata),
             policy_types: Some(vec!["Egress".into()]),
@@ -147,6 +153,10 @@ fn allow_aws_pod_identity(base_metadata: &ObjectMeta) -> NetworkPolicy {
     }
 }
 
+const ALLOW_INGRESS_POLICY_NAME: &str = "allow-ingress-access";
+const ALLOW_ADMIN_POLICY_NAME: &str = "allow-admin-access";
+const ALLOW_METRICS_POLICY_NAME: &str = "allow-metrics-access";
+
 fn allow_access(
     port_name: &str,
     port: i32,
@@ -172,6 +182,8 @@ fn allow_access(
         }),
     }
 }
+
+const ALLOW_EGRESS_POLICY_NAME: &str = "allow-restate-egress";
 
 fn allow_egress(
     namespace: &str,
@@ -230,7 +242,7 @@ fn allow_egress(
     });
 
     NetworkPolicy {
-        metadata: object_meta(base_metadata, "allow-restate-egress"),
+        metadata: object_meta(base_metadata, ALLOW_EGRESS_POLICY_NAME),
         spec: Some(NetworkPolicySpec {
             pod_selector: label_selector(base_metadata),
             policy_types: Some(vec!["Egress".into()]),
@@ -244,12 +256,26 @@ pub async fn reconcile_network_policies(
     ctx: &Context,
     namespace: &str,
     base_metadata: &ObjectMeta,
+    disable_network_policies: bool,
     network_peers: Option<&RestateClusterNetworkPeers>,
     allow_operator_access_to_admin: bool,
     network_egress_rules: Option<&[crate::resources::restateclusters::NetworkPolicyEgressRule]>,
     aws_pod_identity_enabled: bool,
 ) -> Result<(), Error> {
     let np_api: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), namespace);
+
+    if disable_network_policies {
+        delete_network_policy(namespace, &np_api, DENY_ALL_POLICY_NAME).await?;
+        delete_network_policy(namespace, &np_api, ALLOW_DNS_POLICY_NAME).await?;
+        delete_network_policy(namespace, &np_api, ALLOW_PUBLIC_POLICY_NAME).await?;
+        delete_network_policy(namespace, &np_api, AWS_POD_IDENTITY_POLICY_NAME).await?;
+        delete_network_policy(namespace, &np_api, ALLOW_EGRESS_POLICY_NAME).await?;
+        delete_network_policy(namespace, &np_api, ALLOW_INGRESS_POLICY_NAME).await?;
+        delete_network_policy(namespace, &np_api, ALLOW_ADMIN_POLICY_NAME).await?;
+        delete_network_policy(namespace, &np_api, ALLOW_METRICS_POLICY_NAME).await?;
+
+        return Ok(());
+    }
 
     apply_network_policy(namespace, &np_api, deny_all(base_metadata)).await?;
     apply_network_policy(namespace, &np_api, allow_dns(base_metadata)).await?;
