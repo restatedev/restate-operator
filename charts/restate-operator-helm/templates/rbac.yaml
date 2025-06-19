@@ -29,6 +29,9 @@ rules:
       - restatedeployments
       - restatedeployments/status
       - restatedeployments/finalizers
+      - restatecloudenvironments
+      - restatecloudenvironments/status
+      - restatecloudenvironments/finalizers
     verbs:
       - get
       - list
@@ -101,7 +104,7 @@ rules:
       - eks.services.k8s.aws
   {{- end }}
 ---
-# Binding the role to the account
+# Binding the ClusterRole to the account
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
@@ -112,5 +115,44 @@ subjects:
     name: {{ include "controller.fullname" . }}
 roleRef:
   kind: ClusterRole
+  name: {{ include "controller.fullname" . }}
+  apiGroup: rbac.authorization.k8s.io
+---
+# Namespaced access for the service account
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: {{ include "controller.fullname" . }}
+rules:
+  - resources:
+    - secrets
+    verbs:
+      - get
+      - list
+      - watch
+    apiGroups:
+    - ''
+  - resources:
+    - deployments
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - patch
+    apiGroups:
+    - apps
+---
+# Binding the Role to the account
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: {{ include "controller.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    namespace: {{ .Release.Namespace }}
+    name: {{ include "controller.fullname" . }}
+roleRef:
+  kind: Role
   name: {{ include "controller.fullname" . }}
   apiGroup: rbac.authorization.k8s.io

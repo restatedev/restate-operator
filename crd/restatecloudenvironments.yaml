@@ -1,54 +1,60 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: restateclusters.restate.dev
+  name: restatecloudenvironments.restate.dev
 spec:
   group: restate.dev
   names:
-    kind: RestateCluster
-    plural: restateclusters
+    kind: RestateCloudEnvironment
+    plural: restatecloudenvironments
     shortNames:
-    - rsc
-    singular: restatecluster
+    - rce
+    singular: restatecloudenvironment
   scope: Cluster
   versions:
-  - additionalPrinterColumns:
-    - jsonPath: .status.conditions[?(@.type=="Ready")].status
-      name: Ready
-      type: string
-    - jsonPath: .status.conditions[?(@.type=="Ready")].message
-      name: Status
-      priority: 1
-      type: string
-    - description: CreationTimestamp is a timestamp representing the server time when this object was created. It is not guaranteed to be set in happens-before order across separate operations. Clients may not set this value. It is represented in RFC3339 form and is in UTC
-      jsonPath: .metadata.creationTimestamp
-      name: Age
-      type: date
-    name: v1
+  - additionalPrinterColumns: []
+    name: v1beta1
     schema:
       openAPIV3Schema:
-        description: RestateCluster describes the configuration and status of a Restate cluster.
+        description: Auto-generated derived type for RestateCloudEnvironmentSpec via `CustomResource`
         properties:
-          metadata:
-            properties:
-              name:
-                maxLength: 63
-                minLength: 1
-                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
-                type: string
-            type: object
           spec:
-            description: Represents the configuration of a Restate Cluster
+            description: Represents the configuration of a Restate Cloud environment
             properties:
-              clusterName:
-                description: clusterName sets the RESTATE_CLUSTER_NAME environment variable. Defaults to the object name.
-                nullable: true
+              authentication:
+                description: Where to get credentials for communication with the Cloud environment
+                properties:
+                  secret:
+                    description: Configured a reference to a secret in the same namespace as the operator
+                    properties:
+                      key:
+                        description: The key to read from the referenced Secret
+                        type: string
+                      name:
+                        description: The name of the referenced secret. It must be in the same namespace as the operator.
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                required:
+                - secret
+                type: object
+              environmentId:
+                description: The ID of your environment, which begins `env_`
                 type: string
-              compute:
-                description: Compute configuration
+              region:
+                description: The short region identifier of your environment, eg `us`, `eu`.
+                type: string
+              signingPublicKey:
+                description: The request signing public key of your environment, which begins `publickeyv1_`. It is not a secret.
+                type: string
+              tunnel:
+                description: Optional configuration for the deployment of tunnel pods
+                nullable: true
                 properties:
                   affinity:
-                    description: If specified, pod affinity
+                    description: If specified, pod affinity. Defaults to zone anti-affinity, provide {} to disable all affinity
                     nullable: true
                     properties:
                       nodeAffinity:
@@ -549,20 +555,8 @@ spec:
                             type: array
                         type: object
                     type: object
-                  args:
-                    description: Arguments to the entrypoint. The container image's CMD is used if this is not provided.
-                    items:
-                      type: string
-                    nullable: true
-                    type: array
-                  command:
-                    description: Entrypoint array. Not executed within a shell. The container image's ENTRYPOINT is used if this is not provided.
-                    items:
-                      type: string
-                    nullable: true
-                    type: array
                   dnsConfig:
-                    description: Specifies the DNS parameters of the Restate pod. Parameters specified here will be merged to the generated DNS configuration based on DNSPolicy.
+                    description: Specifies the DNS parameters of the tunnel pod. Parameters specified here will be merged to the generated DNS configuration based on DNSPolicy.
                     nullable: true
                     properties:
                       nameservers:
@@ -676,38 +670,30 @@ spec:
                     - name
                     x-kubernetes-list-type: map
                   image:
-                    description: 'Container image name. More info: https://kubernetes.io/docs/concepts/containers/images.'
+                    description: Container image name. Defaults to a suggested version of the ghcr.io/restatedev/restate-cloud-tunnel-client
+                    nullable: true
                     type: string
                   imagePullPolicy:
                     description: 'Image pull policy. One of Always, Never, IfNotPresent. Defaults to Always if :latest tag is specified, or IfNotPresent otherwise. More info: https://kubernetes.io/docs/concepts/containers/images#updating-images'
                     nullable: true
                     type: string
-                  imagePullSecrets:
-                    description: 'Optional list of references to secrets in the same namespace to use for pulling the image. More info: https://kubernetes.io/docs/concepts/containers/images#specifying-imagepullsecrets-on-a-pod'
-                    items:
-                      description: LocalObjectReference contains enough information to let you locate the referenced object inside the same namespace.
-                      properties:
-                        name:
-                          description: 'Name of the referent. This field is effectively required, but due to backwards compatibility is allowed to be empty. Instances of this type with an empty value here are almost certainly wrong. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names'
-                          type: string
-                      required:
-                      - name
-                      type: object
-                    nullable: true
-                    type: array
                   nodeSelector:
                     additionalProperties:
                       type: string
                     description: If specified, a node selector for the pod
                     type: object
                     x-kubernetes-map-type: atomic
+                  remoteProxy:
+                    description: If true, the tunnel pods will expose unauthenticated access to the Restate Cloud environment on ports 8080 (ingress) and 9070 (admin). Care should be taken to restrict inbound access to the tunnel pods if this is set. Defaults to false.
+                    nullable: true
+                    type: boolean
                   replicas:
-                    description: replicas is the desired number of Restate nodes. If unspecified, defaults to 1.
+                    description: replicas is the desired number of tunnel pods. If unspecified, defaults to 1.
                     format: int32
                     nullable: true
                     type: integer
                   resources:
-                    description: 'Compute Resources for the Restate container. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
+                    description: 'Compute Resources for the tunnel pods. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
                     nullable: true
                     properties:
                       claims:
@@ -767,550 +753,19 @@ spec:
                       type: object
                     nullable: true
                     type: array
-                required:
-                - image
-                type: object
-              config:
-                description: TOML-encoded Restate config file
-                nullable: true
-                type: string
-              security:
-                description: Security configuration
-                nullable: true
-                properties:
-                  allowOperatorAccessToAdmin:
-                    description: If set to true, add a rule to the allow-admin-access NetworkPolicy allowing traffic from this operator. This is needed when using RestateDeployments which rely on the operator calling the admin API to register your service. Defaults to true.
-                    nullable: true
-                    type: boolean
-                  awsPodIdentityAssociationRoleArn:
-                    description: If set, create an AWS PodIdentityAssociation using the ACK CRD in order to give the Restate pod access to this role and allow the cluster to reach the Pod Identity agent.
-                    nullable: true
-                    type: string
-                  awsPodSecurityGroups:
-                    description: If set, create an AWS SecurityGroupPolicy CRD object to place the Restate pod into these security groups
-                    items:
-                      type: string
-                    nullable: true
-                    type: array
-                  disableNetworkPolicies:
-                    description: If set, the operator will not create any network policies for this cluster. Defaults to false.
-                    nullable: true
-                    type: boolean
-                  networkEgressRules:
-                    description: 'Egress rules to allow the cluster to make outbound requests; this is in addition to the default of allowing public internet access, cluster DNS access and pods labelled with `allow.restate.dev/<cluster-name>: "true"`. Providing a single empty rule will allow all outbound traffic - not recommended'
-                    items:
-                      description: NetworkPolicyEgressRule describes a particular set of traffic that is allowed out of pods matched by a NetworkPolicySpec's podSelector. The traffic must match both ports and to. This type is beta-level in 1.8
-                      properties:
-                        ports:
-                          description: ports is a list of destination ports for outgoing traffic. Each item in this list is combined using a logical OR. If this field is empty or missing, this rule matches all ports (traffic not restricted by port). If this field is present and contains at least one item, then this rule allows traffic only if the traffic matches at least one port in the list.
-                          items:
-                            description: NetworkPolicyPort describes a port to allow traffic on
-                            properties:
-                              endPort:
-                                description: endPort indicates that the range of ports from port to endPort if set, inclusive, should be allowed by the policy. This field cannot be defined if the port field is not defined or if the port field is defined as a named (string) port. The endPort must be equal or greater than port.
-                                format: int32
-                                type: integer
-                              port:
-                                anyOf:
-                                - type: integer
-                                - type: string
-                                description: port represents the port on the given protocol. This can either be a numerical or named port on a pod. If this field is not provided, this matches all port names and numbers. If present, only traffic on the specified protocol AND port will be matched.
-                                x-kubernetes-int-or-string: true
-                              protocol:
-                                description: protocol represents the protocol (TCP, UDP, or SCTP) which traffic must match. If not specified, this field defaults to TCP.
-                                type: string
-                            type: object
-                          nullable: true
-                          type: array
-                          x-kubernetes-list-type: atomic
-                        to:
-                          description: to is a list of destinations for outgoing traffic of pods selected for this rule. Items in this list are combined using a logical OR operation. If this field is empty or missing, this rule matches all destinations (traffic not restricted by destination). If this field is present and contains at least one item, this rule allows traffic only if the traffic matches at least one item in the to list.
-                          items:
-                            description: NetworkPolicyPeer describes a peer to allow traffic to/from. Only certain combinations of fields are allowed
-                            properties:
-                              ipBlock:
-                                description: ipBlock defines policy on a particular IPBlock. If this field is set then neither of the other fields can be.
-                                properties:
-                                  cidr:
-                                    description: cidr is a string representing the IPBlock Valid examples are "192.168.1.0/24" or "2001:db8::/64"
-                                    type: string
-                                  except:
-                                    description: except is a slice of CIDRs that should not be included within an IPBlock Valid examples are "192.168.1.0/24" or "2001:db8::/64" Except values will be rejected if they are outside the cidr range
-                                    items:
-                                      type: string
-                                    type: array
-                                required:
-                                - cidr
-                                type: object
-                              namespaceSelector:
-                                description: |-
-                                  namespaceSelector selects namespaces using cluster-scoped labels. This field follows standard label selector semantics; if present but empty, it selects all namespaces.
-
-                                  If podSelector is also set, then the NetworkPolicyPeer as a whole selects the pods matching podSelector in the namespaces selected by namespaceSelector. Otherwise it selects all pods in the namespaces selected by namespaceSelector.
-                                properties:
-                                  matchExpressions:
-                                    description: matchExpressions is a list of label selector requirements. The requirements are ANDed.
-                                    items:
-                                      description: A label selector requirement is a selector that contains values, a key, and an operator that relates the key and values.
-                                      properties:
-                                        key:
-                                          description: key is the label key that the selector applies to.
-                                          type: string
-                                        operator:
-                                          description: operator represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists and DoesNotExist.
-                                          type: string
-                                        values:
-                                          description: values is an array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. This array is replaced during a strategic merge patch.
-                                          items:
-                                            type: string
-                                          type: array
-                                      required:
-                                      - key
-                                      - operator
-                                      type: object
-                                    type: array
-                                  matchLabels:
-                                    additionalProperties:
-                                      type: string
-                                    description: matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed.
-                                    type: object
-                                type: object
-                              podSelector:
-                                description: |-
-                                  podSelector is a label selector which selects pods. This field follows standard label selector semantics; if present but empty, it selects all pods.
-
-                                  If namespaceSelector is also set, then the NetworkPolicyPeer as a whole selects the pods matching podSelector in the Namespaces selected by NamespaceSelector. Otherwise it selects the pods matching podSelector in the policy's own namespace.
-                                properties:
-                                  matchExpressions:
-                                    description: matchExpressions is a list of label selector requirements. The requirements are ANDed.
-                                    items:
-                                      description: A label selector requirement is a selector that contains values, a key, and an operator that relates the key and values.
-                                      properties:
-                                        key:
-                                          description: key is the label key that the selector applies to.
-                                          type: string
-                                        operator:
-                                          description: operator represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists and DoesNotExist.
-                                          type: string
-                                        values:
-                                          description: values is an array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. This array is replaced during a strategic merge patch.
-                                          items:
-                                            type: string
-                                          type: array
-                                      required:
-                                      - key
-                                      - operator
-                                      type: object
-                                    type: array
-                                  matchLabels:
-                                    additionalProperties:
-                                      type: string
-                                    description: matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed.
-                                    type: object
-                                type: object
-                            type: object
-                          nullable: true
-                          type: array
-                          x-kubernetes-list-type: atomic
-                      type: object
-                    nullable: true
-                    type: array
-                  networkPeers:
-                    description: Network peers to allow inbound access to restate ports If unset, will not allow any new traffic. Set any of these to [] to allow all traffic - not recommended.
-                    nullable: true
-                    properties:
-                      admin:
-                        items:
-                          description: NetworkPolicyPeer describes a peer to allow traffic to/from. Only certain combinations of fields are allowed
-                          properties:
-                            ipBlock:
-                              description: ipBlock defines policy on a particular IPBlock. If this field is set then neither of the other fields can be.
-                              properties:
-                                cidr:
-                                  description: cidr is a string representing the IPBlock Valid examples are "192.168.1.0/24" or "2001:db8::/64"
-                                  type: string
-                                except:
-                                  description: except is a slice of CIDRs that should not be included within an IPBlock Valid examples are "192.168.1.0/24" or "2001:db8::/64" Except values will be rejected if they are outside the cidr range
-                                  items:
-                                    type: string
-                                  type: array
-                              required:
-                              - cidr
-                              type: object
-                            namespaceSelector:
-                              description: |-
-                                namespaceSelector selects namespaces using cluster-scoped labels. This field follows standard label selector semantics; if present but empty, it selects all namespaces.
-
-                                If podSelector is also set, then the NetworkPolicyPeer as a whole selects the pods matching podSelector in the namespaces selected by namespaceSelector. Otherwise it selects all pods in the namespaces selected by namespaceSelector.
-                              properties:
-                                matchExpressions:
-                                  description: matchExpressions is a list of label selector requirements. The requirements are ANDed.
-                                  items:
-                                    description: A label selector requirement is a selector that contains values, a key, and an operator that relates the key and values.
-                                    properties:
-                                      key:
-                                        description: key is the label key that the selector applies to.
-                                        type: string
-                                      operator:
-                                        description: operator represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists and DoesNotExist.
-                                        type: string
-                                      values:
-                                        description: values is an array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. This array is replaced during a strategic merge patch.
-                                        items:
-                                          type: string
-                                        type: array
-                                    required:
-                                    - key
-                                    - operator
-                                    type: object
-                                  type: array
-                                matchLabels:
-                                  additionalProperties:
-                                    type: string
-                                  description: matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed.
-                                  type: object
-                              type: object
-                            podSelector:
-                              description: |-
-                                podSelector is a label selector which selects pods. This field follows standard label selector semantics; if present but empty, it selects all pods.
-
-                                If namespaceSelector is also set, then the NetworkPolicyPeer as a whole selects the pods matching podSelector in the Namespaces selected by NamespaceSelector. Otherwise it selects the pods matching podSelector in the policy's own namespace.
-                              properties:
-                                matchExpressions:
-                                  description: matchExpressions is a list of label selector requirements. The requirements are ANDed.
-                                  items:
-                                    description: A label selector requirement is a selector that contains values, a key, and an operator that relates the key and values.
-                                    properties:
-                                      key:
-                                        description: key is the label key that the selector applies to.
-                                        type: string
-                                      operator:
-                                        description: operator represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists and DoesNotExist.
-                                        type: string
-                                      values:
-                                        description: values is an array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. This array is replaced during a strategic merge patch.
-                                        items:
-                                          type: string
-                                        type: array
-                                    required:
-                                    - key
-                                    - operator
-                                    type: object
-                                  type: array
-                                matchLabels:
-                                  additionalProperties:
-                                    type: string
-                                  description: matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed.
-                                  type: object
-                              type: object
-                          type: object
-                        nullable: true
-                        type: array
-                        x-kubernetes-list-type: atomic
-                      ingress:
-                        items:
-                          description: NetworkPolicyPeer describes a peer to allow traffic to/from. Only certain combinations of fields are allowed
-                          properties:
-                            ipBlock:
-                              description: ipBlock defines policy on a particular IPBlock. If this field is set then neither of the other fields can be.
-                              properties:
-                                cidr:
-                                  description: cidr is a string representing the IPBlock Valid examples are "192.168.1.0/24" or "2001:db8::/64"
-                                  type: string
-                                except:
-                                  description: except is a slice of CIDRs that should not be included within an IPBlock Valid examples are "192.168.1.0/24" or "2001:db8::/64" Except values will be rejected if they are outside the cidr range
-                                  items:
-                                    type: string
-                                  type: array
-                              required:
-                              - cidr
-                              type: object
-                            namespaceSelector:
-                              description: |-
-                                namespaceSelector selects namespaces using cluster-scoped labels. This field follows standard label selector semantics; if present but empty, it selects all namespaces.
-
-                                If podSelector is also set, then the NetworkPolicyPeer as a whole selects the pods matching podSelector in the namespaces selected by namespaceSelector. Otherwise it selects all pods in the namespaces selected by namespaceSelector.
-                              properties:
-                                matchExpressions:
-                                  description: matchExpressions is a list of label selector requirements. The requirements are ANDed.
-                                  items:
-                                    description: A label selector requirement is a selector that contains values, a key, and an operator that relates the key and values.
-                                    properties:
-                                      key:
-                                        description: key is the label key that the selector applies to.
-                                        type: string
-                                      operator:
-                                        description: operator represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists and DoesNotExist.
-                                        type: string
-                                      values:
-                                        description: values is an array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. This array is replaced during a strategic merge patch.
-                                        items:
-                                          type: string
-                                        type: array
-                                    required:
-                                    - key
-                                    - operator
-                                    type: object
-                                  type: array
-                                matchLabels:
-                                  additionalProperties:
-                                    type: string
-                                  description: matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed.
-                                  type: object
-                              type: object
-                            podSelector:
-                              description: |-
-                                podSelector is a label selector which selects pods. This field follows standard label selector semantics; if present but empty, it selects all pods.
-
-                                If namespaceSelector is also set, then the NetworkPolicyPeer as a whole selects the pods matching podSelector in the Namespaces selected by NamespaceSelector. Otherwise it selects the pods matching podSelector in the policy's own namespace.
-                              properties:
-                                matchExpressions:
-                                  description: matchExpressions is a list of label selector requirements. The requirements are ANDed.
-                                  items:
-                                    description: A label selector requirement is a selector that contains values, a key, and an operator that relates the key and values.
-                                    properties:
-                                      key:
-                                        description: key is the label key that the selector applies to.
-                                        type: string
-                                      operator:
-                                        description: operator represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists and DoesNotExist.
-                                        type: string
-                                      values:
-                                        description: values is an array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. This array is replaced during a strategic merge patch.
-                                        items:
-                                          type: string
-                                        type: array
-                                    required:
-                                    - key
-                                    - operator
-                                    type: object
-                                  type: array
-                                matchLabels:
-                                  additionalProperties:
-                                    type: string
-                                  description: matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed.
-                                  type: object
-                              type: object
-                          type: object
-                        nullable: true
-                        type: array
-                        x-kubernetes-list-type: atomic
-                      metrics:
-                        items:
-                          description: NetworkPolicyPeer describes a peer to allow traffic to/from. Only certain combinations of fields are allowed
-                          properties:
-                            ipBlock:
-                              description: ipBlock defines policy on a particular IPBlock. If this field is set then neither of the other fields can be.
-                              properties:
-                                cidr:
-                                  description: cidr is a string representing the IPBlock Valid examples are "192.168.1.0/24" or "2001:db8::/64"
-                                  type: string
-                                except:
-                                  description: except is a slice of CIDRs that should not be included within an IPBlock Valid examples are "192.168.1.0/24" or "2001:db8::/64" Except values will be rejected if they are outside the cidr range
-                                  items:
-                                    type: string
-                                  type: array
-                              required:
-                              - cidr
-                              type: object
-                            namespaceSelector:
-                              description: |-
-                                namespaceSelector selects namespaces using cluster-scoped labels. This field follows standard label selector semantics; if present but empty, it selects all namespaces.
-
-                                If podSelector is also set, then the NetworkPolicyPeer as a whole selects the pods matching podSelector in the namespaces selected by namespaceSelector. Otherwise it selects all pods in the namespaces selected by namespaceSelector.
-                              properties:
-                                matchExpressions:
-                                  description: matchExpressions is a list of label selector requirements. The requirements are ANDed.
-                                  items:
-                                    description: A label selector requirement is a selector that contains values, a key, and an operator that relates the key and values.
-                                    properties:
-                                      key:
-                                        description: key is the label key that the selector applies to.
-                                        type: string
-                                      operator:
-                                        description: operator represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists and DoesNotExist.
-                                        type: string
-                                      values:
-                                        description: values is an array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. This array is replaced during a strategic merge patch.
-                                        items:
-                                          type: string
-                                        type: array
-                                    required:
-                                    - key
-                                    - operator
-                                    type: object
-                                  type: array
-                                matchLabels:
-                                  additionalProperties:
-                                    type: string
-                                  description: matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed.
-                                  type: object
-                              type: object
-                            podSelector:
-                              description: |-
-                                podSelector is a label selector which selects pods. This field follows standard label selector semantics; if present but empty, it selects all pods.
-
-                                If namespaceSelector is also set, then the NetworkPolicyPeer as a whole selects the pods matching podSelector in the Namespaces selected by NamespaceSelector. Otherwise it selects the pods matching podSelector in the policy's own namespace.
-                              properties:
-                                matchExpressions:
-                                  description: matchExpressions is a list of label selector requirements. The requirements are ANDed.
-                                  items:
-                                    description: A label selector requirement is a selector that contains values, a key, and an operator that relates the key and values.
-                                    properties:
-                                      key:
-                                        description: key is the label key that the selector applies to.
-                                        type: string
-                                      operator:
-                                        description: operator represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists and DoesNotExist.
-                                        type: string
-                                      values:
-                                        description: values is an array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. This array is replaced during a strategic merge patch.
-                                        items:
-                                          type: string
-                                        type: array
-                                    required:
-                                    - key
-                                    - operator
-                                    type: object
-                                  type: array
-                                matchLabels:
-                                  additionalProperties:
-                                    type: string
-                                  description: matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed.
-                                  type: object
-                              type: object
-                          type: object
-                        nullable: true
-                        type: array
-                        x-kubernetes-list-type: atomic
-                    type: object
-                  requestSigningPrivateKey:
-                    description: If set, configure the use of a private key to sign outbound requests from this cluster
-                    nullable: true
-                    properties:
-                      secret:
-                        description: A Kubernetes Secret source for the private key
-                        nullable: true
-                        properties:
-                          key:
-                            description: The key of the secret to select from.  Must be a valid secret key.
-                            type: string
-                          secretName:
-                            description: Name of the secret.
-                            type: string
-                        required:
-                        - key
-                        - secretName
-                        type: object
-                      secretProvider:
-                        description: A CSI secret provider source for the private key; will create a SecretProviderClass.
-                        nullable: true
-                        properties:
-                          parameters:
-                            additionalProperties:
-                              type: string
-                            description: Configuration for specific provider
-                            nullable: true
-                            type: object
-                          path:
-                            description: The path of the private key relative to the root of the mounted volume
-                            type: string
-                          provider:
-                            description: Configuration for provider name
-                            nullable: true
-                            type: string
-                        required:
-                        - path
-                        type: object
-                      version:
-                        description: The version of Restate request signing that the key is for; currently only "v1" accepted.
-                        type: string
-                    required:
-                    - version
-                    type: object
-                  serviceAccountAnnotations:
-                    additionalProperties:
-                      type: string
-                    description: Annotations to set on the ServiceAccount created for Restate
-                    nullable: true
-                    type: object
-                  serviceAnnotations:
-                    additionalProperties:
-                      type: string
-                    description: Annotations to set on the Service created for Restate
-                    nullable: true
-                    type: object
-                type: object
-              storage:
-                description: Storage configuration
-                properties:
-                  storageClassName:
-                    description: 'storageClassName is the name of the StorageClass required by the claim. More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#class-1. This field is immutable'
-                    nullable: true
-                    type: string
-                    x-kubernetes-validations:
-                    - message: storageClassName is immutable
-                      rule: self == oldSelf
-                  storageRequestBytes:
-                    description: storageRequestBytes is the amount of storage to request in volume claims. It is allowed to increase but not decrease.
-                    format: int64
-                    minimum: 1.0
-                    type: integer
-                    x-kubernetes-validations:
-                    - message: storageRequestBytes cannot be decreased
-                      rule: self >= oldSelf
-                  volumeAttributesClassName:
-                    description: volumeAttributesClassName may be used to set the VolumeAttributesClass used by this claim.
-                    nullable: true
-                    type: string
-                required:
-                - storageRequestBytes
                 type: object
                 x-kubernetes-validations: []
             required:
-            - compute
-            - storage
+            - authentication
+            - environmentId
+            - region
+            - signingPublicKey
             type: object
             x-kubernetes-validations: []
-          status:
-            description: 'Status of the RestateCluster. This is set and managed automatically. Read-only. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status'
-            nullable: true
-            properties:
-              conditions:
-                items:
-                  properties:
-                    lastTransitionTime:
-                      description: Last time the condition transitioned from one status to another.
-                      format: date-time
-                      nullable: true
-                      type: string
-                    message:
-                      description: Human-readable message indicating details about last transition.
-                      nullable: true
-                      type: string
-                    reason:
-                      description: Unique, one-word, CamelCase reason for the condition's last transition.
-                      nullable: true
-                      type: string
-                    status:
-                      description: Status is the status of the condition. Can be True, False, Unknown.
-                      type: string
-                    type:
-                      description: Type of the condition, known values are (`Ready`).
-                      type: string
-                  required:
-                  - status
-                  - type
-                  type: object
-                nullable: true
-                type: array
-            type: object
         required:
-        - metadata
         - spec
-        title: RestateCluster
+        title: RestateCloudEnvironment
         type: object
     served: true
     storage: true
-    subresources:
-      status: {}
+    subresources: {}

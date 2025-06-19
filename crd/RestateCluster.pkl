@@ -49,7 +49,7 @@ class Spec {
 
 /// Compute configuration
 class Compute {
-  /// Affinity is a group of affinity scheduling rules.
+  /// If specified, pod affinity
   affinity: PodSpec.Affinity?
 
   /// Entrypoint array. Not executed within a shell. The container image's ENTRYPOINT is used if this is not provided.
