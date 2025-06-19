@@ -315,32 +315,29 @@ pub async fn reconcile_network_policies(
 
     let admin_peers: Option<Vec<NetworkPolicyPeer>> = match (
         allow_operator_access_to_admin,
-        ctx.operator_namespace.as_ref(),
         ctx.operator_label_name.as_ref(),
         ctx.operator_label_value.as_ref(),
     ) {
-        (true, Some(operator_namespace), Some(operator_label_name), Some(operator_label_value)) => {
-            Some(add_peer(
-                network_peers.and_then(|peers| peers.admin.as_deref()),
-                NetworkPolicyPeer {
-                    ip_block: None,
-                    namespace_selector: Some(LabelSelector {
-                        match_expressions: None,
-                        match_labels: Some(BTreeMap::from([(
-                            "kubernetes.io/metadata.name".into(),
-                            operator_namespace.clone(),
-                        )])),
-                    }),
-                    pod_selector: Some(LabelSelector {
-                        match_expressions: None,
-                        match_labels: Some(BTreeMap::from([(
-                            operator_label_name.clone(),
-                            operator_label_value.clone(),
-                        )])),
-                    }),
-                },
-            ))
-        }
+        (true, Some(operator_label_name), Some(operator_label_value)) => Some(add_peer(
+            network_peers.and_then(|peers| peers.admin.as_deref()),
+            NetworkPolicyPeer {
+                ip_block: None,
+                namespace_selector: Some(LabelSelector {
+                    match_expressions: None,
+                    match_labels: Some(BTreeMap::from([(
+                        "kubernetes.io/metadata.name".into(),
+                        ctx.operator_namespace.clone(),
+                    )])),
+                }),
+                pod_selector: Some(LabelSelector {
+                    match_expressions: None,
+                    match_labels: Some(BTreeMap::from([(
+                        operator_label_name.clone(),
+                        operator_label_value.clone(),
+                    )])),
+                }),
+            },
+        )),
         _ => network_peers.and_then(|peers| peers.admin.clone()),
     };
 

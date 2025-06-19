@@ -367,6 +367,7 @@ The `register` field must specify exactly one of `cluster`, `service`, or `url`.
 | Field | Type | Description |
 |---|---|---|
 | `cluster` | `string` | The name of a `RestateCluster` CRD object in the same Kubernetes cluster. |
+| `cloud` | `string` | The name of a `RestateCloudCluster` CRD object in the same Kubernetes cluster. |
 | `service` | `object` | A reference to a Kubernetes `Service` that points to the Restate admin API. See details below. |
 | `url` | `string` | The direct URL of the Restate admin endpoint. |
 
@@ -378,6 +379,49 @@ The `register` field must specify exactly one of `cluster`, `service`, or `url`.
 | `namespace` | `string` | **Required**. The namespace of the service. |
 | `path` | `string` | An optional URL path to be prepended to admin API paths. Should not end with a `/`. |
 | `port` | `integer` | The port on the service that hosts the admin API. Defaults to 9070. |
+
+### RestateCloudCluster
+You can use the RestateDeployment feature with a Restate Cloud cluster using the `RestateCloudCluster` resource.
+This resource describes a cloud cluster, references a secret used to communicate with it, and manages a Deployment
+of tunnel pods in your cluster which allows Restate Cloud to call into your services without having to expose them over the public internet.
+
+First obtain a `admin` API token from the Restate cloud UI, and place it in a secret in the same namespace as the operator:
+
+```shell
+# paste your API key into a local file
+pbpaste > token
+# create the Secret in the restate-operator namespace
+kubectl -n restate-operator create secret generic my-cloud-cluster --from-file token
+```
+
+Next you can create a RestateCloudCluster referencing your environment ID, region and token
+```yaml
+apiVersion: restate.dev/v1beta1
+kind: RestateCloudCluster
+metadata:
+  name: my-cloud-cluster
+spec:
+  environmentId: env_201j05r9g0f12ygtphdszbb4scp
+  region: us
+  authentication:
+    secret:
+      name: my-cloud-cluster-secret
+      key: token
+```
+
+Finally, you can reference this cluster when creating RestateDeployment objects in any namespace:
+
+```yaml
+apiVersion: restate.dev/v1beta1
+kind: RestateDeployment
+metadata:
+  name: my-deployment
+spec:
+  restate:
+    register:
+      cloud: my-cloud-cluster
+```
+
 
 ### EKS Pod Identity
 

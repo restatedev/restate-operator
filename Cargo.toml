@@ -33,6 +33,16 @@ doc = false
 name = "deployment_schemagen"
 path = "src/bin/deployment_schemagen.rs"
 
+[[bin]]
+doc = false
+name = "cloud_crdgen"
+path = "src/bin/cloud_crdgen.rs"
+
+[[bin]]
+doc = false
+name = "cloud_schemagen"
+path = "src/bin/cloud_schemagen.rs"
+
 [lib]
 name = "restate_operator"
 path = "src/lib.rs"

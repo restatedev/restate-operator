@@ -1,0 +1,48 @@
+/// Auto-generated derived type for RestateCloudClusterSpec via `CustomResource`
+///
+/// This module was generated from the CustomResourceDefinition at
+/// <file:./crd/restatecloudclusters.yaml>.
+module dev.restate.v1beta1.RestateCloudCluster
+
+extends "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/K8sResource.pkl"
+
+import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/apimachinery/pkg/apis/meta/v1/ObjectMeta.pkl"
+
+fixed apiVersion: "restate.dev/v1beta1"
+
+fixed kind: "RestateCloudCluster"
+
+/// Standard object's metadata.
+///
+/// More info: <https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata>.
+metadata: ObjectMeta?
+
+/// Represents the configuration of a Restate Cluster
+spec: Spec
+
+/// Represents the configuration of a Restate Cluster
+class Spec {
+  /// Where to get credentials for communication with the Cloud cluster
+  authentication: Authentication
+
+  /// The environment ID of your cluster, which begins `env_`
+  environmentId: String
+
+  /// The short region identifier of your cluster, eg `us`, `eu`.
+  region: String
+}
+
+/// Where to get credentials for communication with the Cloud cluster
+class Authentication {
+  /// Configured a reference to a secret in the same namespace as the operator
+  secret: Secret
+}
+
+/// Configured a reference to a secret in the same namespace as the operator
+class Secret {
+  /// The key to read from the referenced Secret
+  key: String
+
+  /// The name of the referenced secret. It must be in the same namespace as the operator.
+  name: String
+}

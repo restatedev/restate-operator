@@ -6,7 +6,7 @@ use chrono::Utc;
 use futures::StreamExt;
 
 use k8s_openapi::api::apps::v1::{ReplicaSet, ReplicaSetStatus};
-use k8s_openapi::api::core::v1::Service;
+use k8s_openapi::api::core::v1::{Secret, Service};
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
 use kube::api::{
@@ -23,6 +23,7 @@ use kube::runtime::watcher::Config;
 use kube::runtime::{controller, WatchStreamExt};
 
 use kube::Resource;
+use reqwest::Method;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::RwLock;
@@ -30,9 +31,10 @@ use tracing::*;
 
 use crate::controllers::{Diagnostics, State};
 use crate::metrics::Metrics;
+use crate::resources::restatecloudclusters::RestateCloudCluster;
 use crate::resources::restateclusters::RestateCluster;
 use crate::resources::restatedeployments::{
-    RestateDeployment, RestateDeploymentCondition, RestateDeploymentStatus,
+    RestateAdminEndpoint, RestateDeployment, RestateDeploymentCondition, RestateDeploymentStatus,
     RESTATE_DEPLOYMENT_FINALIZER,
 };
 use crate::telemetry;
@@ -54,6 +56,12 @@ pub(super) struct Context {
     pub recorder: Recorder,
     /// Store for replica sets
     pub replicasets_store: Store<ReplicaSet>,
+    /// Store for restate cloud clusters
+    pub rcc_store: Store<RestateCloudCluster>,
+    /// Store for secrets in the same namespace as the operator
+    pub secret_store: Store<Secret>,
+    /// The namespace in which this operator runs
+    pub operator_namespace: String,
     /// Diagnostics read by the web server
     pub diagnostics: Arc<RwLock<Diagnostics>>,
     /// Prometheus metrics
@@ -66,6 +74,8 @@ impl Context {
     pub fn new(
         client: Client,
         replicasets_store: Store<ReplicaSet>,
+        rcc_store: Store<RestateCloudCluster>,
+        secret_store: Store<Secret>,
         metrics: Metrics,
         state: State,
     ) -> Arc<Context> {
@@ -73,10 +83,37 @@ impl Context {
             client: client.clone(),
             recorder: Recorder::new(client, "restate-operator".into()),
             replicasets_store,
+            rcc_store,
+            secret_store,
+            operator_namespace: state.operator_namespace,
             metrics,
             diagnostics: state.diagnostics.clone(),
             http_client: reqwest::Client::new(),
         })
+    }
+
+    pub fn request(
+        &self,
+        method: reqwest::Method,
+        admin_endpoint: &RestateAdminEndpoint,
+        path: &str,
+    ) -> Result<reqwest::RequestBuilder> {
+        let bearer_token = admin_endpoint.bearer_token(
+            &self.rcc_store,
+            &self.secret_store,
+            &self.operator_namespace,
+        )?;
+        let admin_endpoint = admin_endpoint.url(&self.rcc_store)?;
+
+        let mut request_builder = self
+            .http_client
+            .request(method, format!("{}{}", admin_endpoint, path));
+
+        if let Some(bearer_token) = bearer_token {
+            request_builder = request_builder.bearer_auth(bearer_token);
+        }
+
+        Ok(request_builder)
     }
 }
 
@@ -150,8 +187,6 @@ impl RestateDeployment {
         let rsc_api: Api<RestateCluster> = Api::all(ctx.client.clone());
         let rs_api = Api::<ReplicaSet>::namespaced(ctx.client.clone(), namespace);
         let svc_api = Api::<Service>::namespaced(ctx.client.clone(), namespace);
-
-        let admin_endpoint = self.spec.restate.register.url()?;
 
         let pod_template_annotation = reconcilers::replicaset::pod_template_annotation(self);
 
@@ -280,9 +315,7 @@ impl RestateDeployment {
         let service_endpoint =
             format!("http://{versioned_name}.{namespace}.svc.cluster.local:9080/");
 
-        let mut endpoints = self
-            .list_endpoints(&ctx.http_client, &admin_endpoint)
-            .await?;
+        let mut endpoints = self.list_endpoints(&ctx).await?;
 
         // if the endpoint is not active, register it
         if !endpoints.get(&service_endpoint).cloned().unwrap_or(false) {
@@ -295,12 +328,9 @@ impl RestateDeployment {
             validate_replica_set_status(replicaset.status.as_ref(), self.spec.replicas)?;
 
             // Register the latest version with Restate cluster using the service URL
-            let deployment_id = Self::register_service_with_restate(
-                &ctx.http_client,
-                &admin_endpoint,
-                &service_endpoint,
-            )
-            .await?;
+            let deployment_id = self
+                .register_service_with_restate(&ctx, &service_endpoint)
+                .await?;
             // if registration succeeded, treat this as an active endpoint
             endpoints.insert(service_endpoint.clone(), true);
 
@@ -331,16 +361,9 @@ impl RestateDeployment {
         }
 
         // Clean up old ReplicaSets that are no longer needed
-        let (_, next_removal) = reconcilers::replicaset::cleanup_old_replicasets(
-            namespace,
-            &rs_api,
-            &ctx.replicasets_store,
-            &ctx.http_client,
-            &admin_endpoint,
-            self,
-            &endpoints,
-        )
-        .await?;
+        let (_, next_removal) =
+            reconcilers::replicaset::cleanup_old_replicasets(namespace, &ctx, &rs_api, self)
+                .await?;
 
         Ok((replicaset, next_removal))
     }
@@ -474,19 +497,22 @@ impl RestateDeployment {
 
     /// Register a service version with the Restate cluster
     async fn register_service_with_restate(
-        client: &reqwest::Client,
-        admin_endpoint: &str,
+        &self,
+        ctx: &Context,
         service_endpoint: &str,
     ) -> Result<String> {
-        debug!("Registering endpoint '{service_endpoint}' to Restate at '{admin_endpoint}'",);
+        debug!(
+            "Registering endpoint '{service_endpoint}' to Restate at '{}'",
+            &self.spec.restate.register
+        );
 
         #[derive(Deserialize)]
         struct DeploymentResponse {
             id: String,
         }
 
-        let resp: DeploymentResponse = client
-            .post(format!("{}/deployments", admin_endpoint))
+        let resp: DeploymentResponse = ctx
+            .request(Method::POST, &self.spec.restate.register, "/deployments")?
             .json(&serde_json::json!({
                 "uri": service_endpoint,
             }))
@@ -502,11 +528,7 @@ impl RestateDeployment {
         Ok(resp.id)
     }
 
-    async fn list_endpoints(
-        &self,
-        http_client: &reqwest::Client,
-        admin_endpoint: &str,
-    ) -> Result<HashMap<String, bool>> {
+    pub(super) async fn list_endpoints(&self, ctx: &Context) -> Result<HashMap<String, bool>> {
         // This query finds endpoint urls,  noting those that are the latest for a particular service, or have an active invocation
         let sql_query = r#"
             SELECT d.endpoint, (s.name IS NOT NULL OR i.id IS NOT NULL) as active
@@ -526,8 +548,8 @@ impl RestateDeployment {
             active: bool,
         }
 
-        let response: DeploymentQueryResult = http_client
-            .post(format!("{}/query", admin_endpoint))
+        let response: DeploymentQueryResult = ctx
+            .request(Method::POST, &self.spec.restate.register, "/query")?
             .header(reqwest::header::ACCEPT, "application/json")
             .json(&serde_json::json!({
                 "query": sql_query
@@ -595,22 +617,9 @@ impl RestateDeployment {
             };
         }
 
-        let admin_endpoint = self.spec.restate.register.url()?;
-
-        let endpoints = self
-            .list_endpoints(&ctx.http_client, &admin_endpoint)
-            .await?;
-
-        let (active_count, next_removal) = reconcilers::replicaset::cleanup_old_replicasets(
-            namespace,
-            &rs_api,
-            &ctx.replicasets_store,
-            &ctx.http_client,
-            &admin_endpoint,
-            self,
-            &endpoints,
-        )
-        .await?;
+        let (active_count, next_removal) =
+            reconcilers::replicaset::cleanup_old_replicasets(namespace, &ctx, &rs_api, self)
+                .await?;
 
         if active_count > 0 {
             debug!(
@@ -736,6 +745,8 @@ async fn validate_cluster_status(rsc_api: Api<RestateCluster>, cluster_name: &st
 pub async fn run(client: Client, metrics: Metrics, state: State) {
     let deployments: Api<RestateDeployment> = Api::all(client.clone());
     let replicasets: Api<ReplicaSet> = Api::all(client.clone());
+    let rcc: Api<RestateCloudCluster> = Api::all(client.clone());
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), &state.operator_namespace);
     let services: Api<Service> = Api::all(client.clone());
 
     if let Err(e) = services.list(&ListParams::default().limit(1)).await {
@@ -745,8 +756,8 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
 
     // all resources we create have this label
     let cfg = Config::default().labels("app.kubernetes.io/managed-by=restate-operator");
-    // but restatedeployments themselves dont
-    let rsd_cfg = Config::default();
+    // but restatedeployment, restatecloudclusters, secrets dont
+    let not_created_cfg = Config::default();
 
     let (replicasets_store, replicasets_writer) = kube::runtime::reflector::store();
     let replicaset_reflector = kube::runtime::reflector(
@@ -756,15 +767,41 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     .touched_objects()
     .default_backoff();
 
+    let (rcc_store, rcc_writer) = kube::runtime::reflector::store();
+    let rcc_reflector = kube::runtime::reflector(
+        rcc_writer,
+        kube::runtime::watcher(rcc, not_created_cfg.clone()),
+    )
+    .touched_objects()
+    .default_backoff();
+
+    let (secret_store, secret_writer) = kube::runtime::reflector::store();
+    let secret_reflector = kube::runtime::reflector(
+        secret_writer,
+        kube::runtime::watcher(secrets, not_created_cfg.clone()),
+    )
+    .touched_objects()
+    .default_backoff();
+
     // Create a controller for RestateDeployment
-    controller::Controller::new(deployments, rsd_cfg)
+    controller::Controller::new(deployments, not_created_cfg)
         .shutdown_on_signal()
         .owns_stream(replicaset_reflector)
+        // just so that these get polled; we have no way to figure out which rsd may use the updated rcc or secret
+        .watches_stream(rcc_reflector, |_| std::iter::empty())
+        .watches_stream(secret_reflector, |_| std::iter::empty())
         .owns(services, cfg.clone())
         .run(
             reconcile,
             error_policy,
-            Context::new(client, replicasets_store, metrics, state),
+            Context::new(
+                client,
+                replicasets_store,
+                rcc_store,
+                secret_store,
+                metrics,
+                state,
+            ),
         )
         .filter_map(|x| async move { Result::ok(x) })
         .for_each(|_| futures::future::ready(()))

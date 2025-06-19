@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use k8s_openapi::api::apps::v1::ReplicaSet;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
@@ -7,13 +7,13 @@ use kube::api::{
     Api, ApiResource, DynamicObject, PartialObjectMetaExt, Patch, PatchParams, PostParams,
 };
 use kube::core::subresource::Scale;
-use kube::runtime::reflector::Store;
 use kube::{Resource, ResourceExt};
+use reqwest::Method;
 use serde_json::json;
 use tracing::*;
 
 use crate::controllers::restatedeployment::controller::{
-    APP_MANAGED_BY_LABEL, OWNED_BY_LABEL, RESTATE_DEPLOYMENT_ID_ANNOTATION,
+    Context, APP_MANAGED_BY_LABEL, OWNED_BY_LABEL, RESTATE_DEPLOYMENT_ID_ANNOTATION,
 };
 use crate::resources::restatedeployments::RestateDeployment;
 use crate::{Error, Result};
@@ -147,18 +147,15 @@ fn safe_encode_u32(mut val: u32) -> String {
 /// Delete ReplicaSets that are no longer needed
 pub async fn cleanup_old_replicasets(
     namespace: &str,
+    ctx: &Context,
     rs_api: &Api<ReplicaSet>,
-    replicasets_store: &Store<ReplicaSet>,
-    http_client: &reqwest::Client,
-    admin_endpoint: &str,
     rsd: &RestateDeployment,
-    endpoints: &HashMap<String, bool>,
 ) -> Result<(i32, Option<chrono::DateTime<chrono::Utc>>)> {
     let owner_name = rsd.name_any();
 
     let replicasets_cell = std::cell::Cell::new(Vec::new());
 
-    let _ = replicasets_store.find(|rs| {
+    let _ = ctx.replicasets_store.find(|rs| {
         if rs
             .labels()
             .get(OWNED_BY_LABEL)
@@ -180,6 +177,8 @@ pub async fn cleanup_old_replicasets(
             .creation_timestamp
             .cmp(&a.metadata.creation_timestamp)
     });
+
+    let endpoints = rsd.list_endpoints(ctx).await?;
 
     // keep track of how many rs there are that are still in-use by restate (active services or invocations)
     let mut active_count = 0;
@@ -296,10 +295,12 @@ pub async fn cleanup_old_replicasets(
                     {
                         debug!("Force-deleting Restate deployment {deployment_id} as its associated with old ReplicaSet {rs_name} in namespace {namespace}");
 
-                        let resp = http_client
-                            .delete(format!(
-                                "{admin_endpoint}/deployments/{deployment_id}?force=true"
-                            ))
+                        let resp = ctx
+                            .request(
+                                Method::DELETE,
+                                &rsd.spec.restate.register,
+                                &format!("/deployments/{deployment_id}?force=true"),
+                            )?
                             .send()
                             .await
                             .map_err(Error::AdminCallFailed)?;

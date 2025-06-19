@@ -37,6 +37,17 @@ pub enum Error {
     #[error("Invalid Restate configuration: {0}")]
     InvalidRestateConfig(String),
 
+    #[error("The RestateCloudCluster {0} does not exist")]
+    RestateCloudClusterNotFound(String),
+
+    #[error("The Secret {0} does not exist")]
+    SecretNotFound(String),
+    #[error("The Secret key {0} in {1} does not exist")]
+    SecretKeyNotFound(String, String),
+
+    #[error("The bearer token is invalid")]
+    InvalidBearerToken,
+
     #[error(transparent)]
     InvalidSigningKeyError(#[from] InvalidSigningKeyError),
 
@@ -65,6 +76,10 @@ impl Error {
             Error::NotReady { .. } => "NotReady",
             Error::DeploymentNotReady { .. } => "ServiceNotReady",
             Error::InvalidRestateConfig(_) => "InvalidRestateConfig",
+            Error::RestateCloudClusterNotFound(_) => "RestateCloudClusterNotFound",
+            Error::SecretNotFound(_) => "SecretNotFound",
+            Error::SecretKeyNotFound(_, _) => "SecretKeyNotFound",
+            Error::InvalidBearerToken => "InvalidBearerToken",
             Error::InvalidSigningKeyError(_) => "InvalidSigningKeyError",
             Error::AdminCallFailed(_) => "AdminCallFailed",
             Error::HashCollision => "HashCollision",

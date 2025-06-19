@@ -22,7 +22,7 @@ struct Arguments {
         env = "OPERATOR_NAMESPACE",
         value_name = "NAMESPACE"
     )]
-    operator_namespace: Option<String>,
+    operator_namespace: String,
 
     #[arg(
         long = "operator-label-name",
@@ -66,11 +66,12 @@ async fn main() -> anyhow::Result<()> {
     let args: Arguments = Arguments::parse();
 
     // Initialize Kubernetes controller state
-    let state = State::default()
-        .with_aws_pod_identity_association_cluster(args.aws_pod_identity_association_cluster)
-        .with_operator_namespace(args.operator_namespace)
-        .with_operator_label_name(args.operator_label_name)
-        .with_operator_label_value(args.operator_label_value);
+    let state = State::new(
+        args.aws_pod_identity_association_cluster,
+        args.operator_namespace,
+        args.operator_label_name,
+        args.operator_label_value,
+    );
 
     let client = Client::try_default()
         .await
