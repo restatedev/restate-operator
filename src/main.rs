@@ -22,7 +22,7 @@ struct Arguments {
         env = "OPERATOR_NAMESPACE",
         value_name = "NAMESPACE"
     )]
-    operator_namespace: Option<String>,
+    operator_namespace: String,
 
     #[arg(
         long = "operator-label-name",
@@ -66,11 +66,12 @@ async fn main() -> anyhow::Result<()> {
     let args: Arguments = Arguments::parse();
 
     // Initialize Kubernetes controller state
-    let state = State::default()
-        .with_aws_pod_identity_association_cluster(args.aws_pod_identity_association_cluster)
-        .with_operator_namespace(args.operator_namespace)
-        .with_operator_label_name(args.operator_label_name)
-        .with_operator_label_value(args.operator_label_value);
+    let state = State::new(
+        args.aws_pod_identity_association_cluster,
+        args.operator_namespace,
+        args.operator_label_name,
+        args.operator_label_value,
+    );
 
     let client = Client::try_default()
         .await
@@ -80,8 +81,13 @@ async fn main() -> anyhow::Result<()> {
         .register(&state.registry)
         .unwrap();
 
-    // Start both controllers
+    // Start the controllers
     let cluster_controller = restate_operator::controllers::restatecluster::run(
+        client.clone(),
+        metric.clone(),
+        state.clone(),
+    );
+    let cloud_cluster_controller = restate_operator::controllers::restatecloudcluster::run(
         client.clone(),
         metric.clone(),
         state.clone(),
@@ -90,6 +96,7 @@ async fn main() -> anyhow::Result<()> {
         restate_operator::controllers::restatedeployment::run(client, metric, state.clone());
 
     tokio::pin!(cluster_controller);
+    tokio::pin!(cloud_cluster_controller);
     tokio::pin!(deployment_controller);
 
     // Start web server
@@ -108,6 +115,12 @@ async fn main() -> anyhow::Result<()> {
     tokio::pin!(server);
 
     // Both runtimes implements graceful shutdown, so poll until both are done
-    tokio::join!(cluster_controller, deployment_controller, server).2?;
+    tokio::join!(
+        cluster_controller,
+        cloud_cluster_controller,
+        deployment_controller,
+        server
+    )
+    .3?;
     Ok(())
 }

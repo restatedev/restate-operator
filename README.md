@@ -44,7 +44,7 @@ yq eval 'select(.kind != "CustomResourceDefinition")' manifests.yaml | \
 
 ## Custom Resource Definitions
 
-The operator introduces two Custom Resource Definitions (CRDs): `RestateCluster` and `RestateDeployment`.
+The operator introduces three Custom Resource Definitions (CRDs): `RestateCluster`, `RestateDeployment`, and `RestateCloudCluster`.
 
 ### `RestateCluster`
 
@@ -372,6 +372,7 @@ The `register` field must specify exactly one of `cluster`, `service`, or `url`.
 | Field | Type | Description |
 |---|---|---|
 | `cluster` | `string` | The name of a `RestateCluster` CRD object in the same Kubernetes cluster. |
+| `cloud` | `string` | The name of a `RestateCloudCluster` CRD object in the same Kubernetes cluster. |
 | `service` | `object` | A reference to a Kubernetes `Service` that points to the Restate admin API. See details below. |
 | `url` | `string` | The direct URL of the Restate admin endpoint. |
 
@@ -383,6 +384,112 @@ The `register` field must specify exactly one of `cluster`, `service`, or `url`.
 | `namespace` | `string` | **Required**. The namespace of the service. |
 | `path` | `string` | An optional URL path to be prepended to admin API paths. Should not end with a `/`. |
 | `port` | `integer` | The port on the service that hosts the admin API. Defaults to 9070. |
+
+### `RestateCloudCluster`
+
+The `RestateCloudCluster` CRD allows you to use the `RestateDeployment` feature with a Restate Cloud cluster. This resource describes a cloud cluster, references a secret used to communicate with it, and manages a Deployment of tunnel pods in your cluster which allows Restate Cloud to call into your services without having to expose them over the public internet.
+
+#### Minimal Example
+
+```yaml
+apiVersion: restate.dev/v1beta1
+kind: RestateCloudCluster
+metadata:
+  name: my-cloud-cluster
+spec:
+  environmentId: env_201j05r9g0f12ygtphdszbb4scp
+  signingPublicKey: publickeyv1_BBuEJnx28hdGb5Ky6qpvuXQG4aVoWBnubJtHXpznzgQk
+  region: us
+  authentication:
+    secret:
+      name: my-cloud-cluster-secret
+      key: token
+```
+
+#### Spec Fields
+
+| Field | Type | Description |
+|---|---|---|
+| `environmentId` | `string` | **Required**. The environment ID of your cluster, which begins with `env_`. |
+| `region` | `string` | **Required**. The short region identifier of your cluster, e.g., `us`, `eu`. |
+| `signingPublicKey` | `string` | **Required**. The request signing public key of your cluster, which begins `publickeyv1_`. It is not a secret. |
+| `authentication` | `object` | **Required**. Where to get credentials for communication with the Cloud cluster. See details below. |
+| `tunnel` | `object` | Optional configuration for the deployment of tunnel pods. See details below. |
+
+---
+
+#### `spec.authentication`
+
+| Field | Type | Description |
+|---|---|---|
+| `secret` | `object` | **Required**. A reference to a secret in the same namespace as the operator. See details below. |
+
+**`secret` Fields**
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | `string` | **Required**. The name of the referenced secret. It must be in the same namespace as the operator. |
+| `key` | `string` | **Required**. The key to read from the referenced Secret. |
+
+---
+
+#### `spec.tunnel`
+
+| Field | Type | Description |
+|---|---|---|
+| `replicas` | `integer` | The desired number of tunnel pods. Defaults to 1. |
+| `image` | `string` | Container image name. Defaults to a suggested version of the ghcr.io/restatedev/restate-cloud-tunnel-client. |
+| `imagePullPolicy` | `string` | Image pull policy. One of `Always`, `Never`, `IfNotPresent`. Defaults to `Always` if `:latest` tag is specified, or `IfNotPresent` otherwise. |
+| `env` | `array` | List of environment variables to set in the container; these may override defaults. |
+| `resources` | `object` | Compute Resources for the tunnel pods. |
+| `dnsConfig` | `object` | DNS configuration for the tunnel pod. |
+| `dnsPolicy` | `string` | DNS policy for the pod. Defaults to `ClusterFirst`. Valid values are `ClusterFirstWithHostNet`, `ClusterFirst`, `Default` or `None`. |
+| `tolerations` | `array` | Pod tolerations. |
+| `nodeSelector` | `object` | Node selector for the pod. |
+| `affinity` | `object` | Pod affinity. Defaults to zone anti-affinity, provide `{}` to disable all affinity. |
+
+All of these fields correspond to fields in a native `DeploymentSpec`. See the [official Kubernetes API documentation] (https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/deployment-v1/#DeploymentSpec).
+
+#### Setup Instructions
+
+1. **Obtain an admin API token** from the Restate Cloud UI and place it in a secret in the same namespace as the operator:
+
+```shell
+# paste your API key into a local file
+pbpaste > token
+# create the Secret in the restate-operator namespace
+kubectl -n restate-operator create secret generic my-cloud-cluster-secret --from-file token
+```
+
+2. **Create a RestateCloudCluster** referencing your environment ID, region, and token:
+
+```yaml
+apiVersion: restate.dev/v1beta1
+kind: RestateCloudCluster
+metadata:
+  name: my-cloud-cluster
+spec:
+  environmentId: env_201j05r9g0f12ygtphdszbb4scp
+  region: us
+  authentication:
+    secret:
+      name: my-cloud-cluster-secret
+      key: token
+```
+
+3. **Reference this cluster** when creating RestateDeployment objects in any namespace:
+
+```yaml
+apiVersion: restate.dev/v1beta1
+kind: RestateDeployment
+metadata:
+  name: my-deployment
+spec:
+  restate:
+    register:
+      cloud: my-cloud-cluster
+```
+
 
 ### EKS Pod Identity
 
