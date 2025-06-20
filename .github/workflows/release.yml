@@ -47,4 +47,5 @@ jobs:
           # create a draft release which needs manual approval
           draft: true
           files: |
-            crd/crd.yaml
+            crd/restatedeployments.yaml
+            crd/restateclusters.yaml
