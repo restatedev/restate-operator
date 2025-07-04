@@ -173,6 +173,7 @@ spec:
         "admin",
         "log-server",
         "metadata-server",
+        "http-ingress",
     ]
     # auto-provision should not be turned on when using the raft metadata store
     # provision with kubectl -n restate-test exec -it restate-0 -- restatectl provision
@@ -214,6 +215,7 @@ spec:
         "worker",
         "admin",
         "log-server",
+        "http-ingress",
     ]
     auto-provision = true
     default-num-partitions = 128
@@ -350,7 +352,7 @@ spec:
   storage:
     storageRequestBytes: 2147483648 # 2 GiB
   config: |
-    roles = [ "worker", "admin", "log-server" ]
+    roles = [ "worker", "admin", "log-server", "http-ingress" ]
     auto-provision = true
     default-num-partitions = 128
     default-replication = 2
