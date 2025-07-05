@@ -362,6 +362,7 @@ spec:
     path = "s3://restate-metadata/metadata"
     aws-endpoint-url = "http://minio.minio-namespace.svc.cluster.local:9000"
     aws-allow-http = true
+    aws-region = "local"
 
     [bifrost]
     default-provider = "replicated"
@@ -371,7 +372,10 @@ spec:
     snapshot-interval-num-records = 10000
     aws-endpoint-url = "http://minio.minio-namespace.svc.cluster.local:9000"
     aws-allow-http = true
+    aws-region = "local"
 ```
+
+> **A Note on AWS Credentials**: You might notice we are using standard AWS environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) directly, rather than the Restate-specific format like `RESTATE_WORKER__SNAPSHOTS_AWS_ACCESS_KEY_ID`. This is because Restate uses the underlying AWS SDK, which automatically and conventionally discovers credentials from these standard environment variables. This approach is common and allows the same credentials to be used by other tools or SDKs within the same pod if necessary.
 
 For the full schema as a [Pkl](https://pkl-lang.org/) template see [`crd/RestateCluster.pkl`](./crd/RestateCluster.pkl).
 
