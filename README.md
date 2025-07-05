@@ -16,6 +16,16 @@ A Kubernetes operator that creates [Restate](https://restate.dev/) clusters. Sup
 helm install restate-operator oci://ghcr.io/restatedev/restate-operator-helm --namespace restate-operator --create-namespace
 ```
 
+To render the chart templates locally for inspection or for use with a GitOps workflow, you can use `helm template`. For example, to a file named `restate-operator-manifests.yaml` using a custom `values.yaml`:
+
+```bash
+helm template restate-operator oci://ghcr.io/restatedev/restate-operator-helm \
+  --namespace restate-operator \
+  --create-namespace \
+  -f values.yaml \
+  > restate-operator-manifests.yaml
+```
+
 ## Custom Resource Definitions
 
 The operator introduces two Custom Resource Definitions (CRDs): `RestateCluster` and `RestateDeployment`.
