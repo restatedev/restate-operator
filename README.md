@@ -160,7 +160,7 @@ While the `config` field accepts any valid [Restate server configuration](https:
 
 *   **`[worker.snapshots]`**: Configures durable snapshots of service state, which is essential for fault tolerance and fast recovery.
     *   `destination`: The S3 URI where snapshots will be stored (e.g., `s3://my-bucket/snapshots`).
-    *   `snapshot-interval-num-records`: How many state-mutating records are processed before a new snapshot is taken.
+    *   `snapshot-interval-num-records`: How many log records are processed in a particular partition before a new snapshot is taken.
 
 *   **`auto-provision`**: A boolean that controls whether the cluster should automatically initialize itself. This should be `true` for object-store metadata but `false` when using the `replicated` (Raft) metadata store, which requires manual provisioning.
 
