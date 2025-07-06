@@ -165,7 +165,7 @@ While the `config` field accepts any valid [Restate server configuration](https:
 *   **`auto-provision`**: A boolean that controls whether the cluster should automatically initialize itself. This should be `true` for object-store metadata but `false` when using the `replicated` (Raft) metadata store, which requires manual provisioning.
 
 *   **Resource Management**:
-    *   `rocksdb-total-memory-size`: Sets the total memory allocated to RocksDB, which Restate uses for its internal state storage.
+    *   `rocksdb-total-memory-size`: Sets the total memory allocated to RocksDB, which Restate uses for its internal state storage. Typically 75% of the memory requests for the pod is appropriate.
     *   `admin.query-engine.memory-size`: Allocates memory for the admin service's query engine.
 
 For a complete list of all available options, please refer to the [official Restate Server Configuration Reference](https://docs.restate.dev/references/server_config).
