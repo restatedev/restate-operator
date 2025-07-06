@@ -25,11 +25,21 @@ To render the chart templates locally for inspection or for use with a GitOps wo
 helm template restate-operator oci://ghcr.io/restatedev/restate-operator-helm \
   --namespace restate-operator \
   --create-namespace \
+  --include-crds \
   > manifests.yaml
+```
+
+Optionally split these into separate files for each kind:
+
+```bash
 # brew install yq
-yq eval \
-  --split-exp '(.kind | downcase) + "_" + .metadata.name + ".yaml"' \
-  manifests.yaml
+# For CRDs, include the metadata.name in the filename to avoid collisions.
+yq eval 'select(.kind == "CustomResourceDefinition")' manifests.yaml | \
+  yq eval --split-exp '"k8s/base/" + (.metadata.name | downcase) + "-" + (.kind | downcase) + ".yaml"' -
+
+# For all others, just use the kind.
+yq eval 'select(.kind != "CustomResourceDefinition")' manifests.yaml | \
+  yq eval --split-exp '"k8s/base/" + (.kind | downcase) + ".yaml"' -
 ```
 
 ## Custom Resource Definitions
@@ -39,6 +49,9 @@ The operator introduces two Custom Resource Definitions (CRDs): `RestateCluster`
 ### `RestateCluster`
 
 The `RestateCluster` CRD defines a Restate cluster. The operator watches for these objects and creates the necessary Kubernetes resources, such as `StatefulSet`, `Service`, and `NetworkPolicy` objects in a new namespace that matches the `RestateCluster` name.
+
+**NOTE**: Each cluster is created in its own namespace (enforced by the operator). Do not create the namespace manually,
+and do not use the same namespace as the operator is in.
 
 #### Minimal Example
 
@@ -279,6 +292,7 @@ mc mb --insecure local-minio/restate-metadata
 mc mb --insecure local-minio/restate-snapshots
 
 # Add the new policy to MinIO
+
 cat <<EOF | mc admin policy add local-minio restate-s3-policy
 {
   "Version": "2012-10-17",
