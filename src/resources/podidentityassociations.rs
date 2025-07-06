@@ -44,9 +44,10 @@ pub struct PodIdentityAssociationSpec {
     /// Ex:
     /// APIIDRef:
     ///
-    ///
-    ///     from:
-    ///       name: my-api
+    /// ```yaml
+    /// from:
+    ///   name: my-api
+    /// ```
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -67,9 +68,10 @@ pub struct PodIdentityAssociationSpec {
     /// Ex:
     /// APIIDRef:
     ///
-    ///
-    ///     from:
-    ///       name: my-api
+    /// ```yaml
+    /// from:
+    ///   name: my-api
+    /// ```
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "roleRef")]
     pub role_ref: Option<PodIdentityAssociationRoleRef>,
     /// The name of the Kubernetes service account inside the cluster to associate
@@ -119,9 +121,10 @@ pub struct PodIdentityAssociationSpec {
 /// Ex:
 /// APIIDRef:
 ///
-///
-///     from:
-///       name: my-api
+/// ```yaml
+/// from:
+///   name: my-api
+/// ```
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct PodIdentityAssociationClusterRef {
     /// AWSResourceReference provides all the values necessary to reference another
@@ -143,9 +146,10 @@ pub struct PodIdentityAssociationClusterRefFrom {
 /// Ex:
 /// APIIDRef:
 ///
-///
-///     from:
-///       name: my-api
+/// ```yaml
+/// from:
+///   name: my-api
+/// ```
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct PodIdentityAssociationRoleRef {
     /// AWSResourceReference provides all the values necessary to reference another
