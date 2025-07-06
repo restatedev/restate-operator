@@ -351,8 +351,8 @@ metadata:
 type: Opaque
 stringData:
   # Use the keys generated from the 'mc admin service-account add' command
-  AWS_ACCESS_KEY_ID: YOUR_NEW_RESTATE_ACCESS_KEY
-  AWS_SECRET_ACCESS_KEY: YOUR_NEW_RESTATE_SECRET_KEY
+  access-key: YOUR_NEW_RESTATE_ACCESS_KEY
+  secret-key: YOUR_NEW_RESTATE_SECRET_KEY
 ```
 
 ##### 3. Configure the `RestateCluster`
@@ -369,16 +369,30 @@ spec:
     replicas: 3
     image: restatedev/restate:1.4
     env:
-      - name: AWS_ACCESS_KEY_ID
-        valueFrom:
-          secretKeyRef:
-            name: minio-credentials
-            key: AWS_ACCESS_KEY_ID
-      - name: AWS_SECRET_ACCESS_KEY
-        valueFrom:
-          secretKeyRef:
-            name: minio-credentials
-            key: AWS_SECRET_ACCESS_KEY
+    - name: RESTATE_METADATA_CLIENT__AWS_ACCESS_KEY_ID
+      valueFrom:
+        secretKeyRef:
+          name: minio-credentials
+          key: access-key
+
+    - name: RESTATE_METADATA_CLIENT__AWS_SECRET_ACCESS_KEY
+      valueFrom:
+        secretKeyRef:
+          name: minio-credentials
+          key: secret-key
+
+    - name: RESTATE_WORKER__SNAPSHOTS__AWS_ACCESS_KEY_ID
+      valueFrom:
+        secretKeyRef:
+          name: minio-credentials
+          key: access-key
+
+    - name: RESTATE_WORKER__SNAPSHOTS__AWS_SECRET_ACCESS_KEY
+      valueFrom:
+        secretKeyRef:
+          name: minio-credentials
+          key: secret-key
+
   storage:
     storageRequestBytes: 2147483648 # 2 GiB
   config: |
@@ -409,6 +423,61 @@ spec:
 
 For the full schema as a [Pkl](https://pkl-lang.org/) template see [`crd/RestateCluster.pkl`](./crd/RestateCluster.pkl).
 
+##### 4. Allow Egress to the Object Store
+
+By default the operator installs a **default-deny** egress NetworkPolicy, so Restate pods cannot reach external services unless you explicitly allow it. You have two options:
+
+**Option A – inline egress rules**
+
+Add a `security.networkEgressRules` section to your `RestateCluster` that permits traffic to your object store. This is the simplest approach because the operator will automatically merge these rules into the generated NetworkPolicy.
+
+```yaml
+apiVersion: restate.dev/v1
+kind: RestateCluster
+metadata:
+  name: restate-minio-test
+spec:
+  # … compute, storage, etc …
+  security:
+    networkEgressRules:
+    - to:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: <object-store-namespace>
+      ports:
+      - protocol: TCP
+        # 443 for https, 9000 for MinIO http, etc.
+        port: 443
+```
+
+**Option B – standalone NetworkPolicy**
+
+If you prefer to manage NetworkPolicies yourself (e.g. to share one policy across multiple clusters), create a separate `NetworkPolicy` like below. Replace the placeholders with your namespace names and port numbers.
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-to-object-store
+  namespace: <restate-cluster-namespace>
+
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: restate
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: <object-store-namespace>
+    ports:
+    - protocol: TCP
+      port: 443
+```
+
+> **Tip**: If you run MinIO on plain HTTP (e.g., port 9000), change the port to `9000`, set `aws-allow-http = true` in your Restate config, and consider restricting traffic to the specific service IP or CIDR.
 
 ### `RestateDeployment`
 
