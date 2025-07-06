@@ -169,7 +169,7 @@ While the `config` field accepts any valid [Restate server configuration](https:
 
 *   **`[metadata-client]`**: Configures how the cluster stores its core metadata. This is a critical choice for production deployments.
     *   `type = "replicated"`: Uses a built-in Raft consensus protocol. This is simpler to set up but requires careful management of the Raft cluster members.
-    *   `type = "object-store"`: Uses an S3-compatible object store for metadata, which is recommended for production workloads. You must provide the `path` to the bucket.
+    *   `type = "object-store"`: Uses an S3-compatible object store for metadata, which is simpler to operate particularly if using an object store for snapshots. You must provide the `path` to the bucket.
 
 *   **`[worker.snapshots]`**: Configures durable snapshots of service state, which is essential for fault tolerance and fast recovery.
     *   `destination`: The S3 URI where snapshots will be stored (e.g., `s3://my-bucket/snapshots`).
