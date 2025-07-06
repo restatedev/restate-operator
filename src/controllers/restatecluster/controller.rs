@@ -1,4 +1,4 @@
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{hash_map::DefaultHasher, BTreeMap};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -168,26 +168,47 @@ impl RestateCluster {
             ..Default::default()
         };
 
-        if let Some(ns) = nss.get_metadata_opt(name).await? {
-            // check to see if extant namespace is managed by us
-            if !ns
+        // Check if namespace exists
+        if let Some(existing_ns) = nss.get_metadata_opt(name).await? {
+            // Check if we own the namespace
+            let we_own_namespace = existing_ns
                 .metadata
                 .owner_references
+                .as_ref()
                 .map(|orefs| orefs.contains(&oref))
-                .unwrap_or(false)
-            {
-                return Err(Error::NameConflict);
-            }
-        }
+                .unwrap_or(false);
 
-        apply_namespace(
-            &nss,
-            Namespace {
-                metadata: object_meta(&base_metadata, name),
-                ..Default::default()
-            },
-        )
-        .await?;
+            if we_own_namespace {
+                // We own it, apply our full metadata including ownership
+                apply_namespace(
+                    &nss,
+                    Namespace {
+                        metadata: object_meta(&base_metadata, name),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            } else {
+                // We don't own it, just ensure it has the required labels/annotations without taking ownership
+                apply_namespace_labels_only(
+                    &nss,
+                    name,
+                    &base_metadata.labels.clone().unwrap_or_default(),
+                    &base_metadata.annotations.clone().unwrap_or_default(),
+                )
+                .await?;
+            }
+        } else {
+            // Namespace doesn't exist, create it with full ownership
+            apply_namespace(
+                &nss,
+                Namespace {
+                    metadata: object_meta(&base_metadata, name),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        }
 
         reconcile_network_policies(&ctx, name, &base_metadata, self.spec.security.as_ref()).await?;
 
@@ -313,6 +334,22 @@ async fn apply_namespace(nss: &Api<Namespace>, ns: Namespace) -> std::result::Re
     let name = ns.metadata.name.as_ref().unwrap();
     let params = PatchParams::apply("restate-operator").force();
     debug!("Applying Namespace {}", name);
+    nss.patch(name, &params, &Patch::Apply(&ns)).await?;
+    Ok(())
+}
+
+async fn apply_namespace_labels_only(nss: &Api<Namespace>, name: &str, labels: &BTreeMap<String, String>, annotations: &BTreeMap<String, String>) -> std::result::Result<(), Error> {
+    let params = PatchParams::apply("restate-operator").force();
+    debug!("Applying Namespace labels and annotations for {}", name);
+    let ns = Namespace {
+        metadata: ObjectMeta {
+            name: Some(name.into()),
+            labels: Some(labels.clone()),
+            annotations: Some(annotations.clone()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
     nss.patch(name, &params, &Patch::Apply(&ns)).await?;
     Ok(())
 }
