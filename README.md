@@ -50,8 +50,21 @@ The operator introduces two Custom Resource Definitions (CRDs): `RestateCluster`
 
 The `RestateCluster` CRD defines a Restate cluster. The operator watches for these objects and creates the necessary Kubernetes resources, such as `StatefulSet`, `Service`, and `NetworkPolicy` objects in a new namespace that matches the `RestateCluster` name.
 
+**By default, the operator enforces network isolation on the cluster, allowing only the following**:
+1. Peer to peer traffic between Restate pods
+2. Traffic from the operator to Restate pods
+3. Egress traffic to the public internet
+4. Egress traffic to coredns
+4. Egress traffic to pods in any namespace labelled with `allow.restate.dev/<cluster-name>`
+
+**All other traffic is denied by default.**
+
+The default behaviour can be disabled with `spec.security.disableNetworkPolicies: true`.
+Alternatively, you can add new allowed inbound callers of the Restate ports with `spec.security.networkPeers.{ingress,admin,metrics}`, which are arrays of [`NetworkPolicyPeer`](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#networkpolicypeer-v1-networking-k8s-io).
+You can allow new outbound destinations by adding to the `spec.security.networkEgressRules` list, which is an array of [`NetworkPolicyEgressRule`](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#networkpolicyegressrule-v1-networking-k8s-io).
+
 **NOTE**: Each cluster is created in its own namespace (enforced by the operator). Do not create the namespace manually,
-and do not use the same namespace as the operator is in.
+and do not use the same namespace that the operator is in.
 
 #### Minimal Example
 
@@ -68,6 +81,8 @@ spec:
   storage:
     storageRequestBytes: 2147483648 # 2 GiB
 ```
+
+For the full schema as a [Pkl](https://pkl-lang.org/) template see [`crd/RestateCluster.pkl`](./crd/RestateCluster.pkl).
 
 More examples are available just below the spec that follows.
 
@@ -269,146 +284,10 @@ spec:
     # aws-allow-http = true
 ```
 
-#### MinIO Configuration Example
+Note that Restate needs `s3:ListBucket` on the bucket, and `s3:GetObject`/`s3:PutObject` on the bucket contents.
 
-To configure a `RestateCluster` with a self-hosted S3-compatible object store like [MinIO](https://min.io/), you can point the server to your MinIO instance. For security, it's best to create a dedicated service account with credentials scoped only to the buckets Restate needs.
-
-##### 1. Create a Scoped Access Key & Buckets
-
-First, we'll define a policy, create the buckets, and then create a service account with a new access key that is restricted by that policy.
-
-The following commands use the `mc` client to set up your MinIO instance. They assume you have port-forwarded your MinIO service.
-
-```bash
-# Forward the MinIO service to your local machine
-kubectl port-forward --namespace storage svc/minio 9000:443
-
-# Alias your MinIO deployment for easier access
-# Use https:// and --insecure if connecting to a port-forwarded TLS port (like 443)
-mc alias set local-minio https://localhost:9000 YOUR_ADMIN_ACCESS_KEY YOUR_ADMIN_SECRET_KEY --insecure
-
-# Create the buckets
-mc mb --insecure local-minio/restate-metadata
-mc mb --insecure local-minio/restate-snapshots
-
-# Add the new policy to MinIO
-
-cat <<EOF | mc admin policy add local-minio restate-s3-policy
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": [
-        "s3:GetBucketLocation",
-        "s3:ListBucket"
-      ],
-      "Resource": [
-        "arn:aws:s3:::restate-metadata",
-        "arn:aws:s3:::restate-snapshots"
-      ]
-    },
-    {
-      "Effect": "Allow",
-      "Action": [
-        "s3:PutObject",
-        "s3:GetObject",
-        "s3:DeleteObject",
-        "s3:ListMultipartUploadParts",
-        "s3:AbortMultipartUpload"
-      ],
-      "Resource": [
-        "arn:aws:s3:::restate-metadata/*",
-        "arn:aws:s3:::restate-snapshots/*"
-      ]
-    }
-  ]
-}
-EOF
-
-# Create a new service account for the Restate application
-# This command will output a new AccessKey and SecretKey.
-mc admin service-account add local-minio restate
-
-# Attach the policy to the new service account
-mc admin policy set local-minio restate-s3-policy service-account=restate
-```
-
-When you run `mc admin service-account add`, it will output a new `AccessKey` and `SecretKey`. **Save these securely**, as you will use them in the next step.
-
-##### 2. Create a Kubernetes Secret
-
-Next, create a Kubernetes `Secret` containing the new, **scoped credentials** you just generated for the `restate` service account.
-
-**Important**: This secret must be created in the namespace where the cluster will run, which is the same as the `metadata.name` of your `RestateCluster`. For this example, the namespace is `restate-with-minio`.
-
-```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: minio-credentials
-  namespace: restate-with-minio
-type: Opaque
-stringData:
-  # Use the keys generated from the 'mc admin service-account add' command
-  AWS_ACCESS_KEY_ID: YOUR_NEW_RESTATE_ACCESS_KEY
-  AWS_SECRET_ACCESS_KEY: YOUR_NEW_RESTATE_SECRET_KEY
-```
-
-##### 3. Configure the `RestateCluster`
-
-Finally, define your `RestateCluster` resource. This manifest is the same as before, but it will now use the Kubernetes secret containing the limited-permission keys.
-
-```yaml
-apiVersion: restate.dev/v1
-kind: RestateCluster
-metadata:
-  name: restate-minio-test
-spec:
-  compute:
-    replicas: 3
-    image: restatedev/restate:1.4
-    env:
-      - name: AWS_ACCESS_KEY_ID
-        valueFrom:
-          secretKeyRef:
-            name: minio-credentials
-            key: AWS_ACCESS_KEY_ID
-      - name: AWS_SECRET_ACCESS_KEY
-        valueFrom:
-          secretKeyRef:
-            name: minio-credentials
-            key: AWS_SECRET_ACCESS_KEY
-  storage:
-    storageRequestBytes: 2147483648 # 2 GiB
-  config: |
-    roles = [ "worker", "admin", "log-server", "http-ingress" ]
-    auto-provision = true
-    default-num-partitions = 128
-    default-replication = 2
-
-    [metadata-client]
-    type = "object-store"
-    path = "s3://restate-metadata/metadata"
-    aws-endpoint-url = "http://minio.minio-namespace.svc.cluster.local:9000"
-    aws-allow-http = true
-    aws-region = "local"
-
-    [bifrost]
-    default-provider = "replicated"
-
-    [worker.snapshots]
-    destination = "s3://restate-snapshots/snapshots"
-    snapshot-interval-num-records = 10000
-    aws-endpoint-url = "http://minio.minio-namespace.svc.cluster.local:9000"
-    aws-allow-http = true
-    aws-region = "local"
-```
-
-> **A Note on AWS Credentials**: You might notice we are using standard AWS environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) directly, rather than the Restate-specific format like `RESTATE_WORKER__SNAPSHOTS_AWS_ACCESS_KEY_ID`. This is because Restate uses the underlying AWS SDK, which automatically and conventionally discovers credentials from these standard environment variables. However, if you are using Minio for snapshots and also need to use AWS Lambda services from your Restate cluster, then you may need different AWS credentials for different components.
-
-For the full schema as a [Pkl](https://pkl-lang.org/) template see [`crd/RestateCluster.pkl`](./crd/RestateCluster.pkl).
-
+#### MinIO example
+See [docs/minio.md](./docs/minio.md)
 
 ### `RestateDeployment`
 
