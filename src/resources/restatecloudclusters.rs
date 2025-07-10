@@ -1,12 +1,17 @@
-use k8s_openapi::api::core::v1::Secret;
+use std::collections::BTreeMap;
+
+use k8s_openapi::api::core::v1::{
+    Affinity, EnvVar, PodDNSConfig, ResourceRequirements, Secret, Toleration,
+};
 use kube::{
     runtime::reflector::{ObjectRef, Store},
     CELSchema, CustomResource,
 };
-use schemars::JsonSchema;
+use schemars::{schema::Schema, JsonSchema};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
-pub static RESTATE_CLUSTER_FINALIZER: &str = "clusters.restate.dev";
+pub static RESTATE_CLOUD_CLUSTER_FINALIZER: &str = "cloudclusters.restate.dev";
 
 /// Represents the configuration of a Restate Cluster
 #[derive(CustomResource, CELSchema, Deserialize, Serialize, Clone, Debug)]
@@ -22,8 +27,12 @@ pub struct RestateCloudClusterSpec {
     pub environment_id: String,
     /// The short region identifier of your cluster, eg `us`, `eu`.
     pub region: String,
+    /// The request signing public key of your cluster, which begins `publickeyv1_`. It is not a secret.
+    pub signing_public_key: String,
     /// Where to get credentials for communication with the Cloud cluster
     pub authentication: RestateCloudClusterAuthentication,
+    /// Optional configuration for the deployment of tunnel pods
+    pub tunnel: Option<TunnelSpec>,
 }
 
 impl RestateCloudCluster {
@@ -74,14 +83,64 @@ impl RestateCloudCluster {
 /// Configuration for authentication to the Cloud cluster. Currently, only secret references are supported and one must be provided.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 pub struct RestateCloudClusterAuthentication {
-    secret: SecretReference,
+    pub secret: SecretReference,
 }
 
 /// Configured a reference to a secret in the same namespace as the operator
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 pub struct SecretReference {
     /// The name of the referenced secret. It must be in the same namespace as the operator.
-    name: String,
+    pub name: String,
     /// The key to read from the referenced Secret
-    key: String,
+    pub key: String,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TunnelSpec {
+    /// replicas is the desired number of tunnel pods. If unspecified, defaults to 1.
+    pub replicas: Option<i32>,
+    /// Container image name. Defaults to a suggested version of the ghcr.io/restatedev/restate-cloud-tunnel-client
+    pub image: Option<String>,
+    /// Image pull policy. One of Always, Never, IfNotPresent. Defaults to Always if :latest tag is specified, or IfNotPresent otherwise. More info: https://kubernetes.io/docs/concepts/containers/images#updating-images
+    pub image_pull_policy: Option<String>,
+    /// List of environment variables to set in the container; these may override defaults
+    #[schemars(default, schema_with = "env_schema")]
+    pub env: Option<Vec<EnvVar>>,
+    /// Compute Resources for the tunnel pods. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+    pub resources: Option<ResourceRequirements>,
+    /// Specifies the DNS parameters of the tunnel pod. Parameters specified here will be merged to the generated DNS configuration based on DNSPolicy.
+    pub dns_config: Option<PodDNSConfig>,
+    /// Set DNS policy for the pod. Defaults to "ClusterFirst". Valid values are 'ClusterFirstWithHostNet', 'ClusterFirst', 'Default' or 'None'. DNS parameters given in DNSConfig will be merged with the policy selected with DNSPolicy.
+    pub dns_policy: Option<String>,
+    /// If specified, the pod's tolerations.
+    pub tolerations: Option<Vec<Toleration>>,
+    /// If specified, a node selector for the pod
+    #[schemars(default, schema_with = "node_selector_schema")]
+    pub node_selector: Option<BTreeMap<String, String>>,
+    /// If specified, pod affinity. Defaults to zone anti-affinity, provide {} to disable all affinity
+    pub affinity: Option<Affinity>,
+}
+
+fn env_schema(g: &mut schemars::gen::SchemaGenerator) -> Schema {
+    serde_json::from_value(json!({
+        "items": EnvVar::json_schema(g),
+        "nullable": true,
+        "type": "array",
+        "x-kubernetes-list-map-keys": ["name"],
+        "x-kubernetes-list-type": "map"
+    }))
+    .unwrap()
+}
+
+fn node_selector_schema(_g: &mut schemars::gen::SchemaGenerator) -> Schema {
+    serde_json::from_value(json!({
+        "description": "If specified, a node selector for the pod",
+        "additionalProperties": {
+            "type": "string"
+        },
+        "type": "object",
+        "x-kubernetes-map-type": "atomic"
+    }))
+    .unwrap()
 }

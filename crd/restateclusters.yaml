@@ -48,7 +48,7 @@ spec:
                 description: Compute configuration
                 properties:
                   affinity:
-                    description: Affinity is a group of affinity scheduling rules.
+                    description: If specified, pod affinity
                     nullable: true
                     properties:
                       nodeAffinity:

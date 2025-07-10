@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tokio::sync::RwLock;
 
+pub mod restatecloudcluster;
 pub mod restatecluster;
 pub mod restatedeployment;
 
