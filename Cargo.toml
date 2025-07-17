@@ -1,6 +1,6 @@
 [package]
 name = "restate-operator"
-version = "1.7.2"
+version = "1.7.3"
 authors = ["restate.dev"]
 edition = "2021"
 rust-version = "1.86"
@@ -72,7 +72,10 @@ anyhow = "1.0.75"
 clap = { version = "4.1", features = ["derive", "env"] }
 regex = "1.10.4"
 sha2 = "0.10.8"
-reqwest = { version = "0.12.15", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12.15", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
 fnv = "1.0.7"
 
 [dev-dependencies]
