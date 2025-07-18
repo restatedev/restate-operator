@@ -51,10 +51,8 @@ impl QuantityMemoryUnits {
 pub trait QuantityParser {
     /// This method will parse the memory resource values returned by Kubernetes Api
     ///
-    /// ```rust
-    /// # use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
-    /// # use k8s_quantity_parser::QuantityParser;
-    /// #
+    /// # Example
+    /// ```text
     /// let mib = Quantity("1Mi".into());
     /// let ret: i64 = 1048576;
     /// assert_eq!(mib.to_bytes().ok().flatten().unwrap(), ret);
