@@ -179,7 +179,7 @@ While the `config` field accepts any valid [Restate server configuration](https:
     *   `worker`: Executes service code.
     *   `admin`: Provides the administration API for deployments and cluster management.
     *   `log-server`: Part of the replicated log for durable state.
-    *   `metadata-server`: Manages cluster metadata, either via Raft or an object store.
+    *   `metadata-server`: Part of the Raft-based replicated metadata store. Not required if using object store for metadata.
     *   `http-ingress`: Exposes an HTTP endpoint for invoking services.
 
 *   **`[metadata-client]`**: Configures how the cluster stores its core metadata. This is a critical choice for production deployments.
@@ -236,6 +236,8 @@ spec:
 ```
 
 #### Advanced Example
+
+> ⚠️ **Supported object stores for metadata:** Only AWS S3 and Minio are currently tested and supported as metadata backends.
 
 An example `RestateCluster` with 3 nodes using S3 for metadata and [snapshots](https://docs.restate.dev/operate/snapshots/):
 
