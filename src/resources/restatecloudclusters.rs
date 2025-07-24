@@ -10,6 +10,7 @@ use kube::{
 use schemars::{schema::Schema, JsonSchema};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use url::Url;
 
 pub static RESTATE_CLOUD_CLUSTER_FINALIZER: &str = "cloudclusters.restate.dev";
 
@@ -36,7 +37,7 @@ pub struct RestateCloudClusterSpec {
 }
 
 impl RestateCloudCluster {
-    pub fn admin_url(&self) -> String {
+    pub fn admin_url(&self) -> Result<Url, url::ParseError> {
         let unprefixed_env = self
             .spec
             .environment_id
@@ -44,10 +45,46 @@ impl RestateCloudCluster {
             // if there is no env_ prefix just use it as is
             .unwrap_or(self.spec.environment_id.as_str());
 
-        format!(
+        Url::parse(&format!(
             "https://{}.env.{}.restate.cloud:9070",
             unprefixed_env, self.spec.region
-        )
+        ))
+    }
+
+    pub fn tunnel_url(&self, service_url: Url) -> Result<Url, url::ParseError> {
+        let unprefixed_env = self
+            .spec
+            .environment_id
+            .strip_prefix("env_")
+            // if there is no env_ prefix just use it as is
+            .unwrap_or(self.spec.environment_id.as_str());
+
+        let tunnel_name = self
+            .metadata
+            .uid
+            .as_deref()
+            .expect("RestateCloudCluster should have a uid");
+
+        let port = service_url
+            .port_or_known_default()
+            .expect("service url should have a port");
+
+        let host = service_url
+            .host_str()
+            .expect("service url should have a host");
+
+        let mut url = Url::parse(&format!(
+            "https://tunnel.{}.restate.cloud:9080/{unprefixed_env}/{tunnel_name}/{}/{}/{}/",
+            self.spec.region,
+            service_url.scheme(),
+            host,
+            port,
+        ))?
+        .join(service_url.path().trim_start_matches("/"))?;
+        url.set_query(service_url.query());
+        url.set_fragment(service_url.fragment());
+
+        Ok(url)
     }
 
     pub fn bearer_token(

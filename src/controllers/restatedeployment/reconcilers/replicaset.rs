@@ -190,7 +190,11 @@ pub async fn cleanup_old_replicasets(
 
     for rs in replicasets {
         let rs_name = rs.name_any();
-        let service_endpoint = format!("http://{}.{}.svc.cluster.local:9080/", rs_name, namespace);
+        let service_endpoint =
+            rsd.spec
+                .restate
+                .register
+                .service_url(&ctx.rcc_store, &rs_name, namespace)?;
 
         // Skip active versions
         let endpoint = endpoints.get(&service_endpoint).cloned();

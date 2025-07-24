@@ -28,6 +28,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::RwLock;
 use tracing::*;
+use url::Url;
 
 use crate::controllers::{Diagnostics, State};
 use crate::metrics::Metrics;
@@ -103,11 +104,9 @@ impl Context {
             &self.secret_store,
             &self.operator_namespace,
         )?;
-        let admin_endpoint = admin_endpoint.url(&self.rcc_store)?;
+        let admin_endpoint = admin_endpoint.admin_url(&self.rcc_store)?;
 
-        let mut request_builder = self
-            .http_client
-            .request(method, format!("{}{}", admin_endpoint, path));
+        let mut request_builder = self.http_client.request(method, admin_endpoint.join(path)?);
 
         if let Some(bearer_token) = bearer_token {
             request_builder = request_builder.bearer_auth(bearer_token);
@@ -313,7 +312,10 @@ impl RestateDeployment {
         .await?;
 
         let service_endpoint =
-            format!("http://{versioned_name}.{namespace}.svc.cluster.local:9080/");
+            self.spec
+                .restate
+                .register
+                .service_url(&ctx.rcc_store, &versioned_name, namespace)?;
 
         let mut endpoints = self.list_endpoints(&ctx).await?;
 
@@ -499,7 +501,7 @@ impl RestateDeployment {
     async fn register_service_with_restate(
         &self,
         ctx: &Context,
-        service_endpoint: &str,
+        service_endpoint: &Url,
     ) -> Result<String> {
         debug!(
             "Registering endpoint '{service_endpoint}' to Restate at '{}'",
@@ -528,13 +530,16 @@ impl RestateDeployment {
         Ok(resp.id)
     }
 
-    pub(super) async fn list_endpoints(&self, ctx: &Context) -> Result<HashMap<String, bool>> {
-        // This query finds endpoint urls,  noting those that are the latest for a particular service, or have an active invocation
+    pub(super) async fn list_endpoints(&self, ctx: &Context) -> Result<HashMap<Url, bool>> {
+        // This query finds distinct endpoint urls, noting those that are the latest for a particular service, or have an active invocation
         let sql_query = r#"
-            SELECT d.endpoint, (s.name IS NOT NULL OR i.id IS NOT NULL) as active
+            SELECT d.endpoint,
+                   BOOL_OR(s.deployment_id IS NOT NULL OR i.pinned_deployment_id IS NOT NULL) as active
             FROM sys_deployment d
-            LEFT JOIN sys_service s ON (d.id = s.deployment_id)
-            LEFT JOIN sys_invocation_status i ON (d.id = i.pinned_deployment_id);
+            LEFT JOIN sys_service s ON d.id = s.deployment_id
+            LEFT JOIN sys_invocation_status i ON d.id = i.pinned_deployment_id
+            WHERE d.ty = 'http'
+            GROUP BY d.endpoint;
         "#;
 
         #[derive(Deserialize)]
@@ -566,10 +571,8 @@ impl RestateDeployment {
         let mut endpoints = HashMap::with_capacity(response.rows.len());
 
         for row in response.rows {
-            match endpoints.entry(row.endpoint) {
+            match endpoints.entry(Url::parse(&row.endpoint)?) {
                 std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    // technically there can be multiple deployments with the same endpoint url (via different headers, etc)
-                    // we treat the endpoint as active if any such deployment is active
                     if !entry.get() {
                         entry.insert(row.active);
                     }
