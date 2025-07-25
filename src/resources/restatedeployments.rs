@@ -142,6 +142,12 @@ pub struct PodTemplateMetadata {
 pub struct RestateSpec {
     /// The location of the Restate Admin API to register this deployment against
     pub register: RestateAdminEndpoint,
+
+    /// Optional path to append to the service endpoint when registering with Restate.
+    /// If not provided, the service will be registered at the root path "/".
+    /// Path must start with "/" and should not end with "/".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_path: Option<String>,
 }
 
 /// The location of the Restate Admin API to register this deployment against
@@ -287,4 +293,180 @@ pub struct RestateDeploymentCondition {
 
     /// Type of condition (Ready, Progressing, Available)
     pub r#type: String,
+}
+
+impl RestateSpec {
+    /// Get the service path with validation, defaulting to "/" if not specified
+    pub fn validated_service_path(&self) -> Result<String, crate::Error> {
+        match &self.service_path {
+            None => Ok("/".to_string()),
+            Some(path) => {
+                if path.is_empty() {
+                    return Err(crate::Error::InvalidRestateConfig(
+                        "service_path cannot be empty, use null/undefined to register at root path".into(),
+                    ));
+                }
+                
+                if !path.starts_with('/') {
+                    return Err(crate::Error::InvalidRestateConfig(
+                        format!("service_path '{}' must start with '/'", path),
+                    ));
+                }
+                
+                if path != "/" && path.ends_with('/') {
+                    return Err(crate::Error::InvalidRestateConfig(
+                        format!("service_path '{}' should not end with '/' (except for root path)", path),
+                    ));
+                }
+                
+                Ok(path.to_string())
+            }
+        }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validated_service_path_defaults_to_root() {
+        let spec = RestateSpec {
+            register: RestateAdminEndpoint {
+                cluster: Some("test-cluster".to_string()),
+                service: None,
+                url: None,
+            },
+            service_path: None,
+        };
+        
+        assert_eq!(spec.validated_service_path().unwrap(), "/");
+    }
+
+    #[test]
+    fn validated_service_path_accepts_valid_paths() {
+        let test_cases = vec![
+            "/",
+            "/api",
+            "/api/v1",
+            "/some/nested/path",
+            "/api-v1",
+            "/api_v1",
+        ];
+        
+        for path in test_cases {
+            let spec = RestateSpec {
+                register: RestateAdminEndpoint {
+                    cluster: Some("test-cluster".to_string()),
+                    service: None,
+                    url: None,
+                },
+                service_path: Some(path.to_string()),
+            };
+            
+            assert_eq!(spec.validated_service_path().unwrap(), path);
+        }
+    }
+
+    #[test]
+    fn validated_service_path_rejects_empty_string() {
+        let spec = RestateSpec {
+            register: RestateAdminEndpoint {
+                cluster: Some("test-cluster".to_string()),
+                service: None,
+                url: None,
+            },
+            service_path: Some("".to_string()),
+        };
+        
+        assert!(spec.validated_service_path().is_err());
+    }
+
+    #[test]
+    fn validated_service_path_rejects_paths_not_starting_with_slash() {
+        let invalid_paths = vec![
+            "api",
+            "api/v1",
+            "some/path",
+        ];
+        
+        for path in invalid_paths {
+            let spec = RestateSpec {
+                register: RestateAdminEndpoint {
+                    cluster: Some("test-cluster".to_string()),
+                    service: None,
+                    url: None,
+                },
+                service_path: Some(path.to_string()),
+            };
+            
+            assert!(spec.validated_service_path().is_err());
+        }
+    }
+
+    #[test]
+    fn validated_service_path_rejects_paths_ending_with_slash_except_root() {
+        let invalid_paths = vec![
+            "/api/",
+            "/api/v1/",
+            "/some/path/",
+        ];
+        
+        for path in invalid_paths {
+            let spec = RestateSpec {
+                register: RestateAdminEndpoint {
+                    cluster: Some("test-cluster".to_string()),
+                    service: None,
+                    url: None,
+                },
+                service_path: Some(path.to_string()),
+            };
+            
+            assert!(spec.validated_service_path().is_err());
+        }
+    }
+
+    #[test]
+    fn validated_service_path_allows_root_path() {
+        let spec = RestateSpec {
+            register: RestateAdminEndpoint {
+                cluster: Some("test-cluster".to_string()),
+                service: None,
+                url: None,
+            },
+            service_path: Some("/".to_string()),
+        };
+        
+        assert_eq!(spec.validated_service_path().unwrap(), "/");
+    }
+
+    #[test]
+    fn service_endpoint_construction() {
+        // Test that the service endpoint is constructed correctly with various paths
+        let test_cases = vec![
+            (None, "http://my-service.default.svc.cluster.local:9080/"),
+            (Some("/".to_string()), "http://my-service.default.svc.cluster.local:9080/"),
+            (Some("/api".to_string()), "http://my-service.default.svc.cluster.local:9080/api"),
+            (Some("/api/v1".to_string()), "http://my-service.default.svc.cluster.local:9080/api/v1"),
+        ];
+        
+        for (service_path, expected_endpoint) in test_cases {
+            let spec = RestateSpec {
+                register: RestateAdminEndpoint {
+                    cluster: Some("test-cluster".to_string()),
+                    service: None,
+                    url: None,
+                },
+                service_path,
+            };
+            
+            let validated_path = spec.validated_service_path().unwrap();
+            let versioned_name = "my-service";
+            let namespace = "default";
+            let service_endpoint = format!(
+                "http://{versioned_name}.{namespace}.svc.cluster.local:9080{validated_path}"
+            );
+            
+            assert_eq!(service_endpoint, expected_endpoint);
+        }
+    }
 }

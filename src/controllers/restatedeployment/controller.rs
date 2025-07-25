@@ -277,8 +277,11 @@ impl RestateDeployment {
         )
         .await?;
 
-        let service_endpoint =
-            format!("http://{versioned_name}.{namespace}.svc.cluster.local:9080/");
+        // Get the validated service path
+        let service_path = self.spec.restate.validated_service_path()?;
+        let service_endpoint = format!(
+            "http://{versioned_name}.{namespace}.svc.cluster.local:9080{service_path}"
+        );
 
         let mut endpoints = self
             .list_endpoints(&ctx.http_client, &admin_endpoint)

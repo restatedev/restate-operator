@@ -88,80 +88,80 @@ More examples are available just below the spec that follows.
 
 #### Spec Fields
 
-| Field | Type | Description |
-|---|---|---|
-| `compute` | `object` | Compute configuration. See details below. |
-| `storage` | `object` | Storage configuration. See details below. |
-| `security` | `object` | Security configuration. See details below. |
-| `config` | `string` | TOML-encoded Restate config file. See details below. |
+| Field         | Type     | Description                                                                        |
+| ------------- | -------- | ---------------------------------------------------------------------------------- |
+| `compute`     | `object` | Compute configuration. See details below.                                          |
+| `storage`     | `object` | Storage configuration. See details below.                                          |
+| `security`    | `object` | Security configuration. See details below.                                         |
+| `config`      | `string` | TOML-encoded Restate config file. See details below.                               |
 | `clusterName` | `string` | Sets the `RESTATE_CLUSTER_NAME` environment variable. Defaults to the object name. |
 
 ---
 
 #### `spec.compute`
 
-| Field | Type | Description |
-|---|---|---|
-| `replicas` | `integer` | The desired number of Restate nodes. Defaults to 1. |
-| `image` | `string` | **Required**. Container image name. |
-| `imagePullPolicy` | `string` | Image pull policy. One of `Always`, `Never`, `IfNotPresent`. Defaults to `Always` if `:latest` tag is specified, or `IfNotPresent` otherwise. |
-| `resources` | `object` | Compute Resources for the Restate container. e.g., `requests` and `limits` for `cpu` and `memory`. |
-| `env` | `array` | List of environment variables to set in the container. |
-| `affinity` | `object` | Standard Kubernetes affinity rules. |
-| `nodeSelector` | `object` | Standard Kubernetes node selector. |
-| `tolerations` | `array` | Standard Kubernetes tolerations. |
-| `dnsPolicy` | `string` | Pod DNS policy. |
-| `dnsConfig` | `object` | Pod DNS configuration. |
+| Field             | Type      | Description                                                                                                                                   |
+| ----------------- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `replicas`        | `integer` | The desired number of Restate nodes. Defaults to 1.                                                                                           |
+| `image`           | `string`  | **Required**. Container image name.                                                                                                           |
+| `imagePullPolicy` | `string`  | Image pull policy. One of `Always`, `Never`, `IfNotPresent`. Defaults to `Always` if `:latest` tag is specified, or `IfNotPresent` otherwise. |
+| `resources`       | `object`  | Compute Resources for the Restate container. e.g., `requests` and `limits` for `cpu` and `memory`.                                            |
+| `env`             | `array`   | List of environment variables to set in the container.                                                                                        |
+| `affinity`        | `object`  | Standard Kubernetes affinity rules.                                                                                                           |
+| `nodeSelector`    | `object`  | Standard Kubernetes node selector.                                                                                                            |
+| `tolerations`     | `array`   | Standard Kubernetes tolerations.                                                                                                              |
+| `dnsPolicy`       | `string`  | Pod DNS policy.                                                                                                                               |
+| `dnsConfig`       | `object`  | Pod DNS configuration.                                                                                                                        |
 
 ---
 
 #### `spec.storage`
 
-| Field | Type | Description |
-|---|---|---|
+| Field                 | Type      | Description                                                                                      |
+| --------------------- | --------- | ------------------------------------------------------------------------------------------------ |
 | `storageRequestBytes` | `integer` | **Required**. Amount of storage to request in volume claims. Can be increased but not decreased. |
-| `storageClassName` | `string` | The name of the `StorageClass` for the volume claims. This field is immutable. |
+| `storageClassName`    | `string`  | The name of the `StorageClass` for the volume claims. This field is immutable.                   |
 
 ---
 
 #### `spec.security`
 
-| Field | Type | Description |
-|---|---|---|
-| `disableNetworkPolicies` | `boolean` | If `true`, the operator will not create any network policies. Defaults to `false`. |
-| `allowOperatorAccessToAdmin` | `boolean` | If `true`, adds a rule to allow the operator to access the admin API. Needed for `RestateDeployment`. Defaults to `true`. |
-| `networkPeers` | `object` | Defines network peers to allow inbound access to `admin`, `ingress`, and `metrics` ports. |
-| `networkEgressRules` | `array` | Custom egress rules for outbound traffic from the cluster. |
-| `serviceAccountAnnotations` | `object` | Annotations to add to the `ServiceAccount`. |
-| `serviceAnnotations`| `object` | Annotations to add to the `Service`. |
-| `awsPodIdentityAssociationRoleArn` | `string` | **Use this to grant your Restate cluster fine-grained access to other AWS resources (like S3) without managing static credentials.** Creates a `PodIdentityAssociation` to grant the cluster an IAM role. Requires the ACK EKS controller. |
-| `awsPodSecurityGroups` | `array` | **Use this to isolate your Restate cluster within specific AWS Security Groups for enhanced network control and auditing.** Creates a `SecurityGroupPolicy` to place pods into these security groups. Requires the Security Groups for Pods CRD. |
-| `requestSigningPrivateKey` | `object` | Configures a private key to sign outbound requests from this cluster. Can be sourced from a `secret` or a CSI `secretProvider`. See details below. |
+| Field                              | Type      | Description                                                                                                                                                                                                                                      |
+| ---------------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `disableNetworkPolicies`           | `boolean` | If `true`, the operator will not create any network policies. Defaults to `false`.                                                                                                                                                               |
+| `allowOperatorAccessToAdmin`       | `boolean` | If `true`, adds a rule to allow the operator to access the admin API. Needed for `RestateDeployment`. Defaults to `true`.                                                                                                                        |
+| `networkPeers`                     | `object`  | Defines network peers to allow inbound access to `admin`, `ingress`, and `metrics` ports.                                                                                                                                                        |
+| `networkEgressRules`               | `array`   | Custom egress rules for outbound traffic from the cluster.                                                                                                                                                                                       |
+| `serviceAccountAnnotations`        | `object`  | Annotations to add to the `ServiceAccount`.                                                                                                                                                                                                      |
+| `serviceAnnotations`               | `object`  | Annotations to add to the `Service`.                                                                                                                                                                                                             |
+| `awsPodIdentityAssociationRoleArn` | `string`  | **Use this to grant your Restate cluster fine-grained access to other AWS resources (like S3) without managing static credentials.** Creates a `PodIdentityAssociation` to grant the cluster an IAM role. Requires the ACK EKS controller.       |
+| `awsPodSecurityGroups`             | `array`   | **Use this to isolate your Restate cluster within specific AWS Security Groups for enhanced network control and auditing.** Creates a `SecurityGroupPolicy` to place pods into these security groups. Requires the Security Groups for Pods CRD. |
+| `requestSigningPrivateKey`         | `object`  | Configures a private key to sign outbound requests from this cluster. Can be sourced from a `secret` or a CSI `secretProvider`. See details below.                                                                                               |
 
 ---
 
 #### `spec.security.requestSigningPrivateKey`
 
-| Field | Type | Description |
-|---|---|---|
-| `version` | `string` | **Required**. The version of Restate request signing. Currently, only "v1" is accepted. |
-| `secret` | `object` | A Kubernetes Secret source for the private key. |
-| `secretProvider` | `object` | A CSI secret provider source for the private key. |
+| Field            | Type     | Description                                                                             |
+| ---------------- | -------- | --------------------------------------------------------------------------------------- |
+| `version`        | `string` | **Required**. The version of Restate request signing. Currently, only "v1" is accepted. |
+| `secret`         | `object` | A Kubernetes Secret source for the private key.                                         |
+| `secretProvider` | `object` | A CSI secret provider source for the private key.                                       |
 
 **`secret` Fields**
 
-| Field | Type | Description |
-|---|---|---|
-| `secretName` | `string` | **Required**. The name of the secret. |
-| `key` | `string` | **Required**. The key within the secret that contains the private key. |
+| Field        | Type     | Description                                                            |
+| ------------ | -------- | ---------------------------------------------------------------------- |
+| `secretName` | `string` | **Required**. The name of the secret.                                  |
+| `key`        | `string` | **Required**. The key within the secret that contains the private key. |
 
 **`secretProvider` Fields**
 
-| Field | Type | Description |
-|---|---|---|
-| `provider` | `string` | The name of the CSI secret provider (e.g., `secrets-store.csi.k8s.io`). |
-| `path` | `string` | **Required**. The path of the private key file within the mounted volume. |
-| `parameters` | `object` | Provider-specific configuration parameters. |
+| Field        | Type     | Description                                                               |
+| ------------ | -------- | ------------------------------------------------------------------------- |
+| `provider`   | `string` | The name of the CSI secret provider (e.g., `secrets-store.csi.k8s.io`).   |
+| `path`       | `string` | **Required**. The path of the private key file within the mounted volume. |
+| `parameters` | `object` | Provider-specific configuration parameters.                               |
 
 ---
 
@@ -307,6 +307,9 @@ spec:
   restate:
     register:
       cluster: restate-test
+    # Optional: specify a custom path for service registration
+    # If not provided, service will be registered at root path "/"
+    service_path: "/api/v1"
   selector:
     matchLabels:
       app: my-deployment
@@ -326,14 +329,14 @@ For the full schema as a [Pkl](https://pkl-lang.org/) template see [`crd/Restate
 
 #### Spec Fields
 
-| Field | Type | Description |
-|---|---|---|
-| `replicas` | `integer` | Number of desired pods. Defaults to 1. |
-| `selector` | `object` | **Required**. Label selector for pods. Must match the pod template's labels. See details below. |
-| `template` | `object` | **Required**. Pod template for the deployment. See details below. |
-| `restate` | `object` | **Required**. Restate-specific configuration. See details below. |
-| `minReadySeconds` | `integer` | Minimum seconds a new pod should be ready before it's considered available. Defaults to 0. |
-| `revisionHistoryLimit`| `integer` | Number of old ReplicaSets to retain for rollbacks. Defaults to 10. |
+| Field                  | Type      | Description                                                                                     |
+| ---------------------- | --------- | ----------------------------------------------------------------------------------------------- |
+| `replicas`             | `integer` | Number of desired pods. Defaults to 1.                                                          |
+| `selector`             | `object`  | **Required**. Label selector for pods. Must match the pod template's labels. See details below. |
+| `template`             | `object`  | **Required**. Pod template for the deployment. See details below.                               |
+| `restate`              | `object`  | **Required**. Restate-specific configuration. See details below.                                |
+| `minReadySeconds`      | `integer` | Minimum seconds a new pod should be ready before it's considered available. Defaults to 0.      |
+| `revisionHistoryLimit` | `integer` | Number of old ReplicaSets to retain for rollbacks. Defaults to 10.                              |
 
 ---
 
@@ -341,10 +344,10 @@ For the full schema as a [Pkl](https://pkl-lang.org/) template see [`crd/Restate
 
 This is a standard Kubernetes [label selector](https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#label-selectors). It must match the labels of the pod template.
 
-| Field | Type | Description |
-|---|---|---|
-| `matchLabels` | `object` | A map of key-value pairs. |
-| `matchExpressions` | `array` | A list of label selector requirements. |
+| Field              | Type     | Description                            |
+| ------------------ | -------- | -------------------------------------- |
+| `matchLabels`      | `object` | A map of key-value pairs.              |
+| `matchExpressions` | `array`  | A list of label selector requirements. |
 
 ---
 
@@ -360,26 +363,27 @@ For details on the `PodTemplateSpec` schema, see the [official Kubernetes API do
 
 This field contains Restate-specific configuration.
 
-| Field | Type | Description |
-|---|---|---|
-| `register` | `object` | **Required**. The location of the Restate Admin API to register this deployment against. See details below. |
+| Field          | Type     | Description                                                                                                                                                                                                |
+| -------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `register`     | `object` | **Required**. The location of the Restate Admin API to register this deployment against. See details below.                                                                                                |
+| `service_path` | `string` | Optional path to append to the service endpoint when registering with Restate. If not provided, the service will be registered at the root path "/". Path must start with "/" and should not end with "/". |
 
 The `register` field must specify exactly one of `cluster`, `service`, or `url`.
 
-| Field | Type | Description |
-|---|---|---|
-| `cluster` | `string` | The name of a `RestateCluster` CRD object in the same Kubernetes cluster. |
+| Field     | Type     | Description                                                                                    |
+| --------- | -------- | ---------------------------------------------------------------------------------------------- |
+| `cluster` | `string` | The name of a `RestateCluster` CRD object in the same Kubernetes cluster.                      |
 | `service` | `object` | A reference to a Kubernetes `Service` that points to the Restate admin API. See details below. |
-| `url` | `string` | The direct URL of the Restate admin endpoint. |
+| `url`     | `string` | The direct URL of the Restate admin endpoint.                                                  |
 
 **`register.service` Fields**
 
-| Field | Type | Description |
-|---|---|---|
-| `name` | `string` | **Required**. The name of the service. |
-| `namespace` | `string` | **Required**. The namespace of the service. |
-| `path` | `string` | An optional URL path to be prepended to admin API paths. Should not end with a `/`. |
-| `port` | `integer` | The port on the service that hosts the admin API. Defaults to 9070. |
+| Field       | Type      | Description                                                                         |
+| ----------- | --------- | ----------------------------------------------------------------------------------- |
+| `name`      | `string`  | **Required**. The name of the service.                                              |
+| `namespace` | `string`  | **Required**. The namespace of the service.                                         |
+| `path`      | `string`  | An optional URL path to be prepended to admin API paths. Should not end with a `/`. |
+| `port`      | `integer` | The port on the service that hosts the admin API. Defaults to 9070.                 |
 
 ### EKS Pod Identity
 
