@@ -104,6 +104,10 @@ spec:
                         description: A url of the restate admin endpoint against which to register the deployment Exactly one of `cluster`, `service` or `url` must be specified
                         type: string
                     type: object
+                  servicePath:
+                    description: Optional path to append to the Service url when registering with Restate. If not provided, the service will be registered at the root path "/".
+                    nullable: true
+                    type: string
                 required:
                 - register
                 type: object

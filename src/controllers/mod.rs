@@ -3,6 +3,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tokio::sync::RwLock;
+use url::Url;
 
 pub mod restatecluster;
 pub mod restatedeployment;
@@ -82,4 +83,21 @@ impl State {
             ..self
         }
     }
+}
+
+pub fn service_url(
+    service_name: &str,
+    service_namespace: &str,
+    port: i32,
+    path: Option<&str>,
+) -> Result<Url, url::ParseError> {
+    let mut url = Url::parse(&format!(
+        "http://{service_name}.{service_namespace}.svc.cluster.local:{port}",
+    ))?;
+
+    if let Some(path) = path {
+        url.set_path(path)
+    }
+
+    Ok(url)
 }

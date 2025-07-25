@@ -11,6 +11,7 @@ use kube::runtime::reflector::Store;
 use kube::{Resource, ResourceExt};
 use serde_json::json;
 use tracing::*;
+use url::Url;
 
 use crate::controllers::restatedeployment::controller::{
     APP_MANAGED_BY_LABEL, OWNED_BY_LABEL, RESTATE_DEPLOYMENT_ID_ANNOTATION,
@@ -114,6 +115,11 @@ pub fn generate_pod_template_hash(rsd: &RestateDeployment, pod_template: &str) -
         hasher.write(cluster.as_bytes());
     }
 
+    // if you change the path, it creates a new deployment, which means we want a new replicaset too to keep things 1:1
+    if let Some(service_path) = rsd.spec.restate.service_path.as_deref() {
+        hasher.write(service_path.as_bytes());
+    }
+
     if let Some(collision_count) = rsd.status.as_ref().and_then(|s| s.collision_count) {
         hasher.write(&collision_count.to_be_bytes());
     }
@@ -150,9 +156,9 @@ pub async fn cleanup_old_replicasets(
     rs_api: &Api<ReplicaSet>,
     replicasets_store: &Store<ReplicaSet>,
     http_client: &reqwest::Client,
-    admin_endpoint: &str,
+    admin_endpoint: &Url,
     rsd: &RestateDeployment,
-    endpoints: &HashMap<String, bool>,
+    deployments: &HashMap<String, bool>,
 ) -> Result<(i32, Option<chrono::DateTime<chrono::Utc>>)> {
     let owner_name = rsd.name_any();
 
@@ -191,14 +197,16 @@ pub async fn cleanup_old_replicasets(
 
     for rs in replicasets {
         let rs_name = rs.name_any();
-        let service_endpoint = format!("http://{}.{}.svc.cluster.local:9080/", rs_name, namespace);
 
-        // Skip active versions
-        let endpoint = endpoints.get(&service_endpoint).cloned();
-        let endpoint_exists = endpoint.is_some();
-        let endpoint_active = endpoint.unwrap_or(false);
+        let rs_deployment_id = rs.annotations().get(RESTATE_DEPLOYMENT_ID_ANNOTATION);
 
-        if endpoint_active {
+        // Skip active deployments
+        let deployment = rs_deployment_id
+            .and_then(|rs_deployment_id| deployments.get(rs_deployment_id).cloned());
+        let deployment_exists = deployment.is_some();
+        let deployment_active = deployment.unwrap_or(false);
+
+        if deployment_active {
             active_count += 1;
 
             if rs
@@ -251,7 +259,7 @@ pub async fn cleanup_old_replicasets(
         match (
             current_remove_at,
             current_remove_at_in_past,
-            endpoint_exists,
+            deployment_exists,
         ) {
             (_, true, _) | (_, _, false) => {
                 // we are past the remove at time, or the endpoint was removed by other means; can now scale it down
@@ -290,24 +298,22 @@ pub async fn cleanup_old_replicasets(
                     continue;
                 }
 
-                if endpoint_exists {
-                    if let Some(deployment_id) =
-                        rs.annotations().get(RESTATE_DEPLOYMENT_ID_ANNOTATION)
-                    {
-                        debug!("Force-deleting Restate deployment {deployment_id} as its associated with old ReplicaSet {rs_name} in namespace {namespace}");
+                if deployment_exists {
+                    let rs_deployment_id = rs_deployment_id.unwrap();
 
-                        let resp = http_client
-                            .delete(format!(
-                                "{admin_endpoint}/deployments/{deployment_id}?force=true"
-                            ))
-                            .send()
-                            .await
-                            .map_err(Error::AdminCallFailed)?;
+                    debug!("Force-deleting Restate deployment {rs_deployment_id} as its associated with old ReplicaSet {rs_name} in namespace {namespace}");
 
-                        // for idempotency we have to allow 404
-                        if resp.status() != reqwest::StatusCode::NOT_FOUND {
-                            let _ = resp.error_for_status().map_err(Error::AdminCallFailed)?;
-                        }
+                    let resp = http_client
+                        .delete(format!(
+                            "{admin_endpoint}/deployments/{rs_deployment_id}?force=true"
+                        ))
+                        .send()
+                        .await
+                        .map_err(Error::AdminCallFailed)?;
+
+                    // for idempotency we have to allow 404
+                    if resp.status() != reqwest::StatusCode::NOT_FOUND {
+                        let _ = resp.error_for_status().map_err(Error::AdminCallFailed)?;
                     }
                 }
 

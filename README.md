@@ -363,6 +363,7 @@ This field contains Restate-specific configuration.
 | Field | Type | Description |
 |---|---|---|
 | `register` | `object` | **Required**. The location of the Restate Admin API to register this deployment against. See details below. |
+| `servicePath` | `string` | Optional path to append to the Service url when registering with Restate. |
 
 The `register` field must specify exactly one of `cluster`, `service`, or `url`.
 
