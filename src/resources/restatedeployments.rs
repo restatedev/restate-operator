@@ -4,6 +4,9 @@ use schemars::schema::Schema;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use url::Url;
+
+use crate::controllers::service_url;
 
 pub static RESTATE_DEPLOYMENT_FINALIZER: &str = "deployments.restate.dev";
 
@@ -139,9 +142,15 @@ pub struct PodTemplateMetadata {
 
 /// Restate specific configuration
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct RestateSpec {
     /// The location of the Restate Admin API to register this deployment against
     pub register: RestateAdminEndpoint,
+
+    /// Optional path to append to the Service url when registering with Restate.
+    /// If not provided, the service will be registered at the root path "/".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_path: Option<String>,
 }
 
 /// The location of the Restate Admin API to register this deployment against
@@ -156,7 +165,7 @@ pub struct RestateAdminEndpoint {
     pub service: Option<ServiceReference>,
     /// A url of the restate admin endpoint against which to register the deployment
     /// Exactly one of `cluster`, `service` or `url` must be specified
-    pub url: Option<String>,
+    pub url: Option<Url>,
 }
 
 // Custom JsonSchema implementation so that we can make one of cluster, service, url required.
@@ -196,22 +205,20 @@ impl JsonSchema for RestateAdminEndpoint {
 }
 
 impl RestateAdminEndpoint {
-    pub fn url(&self) -> Result<String, crate::Error> {
+    pub fn admin_url(&self) -> crate::Result<Url> {
         match (
             self.cluster.as_deref(),
             self.service.as_ref(),
             self.url.as_ref(),
         ) {
-            (Some(cluster), None, None) => {
-                Ok(format!("http://restate.{cluster}.svc.cluster.local:9070"))
-            }
-            (None, Some(service), None) => Ok(format!(
-                "http://{}.{}.svc.cluster.local:{}{}",
-                service.name,
-                service.namespace,
+            (Some(cluster), None, None) => Ok(service_url("restate", cluster, 9070, None)?),
+            (None, Some(service), None) => Ok(service_url(
+                &service.name,
+                &service.namespace,
                 service.port.unwrap_or(9070),
-                service.path.as_deref().unwrap_or(""),
-            )),
+                service.path.as_deref(),
+            )?),
+
             (None, None, Some(url)) => Ok(url.clone()),
             _ => Err(crate::Error::InvalidRestateConfig(
                 "Exactly one of `cluster`, `service` or `url` must be specified in spec.restate"

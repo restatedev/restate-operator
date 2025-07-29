@@ -27,8 +27,9 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::RwLock;
 use tracing::*;
+use url::Url;
 
-use crate::controllers::{Diagnostics, State};
+use crate::controllers::{service_url, Diagnostics, State};
 use crate::metrics::Metrics;
 use crate::resources::restateclusters::RestateCluster;
 use crate::resources::restatedeployments::{
@@ -151,7 +152,7 @@ impl RestateDeployment {
         let rs_api = Api::<ReplicaSet>::namespaced(ctx.client.clone(), namespace);
         let svc_api = Api::<Service>::namespaced(ctx.client.clone(), namespace);
 
-        let admin_endpoint = self.spec.restate.register.url()?;
+        let admin_endpoint = self.spec.restate.register.admin_url()?;
 
         let pod_template_annotation = reconcilers::replicaset::pod_template_annotation(self);
 
@@ -277,15 +278,28 @@ impl RestateDeployment {
         )
         .await?;
 
-        let service_endpoint =
-            format!("http://{versioned_name}.{namespace}.svc.cluster.local:9080/");
+        let service_endpoint = service_url(
+            &versioned_name,
+            namespace,
+            9080,
+            self.spec.restate.service_path.as_deref(),
+        )?;
 
-        let mut endpoints = self
-            .list_endpoints(&ctx.http_client, &admin_endpoint)
+        let mut deployments = self
+            .list_deployments(&ctx.http_client, &admin_endpoint)
             .await?;
 
-        // if the endpoint is not active, register it
-        if !endpoints.get(&service_endpoint).cloned().unwrap_or(false) {
+        let existing_deployment_id = replicaset
+            .annotations()
+            .get(RESTATE_DEPLOYMENT_ID_ANNOTATION);
+
+        // if the repliceset doesn't have a deployment id, or its deployment id is not active, register it
+        if existing_deployment_id.is_none_or(|existing_deployment_id| {
+            !deployments
+                .get(existing_deployment_id)
+                .cloned()
+                .unwrap_or_default()
+        }) {
             if let Some(cluster_name) = &self.spec.restate.register.cluster {
                 // wait for the cluster to be ready before registering to it
                 validate_cluster_status(rsc_api, cluster_name).await?;
@@ -302,7 +316,8 @@ impl RestateDeployment {
             )
             .await?;
             // if registration succeeded, treat this as an active endpoint
-            endpoints.insert(service_endpoint.clone(), true);
+            // if we fail after this point we will re-register and should get the same deployment id
+            deployments.insert(deployment_id.clone(), true);
 
             debug!("Updating deployment-id annotation of ReplicaSet/Service {versioned_name} in namespace {namespace}");
 
@@ -338,7 +353,7 @@ impl RestateDeployment {
             &ctx.http_client,
             &admin_endpoint,
             self,
-            &endpoints,
+            &deployments,
         )
         .await?;
 
@@ -475,8 +490,8 @@ impl RestateDeployment {
     /// Register a service version with the Restate cluster
     async fn register_service_with_restate(
         client: &reqwest::Client,
-        admin_endpoint: &str,
-        service_endpoint: &str,
+        admin_endpoint: &Url,
+        service_endpoint: &Url,
     ) -> Result<String> {
         debug!("Registering endpoint '{service_endpoint}' to Restate at '{admin_endpoint}'",);
 
@@ -486,7 +501,7 @@ impl RestateDeployment {
         }
 
         let resp: DeploymentResponse = client
-            .post(format!("{}/deployments", admin_endpoint))
+            .post(admin_endpoint.join("/deployments")?)
             .json(&serde_json::json!({
                 "uri": service_endpoint,
             }))
@@ -502,14 +517,14 @@ impl RestateDeployment {
         Ok(resp.id)
     }
 
-    async fn list_endpoints(
+    pub async fn list_deployments(
         &self,
         http_client: &reqwest::Client,
-        admin_endpoint: &str,
+        admin_endpoint: &Url,
     ) -> Result<HashMap<String, bool>> {
-        // This query finds endpoint urls,  noting those that are the latest for a particular service, or have an active invocation
+        // This query finds deployments, noting those that are the latest for a particular service, or have an active invocation
         let sql_query = r#"
-            SELECT d.endpoint, (s.name IS NOT NULL OR i.id IS NOT NULL) as active
+            SELECT d.id as deployment_id, (s.name IS NOT NULL OR i.id IS NOT NULL) as active
             FROM sys_deployment d
             LEFT JOIN sys_service s ON (d.id = s.deployment_id)
             LEFT JOIN sys_invocation_status i ON (d.id = i.pinned_deployment_id);
@@ -522,12 +537,12 @@ impl RestateDeployment {
 
         #[derive(Deserialize)]
         struct DeploymentQueryResultRow {
-            endpoint: String,
+            deployment_id: String,
             active: bool,
         }
 
         let response: DeploymentQueryResult = http_client
-            .post(format!("{}/query", admin_endpoint))
+            .post(admin_endpoint.join("/query")?)
             .header(reqwest::header::ACCEPT, "application/json")
             .json(&serde_json::json!({
                 "query": sql_query
@@ -544,10 +559,10 @@ impl RestateDeployment {
         let mut endpoints = HashMap::with_capacity(response.rows.len());
 
         for row in response.rows {
-            match endpoints.entry(row.endpoint) {
+            match endpoints.entry(row.deployment_id) {
                 std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    // technically there can be multiple deployments with the same endpoint url (via different headers, etc)
-                    // we treat the endpoint as active if any such deployment is active
+                    // two rows with same deployment id shouldnt happen...
+                    // we treat the deployment as active if any row is active
                     if !entry.get() {
                         entry.insert(row.active);
                     }
@@ -595,10 +610,10 @@ impl RestateDeployment {
             };
         }
 
-        let admin_endpoint = self.spec.restate.register.url()?;
+        let admin_endpoint = self.spec.restate.register.admin_url()?;
 
-        let endpoints = self
-            .list_endpoints(&ctx.http_client, &admin_endpoint)
+        let deployments = self
+            .list_deployments(&ctx.http_client, &admin_endpoint)
             .await?;
 
         let (active_count, next_removal) = reconcilers::replicaset::cleanup_old_replicasets(
@@ -608,7 +623,7 @@ impl RestateDeployment {
             &ctx.http_client,
             &admin_endpoint,
             self,
-            &endpoints,
+            &deployments,
         )
         .await?;
 

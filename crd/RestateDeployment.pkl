@@ -57,6 +57,10 @@ class Spec {
 class Restate {
   /// The location of the Restate Admin API to register this deployment against
   register: Register
+
+  /// Optional path to append to the Service url when registering with Restate. If not provided, the
+  /// service will be registered at the root path "/".
+  servicePath: String?
 }
 
 /// The location of the Restate Admin API to register this deployment against

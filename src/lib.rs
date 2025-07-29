@@ -51,6 +51,9 @@ pub enum Error {
 
     #[error("This RestateDeployment is backing recently-active versions in Restate. It will be removed after the drain delay period.")]
     DeploymentDraining { requeue_after: Option<Duration> },
+
+    #[error(transparent)]
+    InvalidUrl(#[from] url::ParseError),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -70,6 +73,7 @@ impl Error {
             Error::HashCollision => "HashCollision",
             Error::DeploymentInUse => "DeploymentInUse",
             Error::DeploymentDraining { .. } => "DeploymentDraining",
+            Error::InvalidUrl { .. } => "InvalidUrl",
         }
     }
 }
