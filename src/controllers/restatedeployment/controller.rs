@@ -313,6 +313,7 @@ impl RestateDeployment {
                 &ctx.http_client,
                 &admin_endpoint,
                 &service_endpoint,
+                self.spec.restate.options.as_ref().and_then(|o| o.use_http1),
             )
             .await?;
             // if registration succeeded, treat this as an active endpoint
@@ -492,6 +493,7 @@ impl RestateDeployment {
         client: &reqwest::Client,
         admin_endpoint: &Url,
         service_endpoint: &Url,
+        use_http1: Option<bool>,
     ) -> Result<String> {
         debug!("Registering endpoint '{service_endpoint}' to Restate at '{admin_endpoint}'",);
 
@@ -500,11 +502,22 @@ impl RestateDeployment {
             id: String,
         }
 
+        let mut payload = serde_json::json!({
+            "uri": service_endpoint,
+        });
+
+        // Add use_http1 option if specified
+        // Note: Using "force_http1" field name based on CLI flag --use-http1.1
+        // This may need adjustment if the actual Restate API uses a different field name
+        if let Some(use_http1) = use_http1 {
+            if use_http1 {
+                payload["force_http1"] = serde_json::Value::Bool(true);
+            }
+        }
+
         let resp: DeploymentResponse = client
             .post(admin_endpoint.join("/deployments")?)
-            .json(&serde_json::json!({
-                "uri": service_endpoint,
-            }))
+            .json(&payload)
             .send()
             .await
             .map_err(Error::AdminCallFailed)?

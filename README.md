@@ -364,6 +364,7 @@ This field contains Restate-specific configuration.
 |---|---|---|
 | `register` | `object` | **Required**. The location of the Restate Admin API to register this deployment against. See details below. |
 | `servicePath` | `string` | Optional path to append to the Service url when registering with Restate. |
+| `options` | `object` | Optional configuration options for service registration. See details below. |
 
 The `register` field must specify exactly one of `cluster`, `service`, or `url`.
 
@@ -381,6 +382,12 @@ The `register` field must specify exactly one of `cluster`, `service`, or `url`.
 | `namespace` | `string` | **Required**. The namespace of the service. |
 | `path` | `string` | An optional URL path to be prepended to admin API paths. Should not end with a `/`. |
 | `port` | `integer` | The port on the service that hosts the admin API. Defaults to 9070. |
+
+**`options` Fields**
+
+| Field       | Type      | Description                                                                         |
+| ----------- | --------- | ----------------------------------------------------------------------------------- |
+| `useHttp1`  | `boolean` | Force the use of HTTP/1.1 when registering with Restate. Defaults to HTTP/2 if not specified. |
 
 ### EKS Pod Identity
 
