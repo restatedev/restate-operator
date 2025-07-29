@@ -670,6 +670,19 @@ spec:
                     description: 'Image pull policy. One of Always, Never, IfNotPresent. Defaults to Always if :latest tag is specified, or IfNotPresent otherwise. More info: https://kubernetes.io/docs/concepts/containers/images#updating-images'
                     nullable: true
                     type: string
+                  imagePullSecrets:
+                    description: 'Optional list of references to secrets in the same namespace to use for pulling the image. More info: https://kubernetes.io/docs/concepts/containers/images#specifying-imagepullsecrets-on-a-pod'
+                    items:
+                      description: LocalObjectReference contains enough information to let you locate the referenced object inside the same namespace.
+                      properties:
+                        name:
+                          description: 'Name of the referent. This field is effectively required, but due to backwards compatibility is allowed to be empty. Instances of this type with an empty value here are almost certainly wrong. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names'
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    nullable: true
+                    type: array
                   nodeSelector:
                     additionalProperties:
                       type: string
