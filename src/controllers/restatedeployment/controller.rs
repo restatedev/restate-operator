@@ -33,7 +33,7 @@ use crate::controllers::{service_url, Diagnostics, State};
 use crate::metrics::Metrics;
 use crate::resources::restateclusters::RestateCluster;
 use crate::resources::restatedeployments::{
-    RestateDeployment, RestateDeploymentCondition, RestateDeploymentStatus,
+    RestateDeployment, RestateDeploymentCondition, RestateDeploymentStatus, RestateOptions,
     RESTATE_DEPLOYMENT_FINALIZER,
 };
 use crate::telemetry;
@@ -313,7 +313,7 @@ impl RestateDeployment {
                 &ctx.http_client,
                 &admin_endpoint,
                 &service_endpoint,
-                self.spec.restate.options.as_ref().and_then(|o| o.use_http1),
+                self.spec.restate.options.as_ref().cloned(),
             )
             .await?;
             // if registration succeeded, treat this as an active endpoint
@@ -493,7 +493,7 @@ impl RestateDeployment {
         client: &reqwest::Client,
         admin_endpoint: &Url,
         service_endpoint: &Url,
-        use_http1: Option<bool>,
+        options: Option<RestateOptions>,
     ) -> Result<String> {
         debug!("Registering endpoint '{service_endpoint}' to Restate at '{admin_endpoint}'",);
 
@@ -506,13 +506,8 @@ impl RestateDeployment {
             "uri": service_endpoint,
         });
 
-        // Add use_http1 option if specified
-        // Note: Using "force_http1" field name based on CLI flag --use-http1.1
-        // This may need adjustment if the actual Restate API uses a different field name
-        if let Some(use_http1) = use_http1 {
-            if use_http1 {
-                payload["force_http1"] = serde_json::Value::Bool(true);
-            }
+        if let Some(options) = options {
+            payload["use_http_11"] = serde_json::Value::Bool(options.use_http1.unwrap_or(false));
         }
 
         let resp: DeploymentResponse = client
