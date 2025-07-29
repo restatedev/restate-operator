@@ -33,7 +33,7 @@ use crate::controllers::{service_url, Diagnostics, State};
 use crate::metrics::Metrics;
 use crate::resources::restateclusters::RestateCluster;
 use crate::resources::restatedeployments::{
-    RestateDeployment, RestateDeploymentCondition, RestateDeploymentStatus, RestateOptions,
+    RestateDeployment, RestateDeploymentCondition, RestateDeploymentStatus,
     RESTATE_DEPLOYMENT_FINALIZER,
 };
 use crate::telemetry;
@@ -313,7 +313,7 @@ impl RestateDeployment {
                 &ctx.http_client,
                 &admin_endpoint,
                 &service_endpoint,
-                self.spec.restate.options.as_ref().cloned(),
+                self.spec.restate.use_http11.as_ref().cloned(),
             )
             .await?;
             // if registration succeeded, treat this as an active endpoint
@@ -493,7 +493,7 @@ impl RestateDeployment {
         client: &reqwest::Client,
         admin_endpoint: &Url,
         service_endpoint: &Url,
-        options: Option<RestateOptions>,
+        use_http11: Option<bool>,
     ) -> Result<String> {
         debug!("Registering endpoint '{service_endpoint}' to Restate at '{admin_endpoint}'",);
 
@@ -506,8 +506,8 @@ impl RestateDeployment {
             "uri": service_endpoint,
         });
 
-        if let Some(options) = options {
-            payload["use_http_11"] = serde_json::Value::Bool(options.use_http1.unwrap_or(false));
+        if let Some(use_http11) = use_http11 {
+            payload["use_http_11"] = serde_json::Value::Bool(use_http11);
         }
 
         let resp: DeploymentResponse = client

@@ -108,15 +108,10 @@ spec:
                     description: Optional path to append to the Service url when registering with Restate. If not provided, the service will be registered at the root path "/".
                     nullable: true
                     type: string
-                  options:
-                    description: Optional configuration options for service registration
+                  useHttp11:
+                    description: Force the use of HTTP/1.1 when registering with Restate
                     nullable: true
-                    properties:
-                      useHttp1:
-                        description: Force the use of HTTP/1.1 when registering with Restate
-                        nullable: true
-                        type: boolean
-                    type: object
+                    type: boolean
                 required:
                 - register
                 type: object

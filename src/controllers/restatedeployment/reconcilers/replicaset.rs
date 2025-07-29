@@ -120,11 +120,9 @@ pub fn generate_pod_template_hash(rsd: &RestateDeployment, pod_template: &str) -
         hasher.write(service_path.as_bytes());
     }
 
-    // if you change the HTTP version option, it creates a new deployment, which means we want a new replicaset too to keep things 1:1
-    if let Some(options) = &rsd.spec.restate.options {
-        if let Some(use_http1) = options.use_http1 {
-            hasher.write(&[if use_http1 { 1 } else { 0 }]);
-        }
+    // It's possible that changing this flag will create a new deployment id; by making it part of the replicaset name we guarantee that deployments and replicasets stay 1:1
+    if let Some(use_http11) = rsd.spec.restate.use_http11 {
+        hasher.write(&[if use_http11 { 1 } else { 0 }]);
     }
 
     if let Some(collision_count) = rsd.status.as_ref().and_then(|s| s.collision_count) {

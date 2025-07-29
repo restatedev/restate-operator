@@ -62,14 +62,8 @@ class Restate {
   /// service will be registered at the root path "/".
   servicePath: String?
 
-  /// Optional configuration options for service registration
-  options: Options?
-}
-
-/// Optional configuration options for service registration
-class Options {
   /// Force the use of HTTP/1.1 when registering with Restate
-  useHttp1: Boolean?
+  useHttp11: Boolean?
 }
 
 /// The location of the Restate Admin API to register this deployment against
