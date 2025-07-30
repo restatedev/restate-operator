@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use k8s_openapi::api::core::v1::{
-    Affinity, EnvVar, PodDNSConfig, ResourceRequirements, Toleration,
+    Affinity, EnvVar, LocalObjectReference, PodDNSConfig, ResourceRequirements, Toleration,
 };
 use k8s_openapi::api::networking::v1;
 use k8s_openapi::api::networking::v1::{NetworkPolicyPeer, NetworkPolicyPort};
@@ -122,6 +122,10 @@ pub struct RestateClusterCompute {
     pub image: String,
     /// Image pull policy. One of Always, Never, IfNotPresent. Defaults to Always if :latest tag is specified, or IfNotPresent otherwise. More info: https://kubernetes.io/docs/concepts/containers/images#updating-images
     pub image_pull_policy: Option<String>,
+    /// Optional list of references to secrets in the same namespace to use for pulling the image.
+    /// More info:
+    /// https://kubernetes.io/docs/concepts/containers/images#specifying-imagepullsecrets-on-a-pod
+    pub image_pull_secrets: Option<Vec<LocalObjectReference>>,
     /// List of environment variables to set in the container; these may override defaults
     #[schemars(default, schema_with = "env_schema")]
     pub env: Option<Vec<EnvVar>>,
