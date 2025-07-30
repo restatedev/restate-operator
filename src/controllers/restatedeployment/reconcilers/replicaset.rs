@@ -121,10 +121,9 @@ pub fn generate_pod_template_hash(rsd: &RestateDeployment, pod_template: &str) -
     }
 
     // It's possible that changing this flag will create a new deployment id; by making it part of the replicaset name we guarantee that deployments and replicasets stay 1:1
-    if let Some(use_http11) = rsd.spec.restate.use_http11 {
-        hasher.write(&[if use_http11 { 1 } else { 0 }]);
+    if let Some(true) = rsd.spec.restate.use_http11 {
+        hasher.write(b"use_http11");
     }
-
     if let Some(collision_count) = rsd.status.as_ref().and_then(|s| s.collision_count) {
         hasher.write(&collision_count.to_be_bytes());
     }
