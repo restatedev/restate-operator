@@ -151,6 +151,10 @@ pub struct RestateSpec {
     /// If not provided, the service will be registered at the root path "/".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_path: Option<String>,
+
+    /// Force the use of HTTP/1.1 when registering with Restate
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub use_http11: Option<bool>,
 }
 
 /// The location of the Restate Admin API to register this deployment against

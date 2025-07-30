@@ -313,6 +313,7 @@ impl RestateDeployment {
                 &ctx.http_client,
                 &admin_endpoint,
                 &service_endpoint,
+                self.spec.restate.use_http11.as_ref().cloned(),
             )
             .await?;
             // if registration succeeded, treat this as an active endpoint
@@ -492,6 +493,7 @@ impl RestateDeployment {
         client: &reqwest::Client,
         admin_endpoint: &Url,
         service_endpoint: &Url,
+        use_http11: Option<bool>,
     ) -> Result<String> {
         debug!("Registering endpoint '{service_endpoint}' to Restate at '{admin_endpoint}'",);
 
@@ -500,11 +502,17 @@ impl RestateDeployment {
             id: String,
         }
 
+        let mut payload = serde_json::json!({
+            "uri": service_endpoint,
+        });
+
+        if let Some(use_http11) = use_http11 {
+            payload["use_http_11"] = serde_json::Value::Bool(use_http11);
+        }
+
         let resp: DeploymentResponse = client
             .post(admin_endpoint.join("/deployments")?)
-            .json(&serde_json::json!({
-                "uri": service_endpoint,
-            }))
+            .json(&payload)
             .send()
             .await
             .map_err(Error::AdminCallFailed)?
