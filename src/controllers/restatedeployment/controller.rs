@@ -562,12 +562,12 @@ impl RestateDeployment {
     pub(super) async fn list_deployments(&self, ctx: &Context) -> Result<HashMap<String, bool>> {
         // This query finds deployments, noting those that are the latest for a particular service, or have an active invocation
         let sql_query = r#"
-        SELECT d.id as deployment_id, (s.name IS NOT NULL OR i.id IS NOT NULL) as active
+            SELECT DISTINCT
+                d.id as deployment_id,
+                BOOL_OR(s.name IS NOT NULL OR i.id IS NOT NULL) OVER (PARTITION BY d.id) as active
             FROM sys_deployment d
             LEFT JOIN sys_service s ON d.id = s.deployment_id
-            LEFT JOIN sys_invocation_status i ON d.id = i.pinned_deployment_id
-            WHERE d.ty = 'http'
-            GROUP BY d.endpoint;
+            LEFT JOIN sys_invocation_status i ON d.id = i.pinned_deployment_id;
         "#;
 
         #[derive(Deserialize)]
