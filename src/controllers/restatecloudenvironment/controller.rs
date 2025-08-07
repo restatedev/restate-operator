@@ -36,6 +36,8 @@ pub(super) struct Context {
     pub recorder: Recorder,
     /// The namespace in which this operator runs
     pub operator_namespace: String,
+    /// The default image to use for tunnel client pods
+    pub tunnel_client_default_image: String,
     /// Diagnostics read by the web server
     pub diagnostics: Arc<RwLock<Diagnostics>>,
     /// Prometheus metrics
@@ -48,6 +50,7 @@ impl Context {
             client: client.clone(),
             recorder: Recorder::new(client, "restate-operator".into()),
             operator_namespace: state.operator_namespace,
+            tunnel_client_default_image: state.tunnel_client_default_image,
             metrics,
             diagnostics: state.diagnostics.clone(),
         })

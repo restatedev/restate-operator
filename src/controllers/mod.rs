@@ -40,6 +40,9 @@ pub struct State {
     operator_label_name: Option<String>,
     /// The value of the label named operator_label_name that will select the operator, needed to support the case where restate clusters need to be reached by the operator
     operator_label_value: Option<String>,
+
+    /// The default image to use for tunnel client pods
+    tunnel_client_default_image: String,
 }
 
 /// State wrapper around the controller outputs for the web server
@@ -49,6 +52,7 @@ impl State {
         operator_namespace: String,
         operator_label_name: Option<String>,
         operator_label_value: Option<String>,
+        tunnel_client_default_image: String,
     ) -> Self {
         Self {
             diagnostics: Arc::new(RwLock::new(Diagnostics::default())),
@@ -57,6 +61,7 @@ impl State {
             operator_namespace,
             operator_label_name,
             operator_label_value,
+            tunnel_client_default_image,
         }
     }
 

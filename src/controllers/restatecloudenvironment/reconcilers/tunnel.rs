@@ -26,8 +26,6 @@ use crate::{
     Error,
 };
 
-const TUNNEL_CLIENT_IMAGE: &str = "ghcr.io/restatedev/restate-cloud-tunnel-client:0.2.0";
-
 fn default_resources() -> ResourceRequirements {
     ResourceRequirements {
         claims: None,
@@ -83,6 +81,7 @@ fn tunnel_deployment(
     base_metadata: &ObjectMeta,
     tunnel_name: &str,
     spec: &RestateCloudEnvironmentSpec,
+    tunnel_client_default_image: &str,
 ) -> Deployment {
     let metadata = object_meta(base_metadata);
     let labels = metadata.labels.clone();
@@ -112,7 +111,7 @@ fn tunnel_deployment(
                         image: Some(
                             tunnel
                                 .and_then(|t| t.image.as_deref())
-                                .unwrap_or(TUNNEL_CLIENT_IMAGE)
+                                .unwrap_or(tunnel_client_default_image)
                                 .into(),
                         ),
                         image_pull_policy: tunnel.and_then(|t| t.image_pull_policy.clone()),
@@ -204,7 +203,12 @@ pub async fn reconcile_tunnel(
     apply_deployment(
         namespace,
         &dp_api,
-        tunnel_deployment(base_metadata, tunnel_name, spec),
+        tunnel_deployment(
+            base_metadata,
+            tunnel_name,
+            spec,
+            &ctx.tunnel_client_default_image,
+        ),
     )
     .await?;
 

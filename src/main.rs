@@ -37,6 +37,14 @@ struct Arguments {
         value_name = "LABEL_VALUE"
     )]
     operator_label_value: Option<String>,
+
+    #[arg(
+        long = "tunnel-client-default-image",
+        env = "OPERATOR_TUNNEL_CLIENT_DEFAULT_IMAGE",
+        value_name = "IMAGE",
+        default_value = "ghcr.io/restatedev/restate-cloud-tunnel-client:0.3.0"
+    )]
+    tunnel_client_default_image: String,
 }
 
 #[get("/metrics")]
@@ -71,6 +79,7 @@ async fn main() -> anyhow::Result<()> {
         args.operator_namespace,
         args.operator_label_name,
         args.operator_label_value,
+        args.tunnel_client_default_image,
     );
 
     let client = Client::try_default()
