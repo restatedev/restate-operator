@@ -49,10 +49,7 @@ fn env(tunnel_name: &str, spec: &RestateCloudClusterSpec) -> Vec<EnvVar> {
         ("RESTATE_TUNNEL_NAME", tunnel_name),
         ("RESTATE_SIGNING_PUBLIC_KEY", &spec.signing_public_key),
         ("RESTATE_ENVIRONMENT_ID", &spec.environment_id),
-        (
-            "RESTATE_TUNNEL_SERVERS_SRV",
-            &format!("tunnel.{}.restate.cloud", spec.region),
-        ),
+        ("RESTATE_CLOUD_REGION", &spec.region),
         ("RESTATE_BEARER_TOKEN_FILE", BEARER_TOKEN_MOUNT_PATH),
         ("RUST_BACKTRACE", "1"),
         ("RUST_LIB_BACKTRACE", "0"),
