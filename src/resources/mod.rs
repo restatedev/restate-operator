@@ -1,5 +1,5 @@
 pub mod podidentityassociations;
-pub mod restatecloudclusters;
+pub mod restatecloudenvironments;
 pub mod restateclusters;
 pub mod restatedeployments;
 pub mod secretproviderclasses;

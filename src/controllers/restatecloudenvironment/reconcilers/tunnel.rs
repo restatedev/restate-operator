@@ -18,11 +18,11 @@ use kube::{
 use tracing::debug;
 
 use crate::{
-    controllers::restatecloudcluster::{
+    controllers::restatecloudenvironment::{
         controller::Context,
         reconcilers::{label_selector, object_meta},
     },
-    resources::restatecloudclusters::RestateCloudClusterSpec,
+    resources::restatecloudenvironments::RestateCloudEnvironmentSpec,
     Error,
 };
 
@@ -44,7 +44,7 @@ fn default_resources() -> ResourceRequirements {
 
 const BEARER_TOKEN_MOUNT_PATH: &str = "/restate-bearer-token";
 
-fn env(tunnel_name: &str, spec: &RestateCloudClusterSpec) -> Vec<EnvVar> {
+fn env(tunnel_name: &str, spec: &RestateCloudEnvironmentSpec) -> Vec<EnvVar> {
     let defaults = [
         ("RESTATE_TUNNEL_NAME", tunnel_name),
         ("RESTATE_SIGNING_PUBLIC_KEY", &spec.signing_public_key),
@@ -82,7 +82,7 @@ fn env(tunnel_name: &str, spec: &RestateCloudClusterSpec) -> Vec<EnvVar> {
 fn tunnel_deployment(
     base_metadata: &ObjectMeta,
     tunnel_name: &str,
-    spec: &RestateCloudClusterSpec,
+    spec: &RestateCloudEnvironmentSpec,
 ) -> Deployment {
     let metadata = object_meta(base_metadata);
     let labels = metadata.labels.clone();
@@ -197,7 +197,7 @@ pub async fn reconcile_tunnel(
     namespace: &str,
     base_metadata: &ObjectMeta,
     tunnel_name: &str,
-    spec: &RestateCloudClusterSpec,
+    spec: &RestateCloudEnvironmentSpec,
 ) -> Result<(), Error> {
     let dp_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), namespace);
 

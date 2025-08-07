@@ -68,7 +68,7 @@ class Restate {
 
 /// The location of the Restate Admin API to register this deployment against
 class Register {
-  /// The name of a RestateCloudCluster against which to register the deployment. Exactly one of
+  /// The name of a RestateCloudEnvironment against which to register the deployment. Exactly one of
   /// `cluster`, `cloud`, `service` or `url` must be specified
   cloud: String?
 

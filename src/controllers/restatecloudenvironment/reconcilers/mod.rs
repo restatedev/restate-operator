@@ -4,7 +4,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
 
 pub mod tunnel;
 
-// resource_labels returns labels to apply to all created resources on top of the RestateCloudCluster labels
+// resource_labels returns labels to apply to all created resources on top of the RestateCloudEnvironment labels
 pub fn mandatory_labels(base_metadata: &ObjectMeta) -> BTreeMap<String, String> {
     BTreeMap::from_iter([
         (

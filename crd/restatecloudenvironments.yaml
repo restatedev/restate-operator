@@ -1,28 +1,28 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: restatecloudclusters.restate.dev
+  name: restatecloudenvironments.restate.dev
 spec:
   group: restate.dev
   names:
-    kind: RestateCloudCluster
-    plural: restatecloudclusters
+    kind: RestateCloudEnvironment
+    plural: restatecloudenvironments
     shortNames:
-    - rcc
-    singular: restatecloudcluster
+    - rce
+    singular: restatecloudenvironment
   scope: Cluster
   versions:
   - additionalPrinterColumns: []
     name: v1beta1
     schema:
       openAPIV3Schema:
-        description: Auto-generated derived type for RestateCloudClusterSpec via `CustomResource`
+        description: Auto-generated derived type for RestateCloudEnvironmentSpec via `CustomResource`
         properties:
           spec:
-            description: Represents the configuration of a Restate Cluster
+            description: Represents the configuration of a Restate Cloud environment
             properties:
               authentication:
-                description: Where to get credentials for communication with the Cloud cluster
+                description: Where to get credentials for communication with the Cloud environment
                 properties:
                   secret:
                     description: Configured a reference to a secret in the same namespace as the operator
@@ -41,13 +41,13 @@ spec:
                 - secret
                 type: object
               environmentId:
-                description: The environment ID of your cluster, which begins `env_`
+                description: The ID of your environment, which begins `env_`
                 type: string
               region:
-                description: The short region identifier of your cluster, eg `us`, `eu`.
+                description: The short region identifier of your environment, eg `us`, `eu`.
                 type: string
               signingPublicKey:
-                description: The request signing public key of your cluster, which begins `publickeyv1_`. It is not a secret.
+                description: The request signing public key of your environment, which begins `publickeyv1_`. It is not a secret.
                 type: string
               tunnel:
                 description: Optional configuration for the deployment of tunnel pods
@@ -759,7 +759,7 @@ spec:
             x-kubernetes-validations: []
         required:
         - spec
-        title: RestateCloudCluster
+        title: RestateCloudEnvironment
         type: object
     served: true
     storage: true

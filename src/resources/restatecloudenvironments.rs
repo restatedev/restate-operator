@@ -12,31 +12,31 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use url::Url;
 
-pub static RESTATE_CLOUD_CLUSTER_FINALIZER: &str = "cloudclusters.restate.dev";
+pub static RESTATE_CLOUD_ENVIRONMENT_FINALIZER: &str = "cloudenvironments.restate.dev";
 
-/// Represents the configuration of a Restate Cluster
+/// Represents the configuration of a Restate Cloud environment
 #[derive(CustomResource, CELSchema, Deserialize, Serialize, Clone, Debug)]
 #[kube(
-    kind = "RestateCloudCluster",
+    kind = "RestateCloudEnvironment",
     group = "restate.dev",
     version = "v1beta1"
 )]
-#[kube(shortname = "rcc")]
+#[kube(shortname = "rce")]
 #[serde(rename_all = "camelCase")]
-pub struct RestateCloudClusterSpec {
-    /// The environment ID of your cluster, which begins `env_`
+pub struct RestateCloudEnvironmentSpec {
+    /// The ID of your environment, which begins `env_`
     pub environment_id: String,
-    /// The short region identifier of your cluster, eg `us`, `eu`.
+    /// The short region identifier of your environment, eg `us`, `eu`.
     pub region: String,
-    /// The request signing public key of your cluster, which begins `publickeyv1_`. It is not a secret.
+    /// The request signing public key of your environment, which begins `publickeyv1_`. It is not a secret.
     pub signing_public_key: String,
-    /// Where to get credentials for communication with the Cloud cluster
-    pub authentication: RestateCloudClusterAuthentication,
+    /// Where to get credentials for communication with the Cloud environment
+    pub authentication: RestateCloudEnvironmentAuthentication,
     /// Optional configuration for the deployment of tunnel pods
     pub tunnel: Option<TunnelSpec>,
 }
 
-impl RestateCloudCluster {
+impl RestateCloudEnvironment {
     pub fn admin_url(&self) -> Result<Url, url::ParseError> {
         let unprefixed_env = self
             .spec
@@ -63,7 +63,7 @@ impl RestateCloudCluster {
             .metadata
             .uid
             .as_deref()
-            .expect("RestateCloudCluster should have a uid");
+            .expect("RestateCloudEnvironment should have a uid");
 
         let port = service_url
             .port_or_known_default()
@@ -117,9 +117,9 @@ impl RestateCloudCluster {
     }
 }
 
-/// Configuration for authentication to the Cloud cluster. Currently, only secret references are supported and one must be provided.
+/// Configuration for authentication to the Cloud environment. Currently, only secret references are supported and one must be provided.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
-pub struct RestateCloudClusterAuthentication {
+pub struct RestateCloudEnvironmentAuthentication {
     pub secret: SecretReference,
 }
 

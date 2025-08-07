@@ -48,7 +48,7 @@ _target-option := if _resolved_target != "" { "--target " + _resolved_target } e
 generate:
   cargo run --bin cluster_crdgen | grep -vF 'categories: []' > crd/restateclusters.yaml
   cargo run --bin deployment_crdgen | grep -vF 'categories: []' > crd/restatedeployments.yaml
-  cargo run --bin cloud_crdgen | grep -vF 'categories: []' > crd/restatecloudclusters.yaml
+  cargo run --bin cloud_crdgen | grep -vF 'categories: []' > crd/restatecloudenvironments.yaml
 
 generate-pkl:
   cargo run --bin cluster_schemagen | pkl eval crd/pklgen/generate-cluster.pkl -m crd

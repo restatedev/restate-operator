@@ -37,8 +37,8 @@ pub enum Error {
     #[error("Invalid Restate configuration: {0}")]
     InvalidRestateConfig(String),
 
-    #[error("The RestateCloudCluster {0} does not exist")]
-    RestateCloudClusterNotFound(String),
+    #[error("The RestateCloudEnvironment {0} does not exist")]
+    RestateCloudEnvironmentNotFound(String),
 
     #[error("The Secret {0} does not exist")]
     SecretNotFound(String),
@@ -79,7 +79,7 @@ impl Error {
             Error::NotReady { .. } => "NotReady",
             Error::DeploymentNotReady { .. } => "ServiceNotReady",
             Error::InvalidRestateConfig(_) => "InvalidRestateConfig",
-            Error::RestateCloudClusterNotFound(_) => "RestateCloudClusterNotFound",
+            Error::RestateCloudEnvironmentNotFound(_) => "RestateCloudEnvironmentNotFound",
             Error::SecretNotFound(_) => "SecretNotFound",
             Error::SecretKeyNotFound(_, _) => "SecretKeyNotFound",
             Error::InvalidBearerToken => "InvalidBearerToken",

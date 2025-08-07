@@ -32,7 +32,7 @@ use url::Url;
 
 use crate::controllers::{Diagnostics, State};
 use crate::metrics::Metrics;
-use crate::resources::restatecloudclusters::RestateCloudCluster;
+use crate::resources::restatecloudenvironments::RestateCloudEnvironment;
 use crate::resources::restateclusters::RestateCluster;
 use crate::resources::restatedeployments::{
     RestateAdminEndpoint, RestateDeployment, RestateDeploymentCondition, RestateDeploymentStatus,
@@ -57,8 +57,8 @@ pub(super) struct Context {
     pub recorder: Recorder,
     /// Store for replica sets
     pub replicasets_store: Store<ReplicaSet>,
-    /// Store for restate cloud clusters
-    pub rcc_store: Store<RestateCloudCluster>,
+    /// Store for restate cloud environments
+    pub rce_store: Store<RestateCloudEnvironment>,
     /// Store for secrets in the same namespace as the operator
     pub secret_store: Store<Secret>,
     /// The namespace in which this operator runs
@@ -75,7 +75,7 @@ impl Context {
     pub fn new(
         client: Client,
         replicasets_store: Store<ReplicaSet>,
-        rcc_store: Store<RestateCloudCluster>,
+        rce_store: Store<RestateCloudEnvironment>,
         secret_store: Store<Secret>,
         metrics: Metrics,
         state: State,
@@ -84,7 +84,7 @@ impl Context {
             client: client.clone(),
             recorder: Recorder::new(client, "restate-operator".into()),
             replicasets_store,
-            rcc_store,
+            rce_store,
             secret_store,
             operator_namespace: state.operator_namespace,
             metrics,
@@ -100,11 +100,11 @@ impl Context {
         path: &str,
     ) -> Result<reqwest::RequestBuilder> {
         let bearer_token = admin_endpoint.bearer_token(
-            &self.rcc_store,
+            &self.rce_store,
             &self.secret_store,
             &self.operator_namespace,
         )?;
-        let admin_endpoint = admin_endpoint.admin_url(&self.rcc_store)?;
+        let admin_endpoint = admin_endpoint.admin_url(&self.rce_store)?;
 
         let mut request_builder = self.http_client.request(method, admin_endpoint.join(path)?);
 
@@ -315,7 +315,7 @@ impl RestateDeployment {
             self.spec
                 .restate
                 .register
-                .service_url(&ctx.rcc_store, &versioned_name, namespace)?;
+                .service_url(&ctx.rce_store, &versioned_name, namespace)?;
 
         let mut deployments = self.list_deployments(&ctx).await?;
 
@@ -785,7 +785,7 @@ async fn validate_cluster_status(rsc_api: Api<RestateCluster>, cluster_name: &st
 pub async fn run(client: Client, metrics: Metrics, state: State) {
     let deployments: Api<RestateDeployment> = Api::all(client.clone());
     let replicasets: Api<ReplicaSet> = Api::all(client.clone());
-    let rcc: Api<RestateCloudCluster> = Api::all(client.clone());
+    let rce: Api<RestateCloudEnvironment> = Api::all(client.clone());
     let secrets: Api<Secret> = Api::namespaced(client.clone(), &state.operator_namespace);
     let services: Api<Service> = Api::all(client.clone());
 
@@ -796,7 +796,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
 
     // all resources we create have this label
     let cfg = Config::default().labels("app.kubernetes.io/managed-by=restate-operator");
-    // but restatedeployment, restatecloudclusters, secrets dont
+    // but restatedeployment, restatecloudenvironments, secrets dont
     let not_created_cfg = Config::default();
 
     let (replicasets_store, replicasets_writer) = kube::runtime::reflector::store();
@@ -807,10 +807,10 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     .touched_objects()
     .default_backoff();
 
-    let (rcc_store, rcc_writer) = kube::runtime::reflector::store();
-    let rcc_reflector = kube::runtime::reflector(
-        rcc_writer,
-        kube::runtime::watcher(rcc, not_created_cfg.clone()),
+    let (rce_store, rce_writer) = kube::runtime::reflector::store();
+    let rce_reflector = kube::runtime::reflector(
+        rce_writer,
+        kube::runtime::watcher(rce, not_created_cfg.clone()),
     )
     .touched_objects()
     .default_backoff();
@@ -827,8 +827,8 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     controller::Controller::new(deployments, not_created_cfg)
         .shutdown_on_signal()
         .owns_stream(replicaset_reflector)
-        // just so that these get polled; we have no way to figure out which rsd may use the updated rcc or secret
-        .watches_stream(rcc_reflector, |_| std::iter::empty())
+        // just so that these get polled; we have no way to figure out which rsd may use the updated rce or secret
+        .watches_stream(rce_reflector, |_| std::iter::empty())
         .watches_stream(secret_reflector, |_| std::iter::empty())
         .owns(services, cfg.clone())
         .run(
@@ -837,7 +837,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
             Context::new(
                 client,
                 replicasets_store,
-                rcc_store,
+                rce_store,
                 secret_store,
                 metrics,
                 state,

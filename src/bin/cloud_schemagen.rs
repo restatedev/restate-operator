@@ -10,7 +10,7 @@ fn main() {
     print!(
         "{}",
         serde_json::to_string_pretty(
-            &restate_operator::resources::restatecloudclusters::RestateCloudCluster::json_schema(
+            &restate_operator::resources::restatecloudenvironments::RestateCloudEnvironment::json_schema(
                 &mut gen
             )
         )

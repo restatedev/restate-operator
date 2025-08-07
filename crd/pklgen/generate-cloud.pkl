@@ -6,10 +6,10 @@ import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/networking/v1/NetworkP
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/EnvVar.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/Toleration.pkl"
 
-source = "file:./crd/restatecloudclusters.yaml"
+source = "file:./crd/restatecloudenvironments.yaml"
 
 converters {
-  ["restatecloudclusters.restate.dev"] {
+  ["restatecloudenvironments.restate.dev"] {
     [List("spec", "tunnel", "env", "env")] = EnvVar
     [List("spec", "tunnel", "resources")] = ResourceRequirements
     [List("spec", "tunnel", "dnsConfig")] = PodSpec.PodDNSConfig

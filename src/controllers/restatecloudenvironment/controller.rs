@@ -20,14 +20,14 @@ use tracing::*;
 
 use crate::controllers::{Diagnostics, State};
 use crate::metrics::Metrics;
-use crate::resources::restatecloudclusters::{
-    RestateCloudCluster, RESTATE_CLOUD_CLUSTER_FINALIZER,
+use crate::resources::restatecloudenvironments::{
+    RestateCloudEnvironment, RESTATE_CLOUD_ENVIRONMENT_FINALIZER,
 };
 use crate::telemetry;
 use crate::{Error, Result};
 
 // Import our reconcilers
-use crate::controllers::restatecloudcluster::reconcilers;
+use crate::controllers::restatecloudenvironment::reconcilers;
 
 pub(super) struct Context {
     /// Kubernetes client
@@ -55,19 +55,19 @@ impl Context {
 }
 
 #[instrument(skip(ctx, rs), fields(trace_id))]
-async fn reconcile(rs: Arc<RestateCloudCluster>, ctx: Arc<Context>) -> Result<Action> {
+async fn reconcile(rs: Arc<RestateCloudEnvironment>, ctx: Arc<Context>) -> Result<Action> {
     if let Some(trace_id) = telemetry::get_trace_id() {
         Span::current().record("trace_id", field::display(&trace_id));
     }
-    let _timer = ctx.metrics.count_and_measure::<RestateCloudCluster>();
+    let _timer = ctx.metrics.count_and_measure::<RestateCloudEnvironment>();
     ctx.diagnostics.write().await.last_event = Utc::now();
 
-    let services_api: Api<RestateCloudCluster> = Api::all(ctx.client.clone());
+    let services_api: Api<RestateCloudEnvironment> = Api::all(ctx.client.clone());
 
-    info!("Reconciling RestateCloudCluster {}", rs.name_any(),);
+    info!("Reconciling RestateCloudEnvironment {}", rs.name_any(),);
     match finalizer(
         &services_api,
-        RESTATE_CLOUD_CLUSTER_FINALIZER,
+        RESTATE_CLOUD_ENVIRONMENT_FINALIZER,
         rs.clone(),
         |event| async {
             match event {
@@ -106,7 +106,7 @@ fn error_policy<K, C>(_rs: Arc<K>, _: &Error, _ctx: C) -> Action {
     Action::requeue(Duration::from_secs(30))
 }
 
-impl RestateCloudCluster {
+impl RestateCloudEnvironment {
     // Reconcile (for non-finalizer related changes)
     async fn reconcile(&self, ctx: Arc<Context>, name: &str) -> Result<Action> {
         let oref = self.controller_owner_ref(&()).unwrap();
@@ -124,7 +124,7 @@ impl RestateCloudCluster {
             .metadata
             .uid
             .as_deref()
-            .expect("RestateCloudCluster should have a uid");
+            .expect("RestateCloudEnvironment should have a uid");
 
         reconcilers::tunnel::reconcile_tunnel(
             &ctx,
@@ -140,7 +140,7 @@ impl RestateCloudCluster {
 
     // Finalizer cleanup (the object was deleted, ensure nothing is orphaned)
     async fn cleanup(&self, ctx: Arc<Context>) -> Result<Action> {
-        // RestateCloudCluster doesn't have any real cleanup, so we just publish an event
+        // RestateCloudEnvironment doesn't have any real cleanup, so we just publish an event
         ctx.recorder
             .publish(
                 &Event {
@@ -157,23 +157,23 @@ impl RestateCloudCluster {
     }
 }
 
-/// Run the RestateCloudCluster controller
+/// Run the RestateCloudEnvironment controller
 pub async fn run(client: Client, metrics: Metrics, state: State) {
-    let rcc: Api<RestateCloudCluster> = Api::all(client.clone());
+    let rce: Api<RestateCloudEnvironment> = Api::all(client.clone());
     let deployments: Api<Deployment> = Api::namespaced(client.clone(), &state.operator_namespace);
 
-    if let Err(e) = rcc.list(&ListParams::default().limit(1)).await {
-        error!("RestateCloudCluster is not queryable; {e:?}. Is the CRD installed?");
+    if let Err(e) = rce.list(&ListParams::default().limit(1)).await {
+        error!("RestateCloudEnvironment is not queryable; {e:?}. Is the CRD installed?");
         std::process::exit(1);
     }
 
     // all resources we create have this label
     let cfg = Config::default().labels("app.kubernetes.io/managed-by=restate-operator");
-    // but restatecloudcluster doesn\t
+    // but RestateCloudEnvironment doesn\t
     let not_created_cfg = Config::default();
 
-    // Create a controller for RestateDeployment
-    controller::Controller::new(rcc, not_created_cfg)
+    // Create a controller for RestateCloudEnvironment
+    controller::Controller::new(rce, not_created_cfg)
         .shutdown_on_signal()
         .owns(deployments, cfg.clone())
         .run(

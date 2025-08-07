@@ -1,8 +1,8 @@
-/// Auto-generated derived type for RestateCloudClusterSpec via `CustomResource`
+/// Auto-generated derived type for RestateCloudEnvironmentSpec via `CustomResource`
 ///
 /// This module was generated from the CustomResourceDefinition at
-/// <file:./crd/restatecloudclusters.yaml>.
-module dev.restate.v1beta1.RestateCloudCluster
+/// <file:./crd/restatecloudenvironments.yaml>.
+module dev.restate.v1beta1.RestateCloudEnvironment
 
 extends "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/K8sResource.pkl"
 
@@ -14,35 +14,36 @@ import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/Toleration.pkl
 
 fixed apiVersion: "restate.dev/v1beta1"
 
-fixed kind: "RestateCloudCluster"
+fixed kind: "RestateCloudEnvironment"
 
 /// Standard object's metadata.
 ///
 /// More info: <https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata>.
 metadata: ObjectMeta?
 
-/// Represents the configuration of a Restate Cluster
+/// Represents the configuration of a Restate Cloud environment
 spec: Spec
 
-/// Represents the configuration of a Restate Cluster
+/// Represents the configuration of a Restate Cloud environment
 class Spec {
-  /// Where to get credentials for communication with the Cloud cluster
+  /// Where to get credentials for communication with the Cloud environment
   authentication: Authentication
 
-  /// The environment ID of your cluster, which begins `env_`
+  /// The ID of your environment, which begins `env_`
   environmentId: String
 
-  /// The short region identifier of your cluster, eg `us`, `eu`.
+  /// The short region identifier of your environment, eg `us`, `eu`.
   region: String
 
-  /// The request signing public key of your cluster, which begins `publickeyv1_`. It is not a secret.
+  /// The request signing public key of your environment, which begins `publickeyv1_`. It is not a
+  /// secret.
   signingPublicKey: String
 
   /// Optional configuration for the deployment of tunnel pods
   tunnel: Tunnel?
 }
 
-/// Where to get credentials for communication with the Cloud cluster
+/// Where to get credentials for communication with the Cloud environment
 class Authentication {
   /// Configured a reference to a secret in the same namespace as the operator
   secret: Secret

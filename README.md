@@ -44,7 +44,7 @@ yq eval 'select(.kind != "CustomResourceDefinition")' manifests.yaml | \
 
 ## Custom Resource Definitions
 
-The operator introduces three Custom Resource Definitions (CRDs): `RestateCluster`, `RestateDeployment`, and `RestateCloudCluster`.
+The operator introduces three Custom Resource Definitions (CRDs): `RestateCluster`, `RestateDeployment`, and `RestateCloudEnvironment`.
 
 ### `RestateCluster`
 
@@ -372,7 +372,7 @@ The `register` field must specify exactly one of `cluster`, `service`, or `url`.
 | Field | Type | Description |
 |---|---|---|
 | `cluster` | `string` | The name of a `RestateCluster` CRD object in the same Kubernetes cluster. |
-| `cloud` | `string` | The name of a `RestateCloudCluster` CRD object in the same Kubernetes cluster. |
+| `cloud` | `string` | The name of a `RestateCloudEnvironment` CRD object in the same Kubernetes cluster. |
 | `service` | `object` | A reference to a Kubernetes `Service` that points to the Restate admin API. See details below. |
 | `url` | `string` | The direct URL of the Restate admin endpoint. |
 
@@ -385,24 +385,24 @@ The `register` field must specify exactly one of `cluster`, `service`, or `url`.
 | `path` | `string` | An optional URL path to be prepended to admin API paths. Should not end with a `/`. |
 | `port` | `integer` | The port on the service that hosts the admin API. Defaults to 9070. |
 
-### `RestateCloudCluster`
+### `RestateCloudEnvironment`
 
-The `RestateCloudCluster` CRD allows you to use the `RestateDeployment` feature with a Restate Cloud cluster. This resource describes a cloud cluster, references a secret used to communicate with it, and manages a Deployment of tunnel pods in your cluster which allows Restate Cloud to call into your services without having to expose them over the public internet.
+The `RestateCloudEnvironment` CRD allows you to use the `RestateDeployment` feature with a Restate Cloud cluster. This resource describes a cloud environment, references a secret used to communicate with it, and manages a Deployment of tunnel pods in your Kubernetes cluster which allows Restate Cloud to call into your services without having to expose them over the public internet.
 
 #### Minimal Example
 
 ```yaml
 apiVersion: restate.dev/v1beta1
-kind: RestateCloudCluster
+kind: RestateCloudEnvironment
 metadata:
-  name: my-cloud-cluster
+  name: my-cloud-environment
 spec:
   environmentId: env_201j05r9g0f12ygtphdszbb4scp
   signingPublicKey: publickeyv1_BBuEJnx28hdGb5Ky6qpvuXQG4aVoWBnubJtHXpznzgQk
   region: us
   authentication:
     secret:
-      name: my-cloud-cluster-secret
+      name: my-cloud-environment-secret
       key: token
 ```
 
@@ -458,22 +458,22 @@ All of these fields correspond to fields in a native `DeploymentSpec`. See the [
 # paste your API key into a local file
 pbpaste > token
 # create the Secret in the restate-operator namespace
-kubectl -n restate-operator create secret generic my-cloud-cluster-secret --from-file token
+kubectl -n restate-operator create secret generic my-cloud-environment-secret --from-file token
 ```
 
-2. **Create a RestateCloudCluster** referencing your environment ID, region, and token:
+2. **Create a RestateCloudEnvironment** referencing your environment ID, region, and token:
 
 ```yaml
 apiVersion: restate.dev/v1beta1
-kind: RestateCloudCluster
+kind: RestateCloudEnvironment
 metadata:
-  name: my-cloud-cluster
+  name: my-cloud-environment
 spec:
   environmentId: env_201j05r9g0f12ygtphdszbb4scp
   region: us
   authentication:
     secret:
-      name: my-cloud-cluster-secret
+      name: my-cloud-environment-secret
       key: token
 ```
 
@@ -487,7 +487,7 @@ metadata:
 spec:
   restate:
     register:
-      cloud: my-cloud-cluster
+      cloud: my-cloud-environment
 ```
 
 

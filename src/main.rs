@@ -87,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
         metric.clone(),
         state.clone(),
     );
-    let cloud_cluster_controller = restate_operator::controllers::restatecloudcluster::run(
+    let cloud_environment_controller = restate_operator::controllers::restatecloudenvironment::run(
         client.clone(),
         metric.clone(),
         state.clone(),
@@ -96,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
         restate_operator::controllers::restatedeployment::run(client, metric, state.clone());
 
     tokio::pin!(cluster_controller);
-    tokio::pin!(cloud_cluster_controller);
+    tokio::pin!(cloud_environment_controller);
     tokio::pin!(deployment_controller);
 
     // Start web server
@@ -117,7 +117,7 @@ async fn main() -> anyhow::Result<()> {
     // Both runtimes implements graceful shutdown, so poll until both are done
     tokio::join!(
         cluster_controller,
-        cloud_cluster_controller,
+        cloud_environment_controller,
         deployment_controller,
         server
     )

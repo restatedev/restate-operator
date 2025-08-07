@@ -76,7 +76,7 @@ spec:
                       - url
                     properties:
                       cloud:
-                        description: The name of a RestateCloudCluster against which to register the deployment. Exactly one of `cluster`, `cloud`, `service` or `url` must be specified
+                        description: The name of a RestateCloudEnvironment against which to register the deployment. Exactly one of `cluster`, `cloud`, `service` or `url` must be specified
                         type: string
                       cluster:
                         description: The name of a RestateCluster against which to register the deployment. Exactly one of `cluster`, `cloud`, `service` or `url` must be specified

@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use url::Url;
 
-use crate::{controllers::service_url, resources::restatecloudclusters::RestateCloudCluster};
+use crate::{
+    controllers::service_url, resources::restatecloudenvironments::RestateCloudEnvironment,
+};
 
 pub static RESTATE_DEPLOYMENT_FINALIZER: &str = "deployments.restate.dev";
 
@@ -169,7 +171,7 @@ pub struct RestateAdminEndpoint {
     /// The name of a RestateCluster against which to register the deployment.
     /// Exactly one of `cluster`, `cloud`, `service` or `url` must be specified
     pub cluster: Option<String>,
-    /// The name of a RestateCloudCluster against which to register the deployment.
+    /// The name of a RestateCloudEnvironment against which to register the deployment.
     /// Exactly one of `cluster`, `cloud`, `service` or `url` must be specified
     pub cloud: Option<String>,
     /// A reference to a Service pointing against which to register the deployment.
@@ -184,7 +186,7 @@ impl Display for RestateAdminEndpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match (&self.cluster, &self.cloud, &self.service, &self.url) {
             (Some(cluster), _, _, _) => write!(f, "RestateCluster/{cluster}"),
-            (_, Some(cloud), _, _) => write!(f, "RestateCloudCluster/{cloud}"),
+            (_, Some(cloud), _, _) => write!(f, "RestateCloudEnvironment/{cloud}"),
             (_, _, Some(service), _) => write!(f, "Service/{}/{}", service.namespace, service.name),
             (_, _, _, Some(url)) => write!(f, "{url}"),
             _ => write!(f, "N/A"),
@@ -212,7 +214,7 @@ impl JsonSchema for RestateAdminEndpoint {
                     "type": "string"
                   },
                   "cloud": {
-                    "description": "The name of a RestateCloudCluster against which to register the deployment. Exactly one of `cluster`, `cloud`, `service` or `url` must be specified",
+                    "description": "The name of a RestateCloudEnvironment against which to register the deployment. Exactly one of `cluster`, `cloud`, `service` or `url` must be specified",
                     "type": "string"
                   },
                   "service": service_schema,
@@ -234,7 +236,7 @@ impl JsonSchema for RestateAdminEndpoint {
 }
 
 impl RestateAdminEndpoint {
-    pub fn admin_url(&self, rcc_store: &Store<RestateCloudCluster>) -> crate::Result<Url> {
+    pub fn admin_url(&self, rce_store: &Store<RestateCloudEnvironment>) -> crate::Result<Url> {
         match (
             self.cluster.as_deref(),
             self.cloud.as_deref(),
@@ -245,11 +247,11 @@ impl RestateAdminEndpoint {
                 Ok(service_url("restate", cluster, 9070, None)?)
             }
             (None, Some(cloud), None, None) => {
-                let Some(rcc) = rcc_store.get(&ObjectRef::new(cloud)) else {
-                    return Err(crate::Error::RestateCloudClusterNotFound(cloud.into()))
+                let Some(rce) = rce_store.get(&ObjectRef::new(cloud)) else {
+                    return Err(crate::Error::RestateCloudEnvironmentNotFound(cloud.into()))
                 };
 
-                Ok(rcc.admin_url()?)
+                Ok(rce.admin_url()?)
             }
             (None, None,Some(service), None) => Ok(service_url(&service.name, &service.namespace, service.port.unwrap_or(9070), service.path.as_deref())?),
             (None, None, None, Some(url)) => Ok(url.clone()),
@@ -262,7 +264,7 @@ impl RestateAdminEndpoint {
 
     pub fn service_url(
         &self,
-        rcc_store: &Store<RestateCloudCluster>,
+        rce_store: &Store<RestateCloudEnvironment>,
         service_name: &str,
         service_namespace: &str,
     ) -> crate::Result<Url> {
@@ -276,13 +278,13 @@ impl RestateAdminEndpoint {
                 Ok(service_url(service_name, service_namespace, 9080, None)?)
             }
             (None, Some(cloud), None, None) => {
-                let Some(rcc) = rcc_store.get(&ObjectRef::new(cloud)) else {
-                    return Err(crate::Error::RestateCloudClusterNotFound(cloud.into()))
+                let Some(rce) = rce_store.get(&ObjectRef::new(cloud)) else {
+                    return Err(crate::Error::RestateCloudEnvironmentNotFound(cloud.into()))
                 };
 
                 let service_url = service_url(service_name, service_namespace, 9080, None)?;
 
-                Ok(rcc.tunnel_url(service_url)?)
+                Ok(rce.tunnel_url(service_url)?)
             }
             _ => Err(crate::Error::InvalidRestateConfig(
                 "Exactly one of `cluster`, `cloud`, `service` or `url` must be specified in spec.restate"
@@ -293,16 +295,16 @@ impl RestateAdminEndpoint {
 
     pub fn bearer_token(
         &self,
-        rcc_store: &Store<RestateCloudCluster>,
+        rce_store: &Store<RestateCloudEnvironment>,
         secret_store: &Store<Secret>,
         operator_namespace: &str,
     ) -> crate::Result<Option<String>> {
         if let Some(cloud) = self.cloud.as_deref() {
-            let Some(rcc) = rcc_store.get(&ObjectRef::new(cloud)) else {
-                return Err(crate::Error::RestateCloudClusterNotFound(cloud.into()));
+            let Some(rce) = rce_store.get(&ObjectRef::new(cloud)) else {
+                return Err(crate::Error::RestateCloudEnvironmentNotFound(cloud.into()));
             };
 
-            Ok(Some(rcc.bearer_token(secret_store, operator_namespace)?))
+            Ok(Some(rce.bearer_token(secret_store, operator_namespace)?))
         } else {
             Ok(None)
         }

@@ -5,7 +5,7 @@ use serde::Serialize;
 use tokio::sync::RwLock;
 use url::Url;
 
-pub mod restatecloudcluster;
+pub mod restatecloudenvironment;
 pub mod restatecluster;
 pub mod restatedeployment;
 
