@@ -387,7 +387,7 @@ The `register` field must specify exactly one of `cluster`, `service`, or `url`.
 
 ### `RestateCloudEnvironment`
 
-The `RestateCloudEnvironment` CRD allows you to use the `RestateDeployment` feature with a Restate Cloud cluster. This resource describes a cloud environment, references a secret used to communicate with it, and manages a Deployment of tunnel pods in your Kubernetes cluster which allows Restate Cloud to call into your services without having to expose them over the public internet.
+The `RestateCloudEnvironment` CRD allows you to use the `RestateDeployment` feature with a Restate Cloud environment. This resource describes a cloud environment, references a secret used to communicate with it, and manages a Deployment of tunnel pods in your Kubernetes cluster which allows Restate Cloud to call into your services without having to expose them over the public internet.
 
 #### Minimal Example
 
@@ -413,7 +413,7 @@ spec:
 | `environmentId` | `string` | **Required**. The environment ID of your cluster, which begins with `env_`. |
 | `region` | `string` | **Required**. The short region identifier of your cluster, e.g., `us`, `eu`. |
 | `signingPublicKey` | `string` | **Required**. The request signing public key of your cluster, which begins `publickeyv1_`. It is not a secret. |
-| `authentication` | `object` | **Required**. Where to get credentials for communication with the Cloud cluster. See details below. |
+| `authentication` | `object` | **Required**. Where to get credentials for communication with the Cloud environment. See details below. |
 | `tunnel` | `object` | Optional configuration for the deployment of tunnel pods. See details below. |
 
 ---
