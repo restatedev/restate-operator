@@ -1,0 +1,104 @@
+/// Auto-generated derived type for RestateCloudEnvironmentSpec via `CustomResource`
+///
+/// This module was generated from the CustomResourceDefinition at
+/// <file:./crd/restatecloudenvironments.yaml>.
+module dev.restate.v1beta1.RestateCloudEnvironment
+
+extends "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/K8sResource.pkl"
+
+import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/apimachinery/pkg/apis/meta/v1/ObjectMeta.pkl"
+import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/PodSpec.pkl"
+import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/EnvVar.pkl"
+import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/ResourceRequirements.pkl"
+import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/Toleration.pkl"
+
+fixed apiVersion: "restate.dev/v1beta1"
+
+fixed kind: "RestateCloudEnvironment"
+
+/// Standard object's metadata.
+///
+/// More info: <https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata>.
+metadata: ObjectMeta?
+
+/// Represents the configuration of a Restate Cloud environment
+spec: Spec
+
+/// Represents the configuration of a Restate Cloud environment
+class Spec {
+  /// Where to get credentials for communication with the Cloud environment
+  authentication: Authentication
+
+  /// The ID of your environment, which begins `env_`
+  environmentId: String
+
+  /// The short region identifier of your environment, eg `us`, `eu`.
+  region: String
+
+  /// The request signing public key of your environment, which begins `publickeyv1_`. It is not a
+  /// secret.
+  signingPublicKey: String
+
+  /// Optional configuration for the deployment of tunnel pods
+  tunnel: Tunnel?
+}
+
+/// Where to get credentials for communication with the Cloud environment
+class Authentication {
+  /// Configured a reference to a secret in the same namespace as the operator
+  secret: Secret
+}
+
+/// Configured a reference to a secret in the same namespace as the operator
+class Secret {
+  /// The key to read from the referenced Secret
+  key: String
+
+  /// The name of the referenced secret. It must be in the same namespace as the operator.
+  name: String
+}
+
+/// Optional configuration for the deployment of tunnel pods
+class Tunnel {
+  /// If specified, pod affinity. Defaults to zone anti-affinity, provide {} to disable all affinity
+  affinity: PodSpec.Affinity?
+
+  /// Specifies the DNS parameters of the tunnel pod. Parameters specified here will be merged to the
+  /// generated DNS configuration based on DNSPolicy.
+  dnsConfig: PodSpec.PodDNSConfig?
+
+  /// Set DNS policy for the pod. Defaults to "ClusterFirst". Valid values are 'ClusterFirstWithHostNet',
+  /// 'ClusterFirst', 'Default' or 'None'. DNS parameters given in DNSConfig will be merged with the
+  /// policy selected with DNSPolicy.
+  dnsPolicy: String?
+
+  /// List of environment variables to set in the container; these may override defaults
+  env: Listing<EnvVar>?
+
+  /// Container image name. Defaults to a suggested version of the
+  /// ghcr.io/restatedev/restate-cloud-tunnel-client
+  image: String?
+
+  /// Image pull policy. One of Always, Never, IfNotPresent. Defaults to Always if :latest tag is
+  /// specified, or IfNotPresent otherwise. More info:
+  /// https://kubernetes.io/docs/concepts/containers/images#updating-images
+  imagePullPolicy: String?
+
+  /// If specified, a node selector for the pod
+  nodeSelector: Mapping<String, String>?
+
+  /// If true, the tunnel pods will expose unauthenticated access to the Restate Cloud environment on
+  /// ports 8080 (ingress) and 9070 (admin). Care should be taken to restrict inbound access to the
+  /// tunnel pods if this is set. Defaults to false.
+  remoteProxy: Boolean?
+
+  /// replicas is the desired number of tunnel pods. If unspecified, defaults to 1.
+  replicas: Int?
+
+  /// Compute Resources for the tunnel pods. More info:
+  /// https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+  resources: ResourceRequirements?
+
+  /// If specified, the pod's tolerations.
+  tolerations: Listing<Toleration>?
+}

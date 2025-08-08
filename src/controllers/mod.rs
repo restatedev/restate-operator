@@ -5,6 +5,7 @@ use serde::Serialize;
 use tokio::sync::RwLock;
 use url::Url;
 
+pub mod restatecloudenvironment;
 pub mod restatecluster;
 pub mod restatedeployment;
 
@@ -24,7 +25,7 @@ impl Default for Diagnostics {
 }
 
 /// State shared between the controller and the web server
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct State {
     /// Diagnostics populated by the reconciler
     pub diagnostics: Arc<RwLock<Diagnostics>>,
@@ -33,16 +34,37 @@ pub struct State {
     /// If set, watch AWS PodIdentityAssociation resources, and if requested create them against this cluster
     aws_pod_identity_association_cluster: Option<String>,
 
-    /// Our namespace, needed to support the case where restate clusters need to be reached by the operator
-    operator_namespace: Option<String>,
+    /// Our namespace, needed for network policies and reading secrets
+    operator_namespace: String,
     /// The name of a label that can select the operator, needed to support the case where restate clusters need to be reached by the operator
     operator_label_name: Option<String>,
     /// The value of the label named operator_label_name that will select the operator, needed to support the case where restate clusters need to be reached by the operator
     operator_label_value: Option<String>,
+
+    /// The default image to use for tunnel client pods
+    tunnel_client_default_image: String,
 }
 
 /// State wrapper around the controller outputs for the web server
 impl State {
+    pub fn new(
+        aws_pod_identity_association_cluster: Option<String>,
+        operator_namespace: String,
+        operator_label_name: Option<String>,
+        operator_label_value: Option<String>,
+        tunnel_client_default_image: String,
+    ) -> Self {
+        Self {
+            diagnostics: Arc::new(RwLock::new(Diagnostics::default())),
+            registry: prometheus::Registry::default(),
+            aws_pod_identity_association_cluster,
+            operator_namespace,
+            operator_label_name,
+            operator_label_value,
+            tunnel_client_default_image,
+        }
+    }
+
     /// Metrics getter
     pub fn metrics(&self) -> Vec<prometheus::proto::MetricFamily> {
         self.registry.gather()
@@ -51,37 +73,6 @@ impl State {
     /// State getter
     pub async fn diagnostics(&self) -> Diagnostics {
         self.diagnostics.read().await.clone()
-    }
-
-    pub fn with_aws_pod_identity_association_cluster(
-        self,
-        aws_pod_identity_association_cluster: Option<String>,
-    ) -> Self {
-        Self {
-            aws_pod_identity_association_cluster,
-            ..self
-        }
-    }
-
-    pub fn with_operator_namespace(self, operator_namespace: Option<String>) -> Self {
-        Self {
-            operator_namespace,
-            ..self
-        }
-    }
-
-    pub fn with_operator_label_name(self, operator_label_name: Option<String>) -> Self {
-        Self {
-            operator_label_name,
-            ..self
-        }
-    }
-
-    pub fn with_operator_label_value(self, operator_label_value: Option<String>) -> Self {
-        Self {
-            operator_label_value,
-            ..self
-        }
     }
 }
 

@@ -68,21 +68,25 @@ class Restate {
 
 /// The location of the Restate Admin API to register this deployment against
 class Register {
+  /// The name of a RestateCloudEnvironment against which to register the deployment. Exactly one of
+  /// `cluster`, `cloud`, `service` or `url` must be specified
+  cloud: String?
+
   /// The name of a RestateCluster against which to register the deployment. Exactly one of `cluster`,
-  /// `service` or `url` must be specified
+  /// `cloud`, `service` or `url` must be specified
   cluster: String?
 
   /// A reference to a Service pointing against which to register the deployment. Exactly one of
-  /// `cluster`, `service` or `url` must be specified
+  /// `cluster`, `cloud`, `service` or `url` must be specified
   service: Service?
 
   /// A url of the restate admin endpoint against which to register the deployment Exactly one of
-  /// `cluster`, `service` or `url` must be specified
+  /// `cluster`, `cloud`, `service` or `url` must be specified
   url: String?
 }
 
 /// A reference to a Service pointing against which to register the deployment. Exactly one of `cluster`,
-/// `service` or `url` must be specified
+/// `cloud`, `service` or `url` must be specified
 class Service {
   /// `name` is the name of the service. Required
   name: String
