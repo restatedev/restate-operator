@@ -437,6 +437,7 @@ spec:
 
 | Field | Type | Description |
 |---|---|---|
+| `remoteProxy` | `boolean` | If true, the tunnel pods will expose unauthenticated access to the Restate Cloud environment on ports 8080 and 9070. Defaults to false. |
 | `replicas` | `integer` | The desired number of tunnel pods. Defaults to 1. |
 | `image` | `string` | Container image name. Defaults to a suggested version of the ghcr.io/restatedev/restate-cloud-tunnel-client. |
 | `imagePullPolicy` | `string` | Image pull policy. One of `Always`, `Never`, `IfNotPresent`. Defaults to `Always` if `:latest` tag is specified, or `IfNotPresent` otherwise. |
@@ -448,7 +449,7 @@ spec:
 | `nodeSelector` | `object` | Node selector for the pod. |
 | `affinity` | `object` | Pod affinity. Defaults to zone anti-affinity, provide `{}` to disable all affinity. |
 
-All of these fields correspond to fields in a native `DeploymentSpec`. See the [official Kubernetes API documentation] (https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/deployment-v1/#DeploymentSpec).
+Most of these fields correspond to fields in a native `DeploymentSpec`. See the [official Kubernetes API documentation] (https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/deployment-v1/#DeploymentSpec).
 
 #### Setup Instructions
 
