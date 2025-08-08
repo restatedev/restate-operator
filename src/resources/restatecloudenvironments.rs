@@ -132,9 +132,13 @@ pub struct SecretReference {
     pub key: String,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
+#[derive(Deserialize, Serialize, Clone, Debug, CELSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TunnelSpec {
+    /// If true, the tunnel pods will expose unauthenticated access to the Restate Cloud environment on ports 8080 (ingress) and 9070 (admin).
+    /// Care should be taken to restrict inbound access to the tunnel pods if this is set. Defaults to false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_proxy: Option<bool>,
     /// replicas is the desired number of tunnel pods. If unspecified, defaults to 1.
     pub replicas: Option<i32>,
     /// Container image name. Defaults to a suggested version of the ghcr.io/restatedev/restate-cloud-tunnel-client

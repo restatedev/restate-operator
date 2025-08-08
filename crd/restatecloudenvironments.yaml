@@ -683,6 +683,10 @@ spec:
                     description: If specified, a node selector for the pod
                     type: object
                     x-kubernetes-map-type: atomic
+                  remoteProxy:
+                    description: If true, the tunnel pods will expose unauthenticated access to the Restate Cloud environment on ports 8080 (ingress) and 9070 (admin). Care should be taken to restrict inbound access to the tunnel pods if this is set. Defaults to false.
+                    nullable: true
+                    type: boolean
                   replicas:
                     description: replicas is the desired number of tunnel pods. If unspecified, defaults to 1.
                     format: int32
@@ -750,6 +754,7 @@ spec:
                     nullable: true
                     type: array
                 type: object
+                x-kubernetes-validations: []
             required:
             - authentication
             - environmentId

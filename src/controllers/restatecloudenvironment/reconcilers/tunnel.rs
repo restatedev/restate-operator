@@ -4,9 +4,10 @@ use k8s_openapi::{
     api::{
         apps::v1::{Deployment, DeploymentSpec},
         core::v1::{
-            Container, EnvVar, HTTPGetAction, KeyToPath, PodSecurityContext, PodSpec,
-            PodTemplateSpec, Probe, ResourceRequirements, SeccompProfile, SecretVolumeSource,
-            SecurityContext, Volume, VolumeMount,
+            Container, ContainerPort, EnvVar, HTTPGetAction, KeyToPath, PodSecurityContext,
+            PodSpec, PodTemplateSpec, Probe, ResourceRequirements, SeccompProfile,
+            SecretVolumeSource, SecurityContext, Service, ServicePort, ServiceSpec, Volume,
+            VolumeMount,
         },
     },
     apimachinery::pkg::{api::resource::Quantity, util::intstr::IntOrString},
@@ -43,12 +44,22 @@ fn default_resources() -> ResourceRequirements {
 const BEARER_TOKEN_MOUNT_PATH: &str = "/restate-bearer-token";
 
 fn env(tunnel_name: &str, spec: &RestateCloudEnvironmentSpec) -> Vec<EnvVar> {
+    let remote_proxy = spec
+        .tunnel
+        .as_ref()
+        .and_then(|t| t.remote_proxy)
+        .unwrap_or_default();
+
     let defaults = [
         ("RESTATE_TUNNEL_NAME", tunnel_name),
         ("RESTATE_SIGNING_PUBLIC_KEY", &spec.signing_public_key),
         ("RESTATE_ENVIRONMENT_ID", &spec.environment_id),
         ("RESTATE_CLOUD_REGION", &spec.region),
         ("RESTATE_BEARER_TOKEN_FILE", BEARER_TOKEN_MOUNT_PATH),
+        (
+            "RESTATE_REMOTE_PROXY",
+            if remote_proxy { "true" } else { "false" },
+        ),
         ("RUST_BACKTRACE", "1"),
         ("RUST_LIB_BACKTRACE", "0"),
         ("RUST_LOG", "info"),
@@ -90,6 +101,32 @@ fn tunnel_deployment(
 
     let env = env(tunnel_name, spec);
 
+    let ports = if tunnel.and_then(|t| t.remote_proxy).unwrap_or_default() {
+        vec![
+            ContainerPort {
+                name: Some("ingress".into()),
+                container_port: 8080,
+                ..Default::default()
+            },
+            ContainerPort {
+                name: Some("admin".into()),
+                container_port: 9070,
+                ..Default::default()
+            },
+            ContainerPort {
+                name: Some("health".into()),
+                container_port: 9090,
+                ..Default::default()
+            },
+        ]
+    } else {
+        vec![ContainerPort {
+            name: Some("health".into()),
+            container_port: 9090,
+            ..Default::default()
+        }]
+    };
+
     Deployment {
         metadata,
         spec: Some(DeploymentSpec {
@@ -124,6 +161,7 @@ fn tunnel_deployment(
                             }),
                             ..Default::default()
                         }),
+                        ports: Some(ports),
                         resources: Some(
                             tunnel
                                 .and_then(|t| t.resources.clone())
@@ -179,6 +217,48 @@ fn tunnel_deployment(
     }
 }
 
+fn tunnel_service(base_metadata: &ObjectMeta, remote_proxy: bool) -> Service {
+    let metadata = object_meta(base_metadata);
+
+    let ports = if remote_proxy {
+        vec![
+            ServicePort {
+                app_protocol: Some("kubernetes.io/h2c".into()),
+                port: 8080,
+                name: Some("ingress".into()),
+                ..Default::default()
+            },
+            ServicePort {
+                app_protocol: Some("kubernetes.io/h2c".into()),
+                port: 9070,
+                name: Some("admin".into()),
+                ..Default::default()
+            },
+            ServicePort {
+                port: 9090,
+                name: Some("health".into()),
+                ..Default::default()
+            },
+        ]
+    } else {
+        vec![ServicePort {
+            port: 9090,
+            name: Some("health".into()),
+            ..Default::default()
+        }]
+    };
+
+    Service {
+        metadata,
+        spec: Some(ServiceSpec {
+            selector: label_selector(base_metadata).match_labels,
+            ports: Some(ports),
+            ..Default::default()
+        }),
+        status: None,
+    }
+}
+
 async fn apply_deployment(
     namespace: &str,
     dp_api: &Api<Deployment>,
@@ -191,6 +271,14 @@ async fn apply_deployment(
     Ok(())
 }
 
+async fn apply_service(namespace: &str, svc_api: &Api<Service>, svc: Service) -> Result<(), Error> {
+    let name = svc.metadata.name.as_ref().unwrap();
+    let params: PatchParams = PatchParams::apply("restate-operator").force();
+    debug!("Applying Service {} in namespace {}", name, namespace);
+    svc_api.patch(name, &params, &Patch::Apply(&svc)).await?;
+    Ok(())
+}
+
 pub async fn reconcile_tunnel(
     ctx: &Context,
     namespace: &str,
@@ -199,6 +287,7 @@ pub async fn reconcile_tunnel(
     spec: &RestateCloudEnvironmentSpec,
 ) -> Result<(), Error> {
     let dp_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), namespace);
+    let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), namespace);
 
     apply_deployment(
         namespace,
@@ -208,6 +297,19 @@ pub async fn reconcile_tunnel(
             tunnel_name,
             spec,
             &ctx.tunnel_client_default_image,
+        ),
+    )
+    .await?;
+
+    apply_service(
+        namespace,
+        &svc_api,
+        tunnel_service(
+            base_metadata,
+            spec.tunnel
+                .as_ref()
+                .and_then(|t| t.remote_proxy)
+                .unwrap_or_default(),
         ),
     )
     .await?;
