@@ -155,30 +155,37 @@ fn safe_encode_u32(mut val: u32) -> String {
 }
 
 /// Delete ReplicaSets that are no longer needed
+#[allow(clippy::too_many_arguments)]
 pub async fn cleanup_old_replicasets(
     namespace: &str,
     rs_api: &Api<ReplicaSet>,
     replicasets_store: &Store<ReplicaSet>,
     http_client: &reqwest::Client,
     admin_endpoint: &Url,
-    rsd: &RestateDeployment,
+    rsd_uid: &str,
+    revision_history_limit: i32,
     deployments: &HashMap<String, bool>,
 ) -> Result<(i32, Option<chrono::DateTime<chrono::Utc>>)> {
-    let owner_name = rsd.name_any();
-
     let replicasets_cell = std::cell::Cell::new(Vec::new());
 
     let _ = replicasets_store.find(|rs| {
-        if rs
-            .labels()
-            .get(OWNED_BY_LABEL)
-            .is_some_and(|o| o == &owner_name)
-        {
-            // for some reason find only takes a Fn, not FnMut.
-            let mut replicasets = replicasets_cell.take();
-            replicasets.push(rs.clone());
-            replicasets_cell.set(replicasets);
+        // replicasets in the same ns
+        if rs.metadata.namespace.as_deref() != Some(namespace) {
+            return false;
         }
+
+        // replicasets owned by this restatedeployment (we make no attempt to handle orphaned ones if a rsd was deleted with --cascade=orphan and then recreated)
+        if !rs.owner_references().iter().any(|reference| {
+            reference.uid == rsd_uid && reference.kind == RestateDeployment::kind(&())
+        }) {
+            return false;
+        };
+
+        // for some reason find only takes a Fn, not FnMut.
+        let mut replicasets = replicasets_cell.take();
+        replicasets.push(rs.clone());
+        replicasets_cell.set(replicasets);
+
         false
     });
 
@@ -296,7 +303,7 @@ pub async fn cleanup_old_replicasets(
                 }
 
                 // If we are here, there is a 0 sized replicaset which should be subject to the history limit
-                if historic_count < rsd.spec.revision_history_limit {
+                if historic_count < revision_history_limit {
                     historic_count += 1;
                     // we haven't hit that limit yet, so we don't need to delete this rs
                     continue;
