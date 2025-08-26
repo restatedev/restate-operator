@@ -52,6 +52,12 @@ class Compute {
   /// Affinity is a group of affinity scheduling rules.
   affinity: PodSpec.Affinity?
 
+  /// Entrypoint array. Not executed within a shell. The container image's ENTRYPOINT is used if this is not provided.
+  command: Listing<String>?
+
+  /// Arguments to the entrypoint. The container image's CMD is used if this is not provided.
+  args: Listing<String>?
+
   /// Specifies the DNS parameters of the Restate pod. Parameters specified here will be merged to the
   /// generated DNS configuration based on DNSPolicy.
   dnsConfig: PodSpec.PodDNSConfig?
