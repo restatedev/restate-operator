@@ -110,6 +110,9 @@ pub struct RestateClusterStorage {
     #[schemars(range(min = 1))]
     #[cel_validate(rule = Rule::new("self >= oldSelf").message("storageRequestBytes cannot be decreased"))]
     pub storage_request_bytes: i64,
+    /// volumeAttributesClassName may be used to set the VolumeAttributesClass used by this claim.
+    #[schemars(default)]
+    pub volume_attributes_class_name: Option<String>,
 }
 
 /// Compute configuration

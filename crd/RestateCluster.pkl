@@ -180,6 +180,9 @@ class Storage {
   /// storageRequestBytes is the amount of storage to request in volume claims. It is allowed to increase
   /// but not decrease.
   storageRequestBytes: Int(this >= 1.0)
+
+  /// volumeAttributesClassName may be used to set the VolumeAttributesClass used by this claim.
+  volumeAttributesClassName: String?
 }
 
 /// Status of the RestateCluster. This is set and managed automatically. Read-only. More info:

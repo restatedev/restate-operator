@@ -1247,6 +1247,10 @@ spec:
                     x-kubernetes-validations:
                     - message: storageRequestBytes cannot be decreased
                       rule: self >= oldSelf
+                  volumeAttributesClassName:
+                    description: volumeAttributesClassName may be used to set the VolumeAttributesClass used by this claim.
+                    nullable: true
+                    type: string
                 required:
                 - storageRequestBytes
                 type: object

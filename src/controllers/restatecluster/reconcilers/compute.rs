@@ -420,6 +420,7 @@ fn restate_statefulset(
                 },
                 spec: Some(PersistentVolumeClaimSpec {
                     storage_class_name: spec.storage.storage_class_name.clone(),
+                    volume_attributes_class_name: spec.storage.volume_attributes_class_name.clone(),
                     access_modes: Some(vec!["ReadWriteOnce".into()]),
                     resources: Some(restate_pvc_resources(&spec.storage)),
                     ..Default::default()
@@ -583,7 +584,7 @@ pub async fn reconcile_compute(
     )
     .await?;
 
-    resize_statefulset_storage(
+    change_statefulset_storage(
         namespace,
         base_metadata,
         &ss_api,
@@ -877,7 +878,7 @@ async fn delete_security_group_policy(
     }
 }
 
-async fn resize_statefulset_storage(
+async fn change_statefulset_storage(
     namespace: &str,
     base_metadata: &ObjectMeta,
     ss_api: &Api<StatefulSet>,
@@ -889,7 +890,7 @@ async fn resize_statefulset_storage(
     let params: PatchParams = PatchParams::apply("restate-operator").force();
     let resources = Some(restate_pvc_resources(storage));
 
-    // ensure all existing pvcs have the right size set
+    // ensure all existing pvcs have the right size and VAC set
     // first, filter the pvc meta store for our label selector
     let labels = mandatory_labels(base_metadata);
     let pvcs = pvc_meta_store.state().into_iter().filter(|pvc_meta| {
@@ -908,6 +909,16 @@ async fn resize_statefulset_storage(
             name, namespace
         );
 
+        let mut patched_spec = PersistentVolumeClaimSpec {
+            resources: resources.clone(),
+            ..Default::default()
+        };
+
+        // if we don't have a particular vac to set, don't update an existing one as it can be defaulted by the CSI driver
+        if let Some(volume_attributes_class_name) = &storage.volume_attributes_class_name {
+            patched_spec.volume_attributes_class_name = Some(volume_attributes_class_name.clone());
+        }
+
         let pvc = pvc_api
             .patch(
                 &name,
@@ -917,10 +928,7 @@ async fn resize_statefulset_storage(
                         name: Some(name.clone()),
                         ..Default::default()
                     },
-                    spec: Some(PersistentVolumeClaimSpec {
-                        resources: resources.clone(),
-                        ..Default::default()
-                    }),
+                    spec: Some(patched_spec),
                     status: None,
                 }),
             )
@@ -947,23 +955,38 @@ async fn resize_statefulset_storage(
         None => return Ok(()),
     };
 
-    let existing_storage_request = existing
+    let existing_storage_spec = existing
         .spec
         .as_ref()
         .and_then(|spec| spec.volume_claim_templates.as_ref())
         .and_then(|templates| templates.first())
-        .and_then(|storage| storage.spec.as_ref())
+        .and_then(|storage| storage.spec.as_ref());
+
+    let existing_storage_request = existing_storage_spec
         .and_then(|spec| spec.resources.as_ref())
         .and_then(|resources| resources.requests.as_ref())
         .and_then(|requests| requests.get("storage").map(|storage| storage.to_bytes()));
 
+    let existing_vac =
+        existing_storage_spec.and_then(|spec| spec.volume_attributes_class_name.as_deref());
+
     match existing_storage_request {
-        // check if we can interpret the statefulset as having the same storage request
-        Some(Ok(Some(bytes))) if bytes == storage.storage_request_bytes => return Ok(()),
+        // check if we can interpret the statefulset as having the same storage request and the same vac
+        Some(Ok(Some(bytes)))
+            if bytes == storage.storage_request_bytes
+                && existing_vac == storage.volume_attributes_class_name.as_deref() =>
+        {
+            return Ok(())
+        }
         _ => {}
     }
 
-    // expansion case - we would have failed when updating the pvcs if this was a contraction
+    debug!(
+        "Deleting (with orphan propagation policy) StatefulSet {} in namespace {}",
+        RESTATE_STATEFULSET_NAME, namespace
+    );
+
+    // expansion case or vac change case - we would have failed when updating the pvcs if this was a contraction
     // we have already updated the pvcs, we just need to delete and recreate the statefulset
     // we *must* delete with an orphan propagation policy; this means the deletion will *not* cascade down
     // to the pods that this statefulset owns.
@@ -973,9 +996,9 @@ async fn resize_statefulset_storage(
             RESTATE_STATEFULSET_NAME,
             &DeleteParams {
                 propagation_policy: Some(PropagationPolicy::Orphan),
+                grace_period_seconds: Some(0),
                 preconditions: Some(Preconditions {
-                    // resources are immutable; but if someone deleted and recreated it with different resources,
-                    // we don't want to delete it, hence the uid precondition
+                    // ensure that the ss hasn't changed since we made the above checks
                     uid: existing.uid(),
                     resource_version: None,
                 }),
