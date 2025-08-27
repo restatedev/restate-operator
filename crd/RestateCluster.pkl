@@ -8,6 +8,7 @@ extends "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/K8sResource.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/apimachinery/pkg/apis/meta/v1/ObjectMeta.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/PodSpec.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/EnvVar.pkl"
+import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/LocalObjectReference.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/ResourceRequirements.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/Toleration.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/networking/v1/NetworkPolicy.pkl"
@@ -70,6 +71,10 @@ class Compute {
   /// specified, or IfNotPresent otherwise. More info:
   /// https://kubernetes.io/docs/concepts/containers/images#updating-images
   imagePullPolicy: String?
+
+  /// Optional list of references to secrets in the same namespace to use for pulling the image. More
+  /// info: https://kubernetes.io/docs/concepts/containers/images#specifying-imagepullsecrets-on-a-pod
+  imagePullSecrets: Listing<LocalObjectReference>?
 
   /// If specified, a node selector for the pod
   nodeSelector: Mapping<String, String>?

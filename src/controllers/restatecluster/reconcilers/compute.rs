@@ -350,6 +350,7 @@ fn restate_statefulset(
                     automount_service_account_token: Some(false),
                     dns_policy: spec.compute.dns_policy.clone(),
                     dns_config: spec.compute.dns_config.clone(),
+                    image_pull_secrets: spec.compute.image_pull_secrets.clone(),
                     containers: vec![Container {
                         name: "restate".into(),
                         image: Some(spec.compute.image.clone()),
