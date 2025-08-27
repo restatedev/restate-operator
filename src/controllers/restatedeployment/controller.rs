@@ -195,6 +195,8 @@ impl RestateDeployment {
         )
         .await;
 
+        let my_uid = self.uid().expect("RestateDeployment to have a uid");
+
         let replicaset = match reconcile_result {
             Ok(replicaset) => replicaset,
             Err(Error::KubeError(kube::Error::Api(err))) if err.reason == "AlreadyExists" => {
@@ -209,8 +211,6 @@ impl RestateDeployment {
                 let existing_pod_template_annotation = existing_replicaset
                     .annotations()
                     .get(RESTATE_POD_TEMPLATE_ANNOTATION);
-
-                let my_uid = self.uid().expect("RestateDeployment to have a uid");
 
                 if controller.as_ref().map(|c| c.uid.as_str()) == Some(my_uid.as_str())
                     && existing_pod_template_annotation == Some(&pod_template_annotation)
@@ -353,7 +353,8 @@ impl RestateDeployment {
             &ctx.replicasets_store,
             &ctx.http_client,
             &admin_endpoint,
-            self,
+            &my_uid,
+            self.spec.revision_history_limit,
             &deployments,
         )
         .await?;
@@ -624,13 +625,16 @@ impl RestateDeployment {
             .list_deployments(&ctx.http_client, &admin_endpoint)
             .await?;
 
+        let my_uid = self.uid().expect("RestateDeployment to have a uid");
+
         let (active_count, next_removal) = reconcilers::replicaset::cleanup_old_replicasets(
             namespace,
             &rs_api,
             &ctx.replicasets_store,
             &ctx.http_client,
             &admin_endpoint,
-            self,
+            &my_uid,
+            self.spec.revision_history_limit,
             &deployments,
         )
         .await?;
