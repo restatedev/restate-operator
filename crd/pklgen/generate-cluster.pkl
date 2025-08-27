@@ -5,12 +5,14 @@ import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/PodSpec.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/networking/v1/NetworkPolicy.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/EnvVar.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/Toleration.pkl"
+import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/LocalObjectReference.pkl"
 
 source = "file:./crd/restateclusters.yaml"
 
 converters {
   ["restateclusters.restate.dev"] {
     [List("spec", "compute", "env", "env")] = EnvVar
+    [List("spec", "compute", "imagePullSecrets", "imagePullSecret")] = LocalObjectReference
     [List("spec", "compute", "resources")] = ResourceRequirements
     [List("spec", "compute", "dnsConfig")] = PodSpec.PodDNSConfig
     [List("spec", "compute", "affinity")] = PodSpec.Affinity
