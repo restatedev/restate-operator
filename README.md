@@ -105,6 +105,7 @@ More examples are available just below the spec that follows.
 | `replicas` | `integer` | The desired number of Restate nodes. Defaults to 1. |
 | `image` | `string` | **Required**. Container image name. |
 | `imagePullPolicy` | `string` | Image pull policy. One of `Always`, `Never`, `IfNotPresent`. Defaults to `Always` if `:latest` tag is specified, or `IfNotPresent` otherwise. |
+| `imagePullSecrets` | `array` | Optional list of references to secrets in the same namespace to use for pulling the image. |
 | `resources` | `object` | Compute Resources for the Restate container. e.g., `requests` and `limits` for `cpu` and `memory`. |
 | `env` | `array` | List of environment variables to set in the container. |
 | `affinity` | `object` | Standard Kubernetes affinity rules. |
@@ -121,6 +122,7 @@ More examples are available just below the spec that follows.
 |---|---|---|
 | `storageRequestBytes` | `integer` | **Required**. Amount of storage to request in volume claims. Can be increased but not decreased. |
 | `storageClassName` | `string` | The name of the `StorageClass` for the volume claims. This field is immutable. |
+| `volumeAttributesClassName` | `string` | The name of the `VolumeAttributesClass` for the volume claims. |
 
 ---
 
