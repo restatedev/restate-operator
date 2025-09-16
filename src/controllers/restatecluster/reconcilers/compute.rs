@@ -355,6 +355,8 @@ fn restate_statefulset(
                         name: "restate".into(),
                         image: Some(spec.compute.image.clone()),
                         image_pull_policy: spec.compute.image_pull_policy.clone(),
+                        command: spec.compute.command.clone(),
+                        args: spec.compute.args.clone(),
                         env: Some(env),
                         ports: Some(vec![
                             ContainerPort {

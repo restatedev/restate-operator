@@ -77,3 +77,11 @@ build *flags:
 
 docker:
     docker build . -f docker/Dockerfile --tag={{ image }} --progress='{{ DOCKER_PROGRESS }}' --load
+
+fmt:
+    cargo fmt --all
+
+lint:
+    cargo clippy
+
+check: fmt lint

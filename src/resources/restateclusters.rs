@@ -123,6 +123,10 @@ pub struct RestateClusterCompute {
     pub replicas: Option<i32>,
     /// Container image name. More info: https://kubernetes.io/docs/concepts/containers/images.
     pub image: String,
+    /// Entrypoint array. Not executed within a shell. The container image's ENTRYPOINT is used if this is not provided.
+    pub command: Option<Vec<String>>,
+    /// Arguments to the entrypoint. The container image's CMD is used if this is not provided.
+    pub args: Option<Vec<String>>,
     /// Image pull policy. One of Always, Never, IfNotPresent. Defaults to Always if :latest tag is specified, or IfNotPresent otherwise. More info: https://kubernetes.io/docs/concepts/containers/images#updating-images
     pub image_pull_policy: Option<String>,
     /// Optional list of references to secrets in the same namespace to use for pulling the image.
