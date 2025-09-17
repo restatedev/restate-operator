@@ -381,6 +381,7 @@ fn restate_statefulset(
                                 path: Some("/health".into()),
                                 ..Default::default()
                             }),
+                            initial_delay_seconds: Some(30),
                             ..Default::default()
                         }),
                         resources: spec.compute.resources.clone(),
