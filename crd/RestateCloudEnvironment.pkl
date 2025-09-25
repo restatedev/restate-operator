@@ -1,4 +1,5 @@
-/// Auto-generated derived type for RestateCloudEnvironmentSpec via `CustomResource`
+/// RestateCloudEnvironment configures a connection between this Kubernetes cluster and a Restate Cloud
+/// Environment.
 ///
 /// This module was generated from the CustomResourceDefinition at
 /// <file:./crd/restatecloudenvironments.yaml>.

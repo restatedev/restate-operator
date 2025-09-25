@@ -115,7 +115,7 @@ impl RestateCloudEnvironment {
         let oref = self.controller_owner_ref(&()).unwrap();
 
         let base_metadata = ObjectMeta {
-            name: Some(name.into()),
+            name: Some(format!("tunnel-{name}")),
             namespace: Some(ctx.operator_namespace.clone()),
             labels: Some(self.labels().clone()),
             annotations: Some(self.annotations().clone()),

@@ -52,11 +52,12 @@ class Compute {
   /// If specified, pod affinity
   affinity: PodSpec.Affinity?
 
-  /// Entrypoint array. Not executed within a shell. The container image's ENTRYPOINT is used if this is not provided.
-  command: Listing<String>?
-
   /// Arguments to the entrypoint. The container image's CMD is used if this is not provided.
   args: Listing<String>?
+
+  /// Entrypoint array. Not executed within a shell. The container image's ENTRYPOINT is used if this is
+  /// not provided.
+  command: Listing<String>?
 
   /// Specifies the DNS parameters of the Restate pod. Parameters specified here will be merged to the
   /// generated DNS configuration based on DNSPolicy.
