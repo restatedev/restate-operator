@@ -42,7 +42,7 @@ struct Arguments {
         long = "tunnel-client-default-image",
         env = "OPERATOR_TUNNEL_CLIENT_DEFAULT_IMAGE",
         value_name = "IMAGE",
-        default_value = "ghcr.io/restatedev/restate-cloud-tunnel-client:0.4.0"
+        default_value = "ghcr.io/restatedev/restate-cloud-tunnel-client:0.4.1"
     )]
     tunnel_client_default_image: String,
 }
