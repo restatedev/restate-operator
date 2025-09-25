@@ -174,7 +174,7 @@ pub struct RestateAdminEndpoint {
     /// The name of a RestateCloudEnvironment against which to register the deployment.
     /// Exactly one of `cluster`, `cloud`, `service` or `url` must be specified
     pub cloud: Option<String>,
-    /// A reference to a Service pointing against which to register the deployment.
+    /// A reference to a Service against which to register the deployment.
     /// Exactly one of `cluster`, `cloud`, `service` or `url` must be specified
     pub service: Option<ServiceReference>,
     /// A url of the restate admin endpoint against which to register the deployment
