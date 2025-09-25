@@ -77,7 +77,7 @@ metadata:
   name: restate-test
 spec:
   compute:
-    image: restatedev/restate:1.4
+    image: restatedev/restate:1.5
   storage:
     storageRequestBytes: 2147483648 # 2 GiB
 ```
@@ -210,7 +210,7 @@ metadata:
 spec:
   compute:
     replicas: 3
-    image: restatedev/restate:1.4
+    image: restatedev/restate:1.5
   storage:
     storageRequestBytes: 2147483648 # 2 GiB
   config: |
@@ -231,7 +231,7 @@ spec:
     type = "replicated"
 
     [metadata-client]
-    addresses = ["http://restate:5122/"]
+    addresses = ["http://restate-cluster:5122/"]
 
     [bifrost]
     default-provider = "replicated"
@@ -239,7 +239,9 @@ spec:
 
 #### Advanced Example
 
-> ⚠️ **Supported object stores for metadata:** Only AWS S3 and Minio are currently tested and supported as metadata backends.
+> ⚠️ **Supported object stores for metadata:** Only AWS S3 is currently tested and supported as a metadata backend.
+  We are aware of issues with GCS and with MinIO's consistency models that make them an unsafe choice for metadata,
+  but they can be used for snapshots where consistency is not needed.
 
 An example `RestateCluster` with 3 nodes using S3 for metadata and [snapshots](https://docs.restate.dev/operate/snapshots/):
 
@@ -251,7 +253,7 @@ metadata:
 spec:
   compute:
     replicas: 3
-    image: restatedev/restate:1.4
+    image: restatedev/restate:1.5
   storage:
     storageRequestBytes: 2147483648 # 2 GiB
   security:

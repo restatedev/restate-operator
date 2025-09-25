@@ -1,6 +1,10 @@
 # MinIO Configuration Example
 
-To configure a `RestateCluster` with a self-hosted S3-compatible object store like [MinIO](https://min.io/), you can point the server to your MinIO instance. For security, it's best to create a dedicated service account with credentials scoped only to the buckets Restate needs.
+To configure a `RestateCluster` to send snapshots to self-hosted S3-compatible object store like [MinIO](https://min.io/), you can point the server to your MinIO instance. For security, it's best to create a dedicated service account with credentials scoped only to the buckets Restate needs.
+
+> ⚠️ **Supported object stores for metadata:** Only AWS S3 is currently tested and supported as a metadata backend.
+  MinIO cannot be used for metadata as it breaks certain consistency properties when read quorum is lost.
+  MinIO should only be used for storing snapshots, which have no consistency requirements.
 
 ## 1. Create a Scoped Access Key & Buckets
 
@@ -32,7 +36,6 @@ cat <<EOF | mc admin policy add local-minio restate-s3-policy
         "s3:ListBucket"
       ],
       "Resource": [
-        "arn:aws:s3:::restate-metadata",
         "arn:aws:s3:::restate-snapshots"
       ]
     },
@@ -43,7 +46,6 @@ cat <<EOF | mc admin policy add local-minio restate-s3-policy
         "s3:GetObject",
       ],
       "Resource": [
-        "arn:aws:s3:::restate-metadata/*",
         "arn:aws:s3:::restate-snapshots/*"
       ]
     }
@@ -93,18 +95,8 @@ metadata:
 spec:
   compute:
     replicas: 3
-    image: restatedev/restate:1.4
+    image: restatedev/restate:1.5
     env:
-    - name: RESTATE_METADATA_CLIENT__AWS_ACCESS_KEY_ID
-      valueFrom:
-        secretKeyRef:
-          name: minio-credentials
-          key: access-key
-    - name: RESTATE_METADATA_CLIENT__AWS_SECRET_ACCESS_KEY
-      valueFrom:
-        secretKeyRef:
-          name: minio-credentials
-          key: secret-key
     - name: RESTATE_WORKER__SNAPSHOTS__AWS_ACCESS_KEY_ID
       valueFrom:
         secretKeyRef:
@@ -124,17 +116,18 @@ spec:
   storage:
     storageRequestBytes: 2147483648 # 2 GiB
   config: |
-    roles = [ "worker", "admin", "log-server", "http-ingress" ]
-    auto-provision = true
+    roles = [ "worker", "admin", "log-server", "metadata-server" , "http-ingress" ]
+    # auto-provision should not be turned on when using the raft metadata store
+    # provision with kubectl -n restate-test exec -it restate-0 -- restatectl provision
+    auto-provision = false
     default-num-partitions = 128
     default-replication = 2
 
+    [metadata-server]
+    type = "replicated"
+
     [metadata-client]
-    type = "object-store"
-    path = "s3://restate-metadata/metadata"
-    aws-endpoint-url = "http://minio.minio-namespace.svc.cluster.local:9000"
-    aws-allow-http = true
-    aws-region = "local"
+    addresses = ["http://restate-cluster:5122/"]
 
     [bifrost]
     default-provider = "replicated"
