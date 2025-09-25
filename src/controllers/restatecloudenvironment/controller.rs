@@ -114,11 +114,15 @@ impl RestateCloudEnvironment {
     async fn reconcile(&self, ctx: Arc<Context>, name: &str) -> Result<Action> {
         let oref = self.controller_owner_ref(&()).unwrap();
 
+        let mut annotations = self.annotations().clone();
+        // if this is set on the rce, don't propagate it
+        annotations.remove("kubectl.kubernetes.io/last-applied-configuration");
+
         let base_metadata = ObjectMeta {
             name: Some(format!("tunnel-{name}")),
             namespace: Some(ctx.operator_namespace.clone()),
             labels: Some(self.labels().clone()),
-            annotations: Some(self.annotations().clone()),
+            annotations: Some(annotations),
             owner_references: Some(vec![oref.clone()]),
             ..Default::default()
         };
