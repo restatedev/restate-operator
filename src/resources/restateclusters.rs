@@ -144,10 +144,10 @@ pub struct RestateClusterCompute {
     pub dns_policy: Option<String>,
     /// If specified, the pod's tolerations.
     pub tolerations: Option<Vec<Toleration>>,
-    // If specified, a node selector for the pod
+    /// If specified, a node selector for the pod
     #[schemars(default, schema_with = "node_selector_schema")]
     pub node_selector: Option<BTreeMap<String, String>>,
-    // If specified, pod affinity
+    /// If specified, pod affinity
     pub affinity: Option<Affinity>,
 }
 

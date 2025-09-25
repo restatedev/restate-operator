@@ -1,6 +1,6 @@
 [package]
 name = "restate-operator"
-version = "1.7.5"
+version = "1.7.6-alpha1"
 authors = ["restate.dev"]
 edition = "2021"
 rust-version = "1.86"
@@ -32,6 +32,16 @@ path = "src/bin/deployment_crdgen.rs"
 doc = false
 name = "deployment_schemagen"
 path = "src/bin/deployment_schemagen.rs"
+
+[[bin]]
+doc = false
+name = "cloud_crdgen"
+path = "src/bin/cloud_crdgen.rs"
+
+[[bin]]
+doc = false
+name = "cloud_schemagen"
+path = "src/bin/cloud_schemagen.rs"
 
 [lib]
 name = "restate_operator"

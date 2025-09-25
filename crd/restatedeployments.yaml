@@ -69,15 +69,20 @@ spec:
                     - required:
                       - cluster
                     - required:
+                      - cloud
+                    - required:
                       - service
                     - required:
                       - url
                     properties:
+                      cloud:
+                        description: The name of a RestateCloudEnvironment against which to register the deployment. Exactly one of `cluster`, `cloud`, `service` or `url` must be specified
+                        type: string
                       cluster:
-                        description: The name of a RestateCluster against which to register the deployment. Exactly one of `cluster`, `service` or `url` must be specified
+                        description: The name of a RestateCluster against which to register the deployment. Exactly one of `cluster`, `cloud`, `service` or `url` must be specified
                         type: string
                       service:
-                        description: A reference to a Service pointing against which to register the deployment. Exactly one of `cluster`, `service` or `url` must be specified
+                        description: A reference to a Service pointing against which to register the deployment. Exactly one of `cluster`, `cloud`, `service` or `url` must be specified
                         properties:
                           name:
                             description: '`name` is the name of the service. Required'
@@ -101,7 +106,7 @@ spec:
                         - namespace
                         type: object
                       url:
-                        description: A url of the restate admin endpoint against which to register the deployment Exactly one of `cluster`, `service` or `url` must be specified
+                        description: A url of the restate admin endpoint against which to register the deployment Exactly one of `cluster`, `cloud`, `service` or `url` must be specified
                         type: string
                     type: object
                   servicePath:

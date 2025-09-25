@@ -62,7 +62,7 @@ pub(super) struct Context {
     // If set, watch PodIdentityAssociation resources, and if requested create them against this cluster
     pub aws_pod_identity_association_cluster: Option<String>,
     // Our namespace, needed to support the case where restate clusters need to be reached by the operator
-    pub operator_namespace: Option<String>,
+    pub operator_namespace: String,
     // The name of a label that can select the operator, needed to support the case where restate clusters need to be reached by the operator
     pub operator_label_name: Option<String>,
     // The value of the label named operator_label_name that will select the operator, needed to support the case where restate clusters need to be reached by the operator

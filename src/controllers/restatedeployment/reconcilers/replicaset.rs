@@ -7,14 +7,13 @@ use kube::api::{
     Api, ApiResource, DynamicObject, PartialObjectMetaExt, Patch, PatchParams, PostParams,
 };
 use kube::core::subresource::Scale;
-use kube::runtime::reflector::Store;
 use kube::{Resource, ResourceExt};
+use reqwest::Method;
 use serde_json::json;
 use tracing::*;
-use url::Url;
 
 use crate::controllers::restatedeployment::controller::{
-    APP_MANAGED_BY_LABEL, OWNED_BY_LABEL, RESTATE_DEPLOYMENT_ID_ANNOTATION,
+    Context, APP_MANAGED_BY_LABEL, OWNED_BY_LABEL, RESTATE_DEPLOYMENT_ID_ANNOTATION,
 };
 use crate::resources::restatedeployments::RestateDeployment;
 use crate::{Error, Result};
@@ -158,17 +157,15 @@ fn safe_encode_u32(mut val: u32) -> String {
 #[allow(clippy::too_many_arguments)]
 pub async fn cleanup_old_replicasets(
     namespace: &str,
+    ctx: &Context,
     rs_api: &Api<ReplicaSet>,
-    replicasets_store: &Store<ReplicaSet>,
-    http_client: &reqwest::Client,
-    admin_endpoint: &Url,
     rsd_uid: &str,
-    revision_history_limit: i32,
+    rsd: &RestateDeployment,
     deployments: &HashMap<String, bool>,
 ) -> Result<(i32, Option<chrono::DateTime<chrono::Utc>>)> {
     let replicasets_cell = std::cell::Cell::new(Vec::new());
 
-    let _ = replicasets_store.find(|rs| {
+    let _ = ctx.replicasets_store.find(|rs| {
         // replicasets in the same ns
         if rs.metadata.namespace.as_deref() != Some(namespace) {
             return false;
@@ -303,7 +300,7 @@ pub async fn cleanup_old_replicasets(
                 }
 
                 // If we are here, there is a 0 sized replicaset which should be subject to the history limit
-                if historic_count < revision_history_limit {
+                if historic_count < rsd.spec.revision_history_limit {
                     historic_count += 1;
                     // we haven't hit that limit yet, so we don't need to delete this rs
                     continue;
@@ -313,11 +310,12 @@ pub async fn cleanup_old_replicasets(
                     let rs_deployment_id = rs_deployment_id.unwrap();
 
                     debug!("Force-deleting Restate deployment {rs_deployment_id} as its associated with old ReplicaSet {rs_name} in namespace {namespace}");
-
-                    let resp = http_client
-                        .delete(format!(
-                            "{admin_endpoint}/deployments/{rs_deployment_id}?force=true"
-                        ))
+                    let resp = ctx
+                        .request(
+                            Method::DELETE,
+                            &rsd.spec.restate.register,
+                            &format!("/deployments/{rs_deployment_id}?force=true"),
+                        )?
                         .send()
                         .await
                         .map_err(Error::AdminCallFailed)?;

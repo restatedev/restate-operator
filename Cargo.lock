@@ -2423,7 +2423,7 @@ dependencies = [
 
 [[package]]
 name = "restate-operator"
-version = "1.7.5"
+version = "1.7.6-alpha1"
 dependencies = [
  "actix-web",
  "anyhow",
