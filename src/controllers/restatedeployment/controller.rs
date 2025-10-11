@@ -545,9 +545,7 @@ impl RestateDeployment {
 
         let resp: DeploymentResponse = ctx
             .request(Method::POST, &self.spec.restate.register, "/deployments")?
-            .json(&serde_json::json!({
-                "uri": service_endpoint,
-            }))
+            .json(&payload)
             .send()
             .await
             .map_err(Error::AdminCallFailed)?
