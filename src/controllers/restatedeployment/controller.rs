@@ -525,12 +525,6 @@ impl RestateDeployment {
         service_endpoint: &Url,
         use_http11: Option<bool>,
     ) -> Result<String> {
-        // Append service_path if specified
-        let mut service_endpoint = service_endpoint.clone();
-        if let Some(service_path) = &self.spec.restate.service_path {
-            service_endpoint = service_endpoint.join(service_path)?;
-        }
-
         debug!(
             "Registering endpoint '{service_endpoint}' to Restate at '{}'",
             &self.spec.restate.register
