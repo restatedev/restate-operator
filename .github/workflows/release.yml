@@ -49,3 +49,4 @@ jobs:
           files: |
             crd/restatedeployments.yaml
             crd/restateclusters.yaml
+            crd/restatecloudenvironments.yaml
