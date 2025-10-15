@@ -315,7 +315,7 @@ impl RestateDeployment {
             self.spec
                 .restate
                 .register
-                .service_url(&ctx.rce_store, &versioned_name, namespace)?;
+                .service_url(&ctx.rce_store, &versioned_name, namespace, self.spec.restate.service_path.as_deref())?;
 
         let mut deployments = self.list_deployments(&ctx).await?;
 
