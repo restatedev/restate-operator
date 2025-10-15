@@ -537,7 +537,6 @@ impl RestateDeployment {
 
         let mut payload = serde_json::json!({
             "uri": service_endpoint,
-            "force": true,
         });
 
         if let Some(use_http11) = use_http11 {
