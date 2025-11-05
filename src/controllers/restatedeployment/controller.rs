@@ -330,13 +330,44 @@ impl RestateDeployment {
                 .cloned()
                 .unwrap_or_default()
         }) {
-            if let Some(cluster_name) = &self.spec.restate.register.cluster {
-                // wait for the cluster to be ready before registering to it
-                validate_cluster_status(rsc_api, cluster_name).await?;
-            };
+            let valid = async {
+                if let Some(cluster_name) = &self.spec.restate.register.cluster {
+                    // wait for the cluster to be ready before registering to it
+                    validate_cluster_status(rsc_api, cluster_name).await?;
+                }
 
-            // wait for the replicaset to be ready before registering it
-            validate_replica_set_status(replicaset.status.as_ref(), self.spec.replicas)?;
+                // wait for the replicaset to be ready before registering it
+                validate_replica_set_status(replicaset.status.as_ref(), self.spec.replicas)?;
+
+                Ok(())
+            }
+            .await;
+
+            match valid {
+                Ok(()) => {}
+                // there is a chicken and egg situation if the cluster is out of capacity; the new version can't become ready until
+                // old versions are removed. so we remove them aggressively here
+                Err(ready_err @ Error::DeploymentNotReady { .. }) => {
+                    match reconcilers::replicaset::cleanup_old_replicasets(
+                        namespace,
+                        &ctx,
+                        &rs_api,
+                        &my_uid,
+                        self,
+                        &deployments,
+                        Some(&versioned_name), // exclude the replicaset which may not be registered
+                    )
+                    .await
+                    {
+                        Ok((_, _)) => return Err(ready_err),
+                        Err(cleanup_err) => {
+                            error!("Failed to clean up old replicasets while waiting for current replicaset to become ready: {cleanup_err}");
+                            return Err(ready_err);
+                        }
+                    }
+                }
+                Err(err) => return Err(err),
+            }
 
             // Register the latest version with Restate cluster using the service URL
             let deployment_id = self
@@ -385,6 +416,7 @@ impl RestateDeployment {
             &my_uid,
             self,
             &deployments,
+            Some(&versioned_name),
         )
         .await?;
 
@@ -667,6 +699,7 @@ impl RestateDeployment {
             &my_uid,
             self,
             &deployments,
+            None,
         )
         .await?;
 

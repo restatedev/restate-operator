@@ -162,13 +162,27 @@ pub async fn cleanup_old_replicasets(
     rsd_uid: &str,
     rsd: &RestateDeployment,
     deployments: &HashMap<String, bool>,
+    except_rs: Option<&str>,
 ) -> Result<(i32, Option<chrono::DateTime<chrono::Utc>>)> {
     let replicasets_cell = std::cell::Cell::new(Vec::new());
 
     let _ = ctx.replicasets_store.find(|rs| {
+        let rs_namespace = match &rs.metadata.namespace.as_deref() {
+            Some("") | None => "default",
+            Some(ns) => ns,
+        };
         // replicasets in the same ns
-        if rs.metadata.namespace.as_deref() != Some(namespace) {
+        if rs_namespace != namespace {
             return false;
+        }
+
+        // not the current version if we are actively trying to register it
+        if let Some(except_rs) = except_rs {
+            let rs_name = rs.name_any();
+
+            if rs_name == except_rs {
+                return false;
+            }
         }
 
         // replicasets owned by this restatedeployment (we make no attempt to handle orphaned ones if a rsd was deleted with --cascade=orphan and then recreated)
