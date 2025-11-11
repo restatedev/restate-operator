@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use k8s_openapi::api::core::v1::{
     Affinity, EnvVar, LocalObjectReference, PodDNSConfig, ResourceRequirements, Toleration,
+    TopologySpreadConstraint,
 };
 use k8s_openapi::api::networking::v1;
 use k8s_openapi::api::networking::v1::{NetworkPolicyPeer, NetworkPolicyPort};
@@ -149,6 +150,8 @@ pub struct RestateClusterCompute {
     pub node_selector: Option<BTreeMap<String, String>>,
     /// If specified, pod affinity
     pub affinity: Option<Affinity>,
+    /// TopologySpreadConstraints describes how a group of pods ought to spread across topology domains. Scheduler will schedule pods in a way which abides by the constraints.
+    pub topology_spread_constraints: Option<Vec<TopologySpreadConstraint>>,
 }
 
 fn env_schema(g: &mut schemars::gen::SchemaGenerator) -> Schema {

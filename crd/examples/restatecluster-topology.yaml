@@ -1,0 +1,37 @@
+apiVersion: restate.dev/v1
+kind: RestateCluster
+metadata:
+  name: restate-multi-zone
+spec:
+  compute:
+    image: restatedev/restate:1.4
+    replicas: 3
+    # Topology spread constraints enable zone-aware pod distribution
+    # This example distributes Restate pods across availability zones
+    topologySpreadConstraints:
+      # Spread pods evenly across zones
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: restate-cluster
+            app.kubernetes.io/instance: restate-multi-zone
+      # Also spread across nodes for high availability
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: restate-cluster
+            app.kubernetes.io/instance: restate-multi-zone
+  storage:
+    storageRequestBytes: 2147483648
+
+# Notes:
+# - The operator automatically exposes POD_ZONE and POD_REGION environment variables
+#   via the Kubernetes downward API for Restate's location-aware features
+# - maxSkew: 1 ensures pods are distributed as evenly as possible
+# - whenUnsatisfiable: DoNotSchedule prevents scheduling if constraints can't be met
+# - whenUnsatisfiable: ScheduleAnyway is more flexible and allows best-effort spreading
+# - labelSelector must match the labels applied to your RestateCluster pods
