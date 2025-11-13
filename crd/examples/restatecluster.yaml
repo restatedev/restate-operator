@@ -4,6 +4,6 @@ metadata:
   name: restate-test
 spec:
   compute:
-    image: restatedev/restate:1.4
+    image: restatedev/restate:1.5.3
   storage:
     storageRequestBytes: 2147483648

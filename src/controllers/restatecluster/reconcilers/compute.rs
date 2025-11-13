@@ -229,21 +229,49 @@ fn env(cluster_name: &str, custom: Option<&[EnvVar]>) -> Vec<EnvVar> {
             value_from: None,
         });
 
-    let defaults = Some(EnvVar {
-        name: "POD_NAME".into(),
-        value: None,
-        value_from: Some(EnvVarSource {
-            config_map_key_ref: None,
-            field_ref: Some(ObjectFieldSelector {
-                api_version: None,
-                field_path: "metadata.name".into(),
+    let downward_api_vars = [
+        EnvVar {
+            name: "POD_NAME".into(),
+            value: None,
+            value_from: Some(EnvVarSource {
+                config_map_key_ref: None,
+                field_ref: Some(ObjectFieldSelector {
+                    api_version: None,
+                    field_path: "metadata.name".into(),
+                }),
+                resource_field_ref: None,
+                secret_key_ref: None,
             }),
-            resource_field_ref: None,
-            secret_key_ref: None,
-        }),
-    })
-    .into_iter()
-    .chain(defaults);
+        },
+        EnvVar {
+            name: "POD_ZONE".into(),
+            value: None,
+            value_from: Some(EnvVarSource {
+                config_map_key_ref: None,
+                field_ref: Some(ObjectFieldSelector {
+                    api_version: None,
+                    field_path: "metadata.labels['topology.kubernetes.io/zone']".into(),
+                }),
+                resource_field_ref: None,
+                secret_key_ref: None,
+            }),
+        },
+        EnvVar {
+            name: "POD_REGION".into(),
+            value: None,
+            value_from: Some(EnvVarSource {
+                config_map_key_ref: None,
+                field_ref: Some(ObjectFieldSelector {
+                    api_version: None,
+                    field_path: "metadata.labels['topology.kubernetes.io/region']".into(),
+                }),
+                resource_field_ref: None,
+                secret_key_ref: None,
+            }),
+        },
+    ];
+
+    let defaults = downward_api_vars.into_iter().chain(defaults);
 
     if let Some(custom) = custom {
         defaults.chain(custom.iter().cloned()).collect()
@@ -409,6 +437,7 @@ fn restate_statefulset(
                     volumes: Some(volumes),
                     tolerations: spec.compute.tolerations.clone(),
                     node_selector: spec.compute.node_selector.clone(),
+                    topology_spread_constraints: spec.compute.topology_spread_constraints.clone(),
                     ..Default::default()
                 }),
             },

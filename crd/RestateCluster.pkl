@@ -95,6 +95,10 @@ class Compute {
 
   /// If specified, the pod's tolerations.
   tolerations: Listing<Toleration>?
+
+  /// TopologySpreadConstraints describes how a group of pods ought to spread across topology domains.
+  /// Scheduler will schedule pods in a way which abides by the constraints.
+  topologySpreadConstraints: Listing<PodSpec.TopologySpreadConstraint>?
 }
 
 /// Security configuration

@@ -17,6 +17,7 @@ converters {
     [List("spec", "compute", "dnsConfig")] = PodSpec.PodDNSConfig
     [List("spec", "compute", "affinity")] = PodSpec.Affinity
     [List("spec", "compute", "tolerations", "toleration")] = Toleration
+    [List("spec", "compute", "topologySpreadConstraints", "topologySpreadConstraint")] = PodSpec.TopologySpreadConstraint
     [List("spec", "security", "networkEgressRules", "networkEgressRule")] = NetworkPolicy.NetworkPolicyEgressRule
     [List("spec", "security", "networkPeers", "admin", "admin")] = NetworkPolicy.NetworkPolicyPeer
     [List("spec", "security", "networkPeers", "ingress", "ingres")] = NetworkPolicy.NetworkPolicyPeer
