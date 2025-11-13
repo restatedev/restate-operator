@@ -4,10 +4,15 @@ metadata:
   name: restate-multi-zone
 spec:
   compute:
-    image: restatedev/restate:1.4
+    image: restatedev/restate:1.5.3
+    env:
+      # If you want to support restate replication like {zone: 2}, you need to set the location env var.
+      # If topology.kubernetes.io/zone pod label exists, POD_ZONE will be set automatically by the operator.
+      # This pod label will only be propagated from the node labels if the PodTopologyLabelsAdmission feature gate is enabled (alpha in 1.33).
+      # Without that gate, there is no way for a pod to know its own zone.
+      - name: RESTATE_LOCATION
+        value: myregion.$(POD_ZONE)
     replicas: 3
-    # Topology spread constraints enable zone-aware pod distribution
-    # This example distributes Restate pods across availability zones
     topologySpreadConstraints:
       # Spread pods evenly across zones
       - maxSkew: 1
@@ -15,23 +20,8 @@ spec:
         whenUnsatisfiable: DoNotSchedule
         labelSelector:
           matchLabels:
-            app.kubernetes.io/name: restate-cluster
-            app.kubernetes.io/instance: restate-multi-zone
-      # Also spread across nodes for high availability
-      - maxSkew: 1
-        topologyKey: kubernetes.io/hostname
-        whenUnsatisfiable: ScheduleAnyway
-        labelSelector:
-          matchLabels:
-            app.kubernetes.io/name: restate-cluster
+            app.kubernetes.io/name: restate
+            # this must be set to match the name of the RestateCluster
             app.kubernetes.io/instance: restate-multi-zone
   storage:
     storageRequestBytes: 2147483648
-
-# Notes:
-# - The operator automatically exposes POD_ZONE and POD_REGION environment variables
-#   via the Kubernetes downward API for Restate's location-aware features
-# - maxSkew: 1 ensures pods are distributed as evenly as possible
-# - whenUnsatisfiable: DoNotSchedule prevents scheduling if constraints can't be met
-# - whenUnsatisfiable: ScheduleAnyway is more flexible and allows best-effort spreading
-# - labelSelector must match the labels applied to your RestateCluster pods
