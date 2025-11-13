@@ -267,6 +267,7 @@ impl RestateAdminEndpoint {
         rce_store: &Store<RestateCloudEnvironment>,
         service_name: &str,
         service_namespace: &str,
+        service_path: Option<&str>,
     ) -> crate::Result<Url> {
         match (
             self.cluster.as_deref(),
@@ -275,14 +276,14 @@ impl RestateAdminEndpoint {
             self.url.as_ref(),
         ) {
             (Some(_), None, None, None) | (None, None,Some(_), None) | (None, None, None, Some(_)) => {
-                Ok(service_url(service_name, service_namespace, 9080, None)?)
+                Ok(service_url(service_name, service_namespace, 9080, service_path)?)
             }
             (None, Some(cloud), None, None) => {
                 let Some(rce) = rce_store.get(&ObjectRef::new(cloud)) else {
                     return Err(crate::Error::RestateCloudEnvironmentNotFound(cloud.into()))
                 };
 
-                let service_url = service_url(service_name, service_namespace, 9080, None)?;
+                let service_url = service_url(service_name, service_namespace, 9080, service_path)?;
 
                 Ok(rce.tunnel_url(service_url)?)
             }
