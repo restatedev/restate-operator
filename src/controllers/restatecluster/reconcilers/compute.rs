@@ -713,7 +713,7 @@ async fn check_pia(
         namespace
     );
 
-    let created = job_api
+    let created = match job_api
         .patch(
             name,
             &params,
@@ -747,7 +747,28 @@ async fn check_pia(
                 status: None,
             }),
         )
-        .await?;
+        .await
+    {
+        Ok(created) => created,
+        Err(kube::Error::Api(kube::error::ErrorResponse {
+            code: 422,
+            reason,
+            message,
+            ..
+        })) if reason == "Invalid" && message.contains("field is immutable") => {
+            // when tolerations change, the existing job becomes invalid
+            delete_job(namespace, job_api, name).await?;
+
+            return Err(Error::NotReady {
+                reason: "PodIdentityAssociationCanaryPending".into(),
+                message: "Canary Job has not yet succeeded; recreated Job after tolerations change"
+                    .into(),
+                // job watch will cover this
+                requeue_after: None,
+            });
+        }
+        Err(err) => return Err(err.into()),
+    };
 
     if let Some(conditions) = created.status.and_then(|s| s.conditions) {
         for condition in conditions {
