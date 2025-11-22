@@ -152,6 +152,8 @@ pub struct RestateClusterCompute {
     pub affinity: Option<Affinity>,
     /// TopologySpreadConstraints describes how a group of pods ought to spread across topology domains. Scheduler will schedule pods in a way which abides by the constraints.
     pub topology_spread_constraints: Option<Vec<TopologySpreadConstraint>>,
+    /// If specified, the pod's priority. PriorityClassName indicates the name of the PriorityClass that should be applied to the Restate pods.
+    pub priority_class_name: Option<String>,
 }
 
 fn env_schema(g: &mut schemars::gen::SchemaGenerator) -> Schema {

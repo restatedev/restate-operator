@@ -438,6 +438,7 @@ fn restate_statefulset(
                     tolerations: spec.compute.tolerations.clone(),
                     node_selector: spec.compute.node_selector.clone(),
                     topology_spread_constraints: spec.compute.topology_spread_constraints.clone(),
+                    priority_class_name: spec.compute.priority_class_name.clone(),
                     ..Default::default()
                 }),
             },
