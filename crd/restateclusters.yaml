@@ -701,6 +701,10 @@ spec:
                     description: If specified, a node selector for the pod
                     type: object
                     x-kubernetes-map-type: atomic
+                  priorityClassName:
+                    description: If specified, the pod's priority. PriorityClassName indicates the name of the PriorityClass that should be applied to the Restate pods.
+                    nullable: true
+                    type: string
                   replicas:
                     description: replicas is the desired number of Restate nodes. If unspecified, defaults to 1.
                     format: int32
