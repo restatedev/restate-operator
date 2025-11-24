@@ -1,0 +1,100 @@
+# Knative Deployment - Auto-Versioning (Template Hash Pattern)
+#
+# This manifest demonstrates auto-versioning using template hash.
+# When no explicit tag is specified, the operator uses a hash of the
+# template spec as the tag, creating a new deployment for every template change.
+#
+# Key Features:
+#   - No tag specified → operator computes hash from template
+#   - Every template change → new hash → new deployment
+#   - Automatic versioning without manual tag management
+#   - Good for CI/CD pipelines where image tags auto-increment
+#
+# What Happens (First Apply):
+#   1. Operator computes template hash: e.g., "7mz6h89b"
+#   2. Creates Configuration: greeter-7mz6h89b
+#   3. Creates Route: greeter-7mz6h89b
+#   4. URL: http://greeter-7mz6h89b.default.svc.cluster.local
+#   5. Registers new deployment with Restate
+#
+# What Happens (Image Change):
+#   1. Template changes (e.g., image: v1.0.0 → v1.0.1)
+#   2. Operator computes new hash: e.g., "9nx4k12c"
+#   3. Creates new Configuration: greeter-9nx4k12c
+#   4. Creates new Route: greeter-9nx4k12c
+#   5. New URL: http://greeter-9nx4k12c.default.svc.cluster.local
+#   6. Registers new deployment with Restate
+#   7. Previous Configuration greeter-7mz6h89b marked for cleanup
+#
+# Comparison to Explicit Tags:
+#   - Explicit tag (tag: "v1.0") → Same deployment for template changes (in-place)
+#   - No tag → New deployment for every template change (versioned)
+#
+# Use Cases:
+#   - CI/CD with auto-incrementing image tags
+#   - Git commit SHA as implicit version
+#   - No need to manage tag values manually
+
+---
+apiVersion: restate.dev/v1beta1
+kind: RestateDeployment
+metadata:
+  name: greeter-knative
+  namespace: default
+spec:
+  deploymentMode: knative
+
+  # Keep 1 most recent inactive Configuration
+  revisionHistoryLimit: 1
+
+  # selector: Not used in Knative mode (label selection handled by Knative Serving)
+
+  knative:
+    # No tag specified → uses template hash for automatic versioning
+    # tag: <not specified>
+
+    # Keep at least 1 replica running (no scale-to-zero)
+    # This ensures faster response times for auto-versioned deployments
+    minScale: 1
+    maxScale: 10
+    target: 50
+
+  template:
+    metadata:
+      labels:
+        app: greeter-knative
+    spec:
+      containers:
+        - name: greeter
+          # Change this image tag to trigger a new versioned deployment
+          image: dev.local/restatedev/restate-operator/greeter:latest
+          imagePullPolicy: Never
+          ports:
+            # Knative only allows port names: "h2c" or "http1"
+            - name: h2c
+              containerPort: 9080
+              protocol: TCP
+          # Note: readinessProbe not specified
+          # The operator automatically injects a default TCP probe on port 9080:
+          #   - initialDelaySeconds: 2 (fast-starting services)
+          #   - periodSeconds: 5 (quick feedback)
+          #   - tcpSocket.port: 9080
+          # To override, explicitly define readinessProbe in the container spec
+          env:
+            - name: SERVICE_VERSION
+              value: "auto"  # Indicates auto-versioning
+            # Note: POD_NAME cannot use fieldRef in Knative mode
+            # Knative will automatically set HOSTNAME to the pod name
+            - name: ANTIDOTE
+              value: "cure"
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
+
+  restate:
+    register:
+      cluster: restate

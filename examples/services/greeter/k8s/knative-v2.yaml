@@ -1,0 +1,86 @@
+# Knative Deployment - V2 (Versioned Update Demonstration)
+#
+# This manifest demonstrates a versioned update by changing the tag.
+# Apply this after deploying knative-v1.yaml or knative-v1-fixed.yaml.
+#
+# Scenario:
+#   1. Initial deployment has tag: "v1.0"
+#      - Configuration: greeter-v1-0
+#      - Route: greeter-v1-0
+#      - URL: http://greeter-v1-0.default.svc.cluster.local
+#      - Deployment ID: dp_abc123
+#   2. Apply this manifest with tag: "v2"
+#      - New Configuration: greeter-v2
+#      - New Route: greeter-v2
+#      - New URL: http://greeter-v2.default.svc.cluster.local
+#      - New Deployment ID: dp_def456
+#   3. Previous Configuration greeter-v1-0:
+#      - Owner reference updated to controller=false
+#      - Can still handle suspended invocations
+#      - Will be cleaned up when no active invocations remain
+#
+# Key Observations:
+#   - Different tag → Different Configuration → Different deployment ID
+#   - Both v1.0 and v2 coexist temporarily
+#   - New invocations route to v2
+#   - Old invocations can complete on v1.0
+#   - Operator eventually cleans up v1.0 when safe
+#
+# This is a VERSIONED update - a new deployment identity is created,
+# allowing multiple versions to coexist during migration.
+
+---
+apiVersion: restate.dev/v1beta1
+kind: RestateDeployment
+metadata:
+  name: greeter-knative
+  namespace: default
+spec:
+  deploymentMode: knative
+
+  # Keep 1 most recent inactive Configuration
+  revisionHistoryLimit: 1
+
+  # selector: Not used in Knative mode (label selection handled by Knative Serving)
+
+  knative:
+    tag: "v2"             # NEW TAG → triggers new Configuration creation
+    minScale: 0
+    maxScale: 10
+    target: 50
+
+  template:
+    metadata:
+      labels:
+        app: greeter-knative
+        version: v2       # Updated label
+    spec:
+      containers:
+        - name: greeter
+          image: dev.local/restatedev/restate-operator/greeter:latest
+          imagePullPolicy: Never
+          ports:
+            # Knative only allows port names: "h2c" or "http1"
+            - name: h2c
+              containerPort: 9080
+              protocol: TCP
+          env:
+            # Updated version identifier
+            - name: SERVICE_VERSION
+              value: "v2"
+            # Note: POD_NAME cannot use fieldRef in Knative mode
+            # Knative will automatically set HOSTNAME to the pod name
+            # V2 includes the antidote fix
+            - name: ANTIDOTE
+              value: "cure"
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
+
+  restate:
+    register:
+      cluster: restate

@@ -1,0 +1,105 @@
+# Knative Deployment - V1 with Explicit Tag (In-Place Update Pattern)
+#
+# This demonstrates Knative deployment mode with an explicit tag.
+# The tag creates a stable deployment identity, enabling in-place updates.
+#
+# Key Features:
+#   - deploymentMode: knative (uses Knative Serving instead of ReplicaSet)
+#   - tag: "v1.0" (explicit tag creates stable Restate deployment ID)
+#   - Scale-to-zero enabled (minScale: 0)
+#   - Gradual rollout (rolloutDuration: 300s = 5 minutes)
+#
+# What Happens:
+#   1. Operator creates Knative Configuration: greeter-v1-0
+#   2. Operator creates Knative Route: greeter-v1-0
+#   3. Knative creates first Revision: greeter-v1-0-00001
+#   4. Route URL: http://greeter-v1-0.default.svc.cluster.local
+#   5. Operator registers deployment with Restate, gets deployment ID (dp_xxx)
+#   6. Deployment ID stored in Configuration annotation
+#
+# In-Place Update:
+#   - Change image (e.g., v1.0.0 → v1.0.1) but keep tag: "v1.0"
+#   - Knative creates new Revision: greeter-v1-0-00002
+#   - Gradual traffic shift: 00001 → 00002 over 5 minutes
+#   - Same Configuration, same Route, same URL, same deployment ID
+#   - No new Restate deployment registered
+#
+# Versioned Update:
+#   - Change tag to "v1.1" → triggers new Configuration creation
+#   - See knative-v2.yaml for example
+#
+# Poison/Antidote Pattern:
+#   - This manifest has no ANTIDOTE env var
+#   - Calling /Greeter/greet with "poison" input will fail (418 error)
+#   - To fix in-place: apply knative-v1-fixed.yaml (same tag, adds ANTIDOTE)
+
+---
+apiVersion: restate.dev/v1beta1
+kind: RestateDeployment
+metadata:
+  name: greeter-knative
+  namespace: default
+spec:
+  # Use Knative Serving for deployment
+  deploymentMode: knative
+
+  # Keep 1 most recent inactive Configuration
+  revisionHistoryLimit: 1
+
+  # selector: Not used in Knative mode (label selection handled by Knative Serving)
+
+  # Knative-specific configuration
+  knative:
+    # Explicit tag enables in-place updates
+    # Same tag = same Restate deployment = in-place update
+    tag: "v1"
+
+    # Scale-to-zero configuration
+    minScale: 0      # Allow scaling to zero replicas (save resources)
+    maxScale: 10     # Maximum 10 replicas under load
+    target: 50       # Target 50 concurrent requests per replica
+
+  # Pod template (same as ReplicaSet deployments)
+  template:
+    metadata:
+      labels:
+        app: greeter-knative
+        version: v1
+    spec:
+      containers:
+        - name: greeter
+          image: dev.local/restatedev/restate-operator/greeter:latest
+          imagePullPolicy: Never
+          ports:
+            # Knative only allows port names: "h2c" or "http1"
+            - name: h2c
+              containerPort: 9080
+              protocol: TCP
+          # Note: readinessProbe not specified
+          # The operator automatically injects a default TCP probe on port 9080:
+          #   - initialDelaySeconds: 2 (fast-starting services)
+          #   - periodSeconds: 5 (quick feedback)
+          #   - tcpSocket.port: 9080
+          # To override, explicitly define readinessProbe in the container spec
+          env:
+            # Version identifier (shown in responses)
+            - name: SERVICE_VERSION
+              value: "v1"
+            # Note: POD_NAME cannot use fieldRef in Knative mode
+            # Knative will automatically set HOSTNAME to the pod name
+            # ANTIDOTE not set - poison input will fail
+            # Uncomment to fix the poison handling:
+            # - name: ANTIDOTE
+            #   value: "cure"
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
+
+  # Restate cluster registration
+  restate:
+    register:
+      cluster: restate  # References the RestateCluster in examples/restate/
