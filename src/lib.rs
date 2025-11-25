@@ -16,9 +16,6 @@ pub enum Error {
     // so boxing this error to break cycles
     FinalizerError(#[from] Box<kube::runtime::finalizer::Error<Error>>),
 
-    #[error("A namespace cannot be created for this name as one already exists")]
-    NameConflict,
-
     #[error("Cluster is not yet Ready: {message}")]
     NotReady {
         message: String,
@@ -75,7 +72,6 @@ impl Error {
             Error::SerializationError(_) => "SerializationError",
             Error::KubeError(_) => "KubeError",
             Error::FinalizerError(_) => "FinalizerError",
-            Error::NameConflict => "NameConflict",
             Error::NotReady { .. } => "NotReady",
             Error::DeploymentNotReady { .. } => "ServiceNotReady",
             Error::InvalidRestateConfig(_) => "InvalidRestateConfig",

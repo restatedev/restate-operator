@@ -168,26 +168,39 @@ impl RestateCluster {
             ..Default::default()
         };
 
-        if let Some(ns) = nss.get_metadata_opt(name).await? {
-            // check to see if extant namespace is managed by us
-            if !ns
+        // Check if namespace exists
+        if let Some(existing_ns) = nss.get_metadata_opt(name).await? {
+            // Check if we own the namespace
+            let we_own_namespace = existing_ns
                 .metadata
                 .owner_references
                 .map(|orefs| orefs.contains(&oref))
-                .unwrap_or(false)
-            {
-                return Err(Error::NameConflict);
-            }
-        }
+                .unwrap_or(false);
 
-        apply_namespace(
-            &nss,
-            Namespace {
-                metadata: object_meta(&base_metadata, name),
-                ..Default::default()
-            },
-        )
-        .await?;
+            if we_own_namespace {
+                // We own it, apply our full metadata including ownership
+                apply_namespace(
+                    &nss,
+                    Namespace {
+                        metadata: object_meta(&base_metadata, name),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            } else {
+                // We don't own it, just use it without mutation
+            }
+        } else {
+            // Namespace doesn't exist, create it with full ownership
+            apply_namespace(
+                &nss,
+                Namespace {
+                    metadata: object_meta(&base_metadata, name),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        }
 
         reconcile_network_policies(&ctx, name, &base_metadata, self.spec.security.as_ref()).await?;
 
