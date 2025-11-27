@@ -28,6 +28,7 @@ fn deny_all(base_metadata: &ObjectMeta) -> NetworkPolicy {
     NetworkPolicy {
         metadata: object_meta(base_metadata, DENY_ALL_POLICY_NAME),
         spec: Some(NetworkPolicySpec {
+            pod_selector: label_selector(base_metadata),
             policy_types: Some(vec!["Egress".into(), "Ingress".into()]),
             ..Default::default()
         }),
@@ -40,6 +41,7 @@ fn allow_dns(base_metadata: &ObjectMeta) -> NetworkPolicy {
     NetworkPolicy {
         metadata: object_meta(base_metadata, ALLOW_DNS_POLICY_NAME),
         spec: Some(NetworkPolicySpec {
+            pod_selector: label_selector(base_metadata),
             policy_types: Some(vec!["Egress".into()]),
             egress: Some(vec![NetworkPolicyEgressRule {
                 to: Some(vec![NetworkPolicyPeer {

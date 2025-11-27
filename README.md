@@ -63,8 +63,7 @@ The default behaviour can be disabled with `spec.security.disableNetworkPolicies
 Alternatively, you can add new allowed inbound callers of the Restate ports with `spec.security.networkPeers.{ingress,admin,metrics}`, which are arrays of [`NetworkPolicyPeer`](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#networkpolicypeer-v1-networking-k8s-io).
 You can allow new outbound destinations by adding to the `spec.security.networkEgressRules` list, which is an array of [`NetworkPolicyEgressRule`](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#networkpolicyegressrule-v1-networking-k8s-io).
 
-**NOTE**: Each cluster is created in its own namespace (enforced by the operator). Do not create the namespace manually,
-and do not use the same namespace that the operator is in.
+**NOTE**: Each cluster is created in its own namespace. Naming the cluster after an existing Namespace is supported, but deploying into namespaces with other applications is not recommended.
 
 #### Minimal Example
 
