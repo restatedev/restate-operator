@@ -69,7 +69,7 @@ pub async fn reconcile_replicaset(
         "spec": {
             "replicas": rsd.spec.replicas,
             "selector": LabelSelector {
-                match_expressions: rsd.spec.selector.match_expressions.clone(),
+                match_expressions: rsd.spec.selector.as_ref().and_then(|s| s.match_expressions.clone()),
                 match_labels: Some(match_labels.clone()),
             },
             "template": {

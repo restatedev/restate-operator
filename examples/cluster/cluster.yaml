@@ -1,0 +1,46 @@
+# Restate Cluster for Testing
+#
+# This creates a minimal single-node Restate cluster suitable for local
+# development and testing. This configuration uses:
+#
+#   - Single replica (default: 1)
+#   - Local Raft-based metadata storage (no S3 required)
+#   - 2 GiB persistent storage
+#   - Restate 1.5 (latest stable)
+#
+# The operator will automatically:
+#   - Create a namespace called 'restate'
+#   - Deploy a StatefulSet with 1 pod
+#   - Create Services:
+#     - restate:8080 (ingress) - HTTP endpoint for invoking services
+#     - restate:9070 (admin) - Admin API for deployment registration
+#     - restate:5122 (metrics) - Metrics and node communication
+#
+# After deploying, you must manually provision the cluster:
+#   kubectl -n restate exec -it restate-0 -- restatectl provision
+#
+# For production or multi-node setups, see:
+#   - docs/minio.md (MinIO-backed snapshots)
+#   - README.md (S3-backed metadata and snapshots)
+
+---
+apiVersion: restate.dev/v1
+kind: RestateCluster
+metadata:
+  name: restate
+spec:
+  compute:
+    # Use latest stable Restate version
+    image: restatedev/restate:1.5
+
+  storage:
+    # 2 GiB storage (sufficient for testing)
+    storageRequestBytes: 2147483648
+
+  # Optional: Customize configuration (TOML format)
+  # config: |
+  #   [worker]
+  #   # Worker-specific settings
+  #
+  #   [admin]
+  #   # Admin API settings
