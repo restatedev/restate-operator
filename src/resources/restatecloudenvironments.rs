@@ -175,10 +175,18 @@ impl RestateCloudEnvironment {
     }
 }
 
-/// Configuration for authentication to the Cloud environment. Currently, only secret references are supported and one must be provided.
+/// Configuration for authentication to the Cloud environment. A secret reference is currently required, but
+/// a CSI Secret Store provider can be used to sync this secret.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct RestateCloudEnvironmentAuthentication {
+    /// A reference to a secret that will be used for registration, as well as being mounted to the tunnel pods
+    /// unless a secretProvider is also specified.
     pub secret: SecretReference,
+    /// A reference to a SecretProviderClass that should be mounted to the tunnel pods to authenticate the tunnel.
+    /// A Kubernetes Secret (synced by the Secret Store CSI Driver) is still necessary
+    /// for the operator to register services.
+    pub secret_provider: Option<SecretProviderReference>,
 }
 
 /// Configured a reference to a secret in the same namespace as the operator
@@ -188,6 +196,15 @@ pub struct SecretReference {
     pub name: String,
     /// The key to read from the referenced Secret
     pub key: String,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretProviderReference {
+    /// The name of the referenced SecretProviderClass. It must be in the same namespace as the operator.
+    pub secret_provider_class: String,
+    /// The path that the token will be available inside the secret volume
+    pub path: String,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, CELSchema)]

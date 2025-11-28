@@ -33,7 +33,7 @@ spec:
                 description: Where to get credentials for communication with the Cloud environment
                 properties:
                   secret:
-                    description: Configured a reference to a secret in the same namespace as the operator
+                    description: A reference to a secret that will be used for registration, as well as being mounted to the tunnel pods unless a secretProvider is also specified.
                     properties:
                       key:
                         description: The key to read from the referenced Secret
@@ -44,6 +44,20 @@ spec:
                     required:
                     - key
                     - name
+                    type: object
+                  secretProvider:
+                    description: A reference to a SecretProviderClass that should be mounted to the tunnel pods to authenticate the tunnel. A Kubernetes Secret (synced by the Secret Store CSI Driver) is still necessary for the operator to register services.
+                    nullable: true
+                    properties:
+                      path:
+                        description: The path that the token will be available inside the secret volume
+                        type: string
+                      secretProviderClass:
+                        description: The name of the referenced SecretProviderClass. It must be in the same namespace as the operator.
+                        type: string
+                    required:
+                    - path
+                    - secretProviderClass
                     type: object
                 required:
                 - secret
