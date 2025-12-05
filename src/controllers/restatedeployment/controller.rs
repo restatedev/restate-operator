@@ -311,11 +311,12 @@ impl RestateDeployment {
         )
         .await?;
 
-        let service_endpoint =
-            self.spec
-                .restate
-                .register
-                .service_url(&ctx.rce_store, &versioned_name, namespace, self.spec.restate.service_path.as_deref())?;
+        let service_endpoint = self.spec.restate.register.service_url(
+            &ctx.rce_store,
+            &versioned_name,
+            namespace,
+            self.spec.restate.service_path.as_deref(),
+        )?;
 
         let mut deployments = self.list_deployments(&ctx).await?;
 
@@ -600,7 +601,7 @@ impl RestateDeployment {
                 UNION
                 SELECT DISTINCT pinned_deployment_id as id
                 FROM sys_invocation_status
-                WHERE pinned_deployment_id IS NOT NULL
+                WHERE pinned_deployment_id IS NOT NULL AND status != 'completed'
             )
             SELECT d.id as deployment_id,
                    a.id IS NOT NULL as active
