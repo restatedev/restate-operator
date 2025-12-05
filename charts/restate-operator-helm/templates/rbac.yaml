@@ -103,6 +103,30 @@ rules:
     apiGroups:
       - eks.services.k8s.aws
   {{- end }}
+  - resources:
+      - configurations
+      - routes
+      - revisions
+      - services
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - patch
+      - delete
+    apiGroups:
+      - serving.knative.dev
+  - resources:
+      - configurations/status
+      - routes/status
+      - revisions/status
+    verbs:
+      - get
+      - list
+      - watch
+    apiGroups:
+      - serving.knative.dev
 ---
 # Binding the ClusterRole to the account
 kind: ClusterRoleBinding
