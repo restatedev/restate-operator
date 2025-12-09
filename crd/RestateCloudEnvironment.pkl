@@ -46,17 +46,35 @@ class Spec {
 
 /// Where to get credentials for communication with the Cloud environment
 class Authentication {
-  /// Configured a reference to a secret in the same namespace as the operator
+  /// A reference to a secret that will be used for registration, as well as being mounted to the tunnel
+  /// pods unless a secretProvider is also specified.
   secret: Secret
+
+  /// A reference to a SecretProviderClass that should be mounted to the tunnel pods to authenticate the
+  /// tunnel. A Kubernetes Secret (synced by the Secret Store CSI Driver) is still necessary for the
+  /// operator to register services.
+  secretProvider: SecretProvider?
 }
 
-/// Configured a reference to a secret in the same namespace as the operator
+/// A reference to a secret that will be used for registration, as well as being mounted to the tunnel
+/// pods unless a secretProvider is also specified.
 class Secret {
   /// The key to read from the referenced Secret
   key: String
 
   /// The name of the referenced secret. It must be in the same namespace as the operator.
   name: String
+}
+
+/// A reference to a SecretProviderClass that should be mounted to the tunnel pods to authenticate the
+/// tunnel. A Kubernetes Secret (synced by the Secret Store CSI Driver) is still necessary for the
+/// operator to register services.
+class SecretProvider {
+  /// The path that the token will be available inside the secret volume
+  path: String
+
+  /// The name of the referenced SecretProviderClass. It must be in the same namespace as the operator.
+  secretProviderClass: String
 }
 
 /// Optional configuration for the deployment of tunnel pods

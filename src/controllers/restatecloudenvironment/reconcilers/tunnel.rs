@@ -4,10 +4,10 @@ use k8s_openapi::{
     api::{
         apps::v1::{Deployment, DeploymentSpec},
         core::v1::{
-            Container, ContainerPort, EnvVar, HTTPGetAction, KeyToPath, PodSecurityContext,
-            PodSpec, PodTemplateSpec, Probe, ResourceRequirements, SeccompProfile,
-            SecretVolumeSource, SecurityContext, Service, ServicePort, ServiceSpec, Volume,
-            VolumeMount,
+            CSIVolumeSource, Container, ContainerPort, EnvVar, HTTPGetAction, KeyToPath,
+            PodSecurityContext, PodSpec, PodTemplateSpec, Probe, ResourceRequirements,
+            SeccompProfile, SecretVolumeSource, SecurityContext, Service, ServicePort, ServiceSpec,
+            Volume, VolumeMount,
         },
     },
     apimachinery::pkg::{api::resource::Quantity, util::intstr::IntOrString},
@@ -127,6 +127,43 @@ fn tunnel_deployment(
         }]
     };
 
+    let (bearer_token_path, secret_volume) =
+        if let Some(secret_provider) = &spec.authentication.secret_provider {
+            (
+                secret_provider.path.clone(),
+                Volume {
+                    name: "bearer-token".into(),
+                    csi: Some(CSIVolumeSource {
+                        driver: "secrets-store.csi.k8s.io".into(),
+                        read_only: Some(true),
+                        volume_attributes: Some(BTreeMap::from([(
+                            "secretProviderClass".into(),
+                            secret_provider.secret_provider_class.clone(),
+                        )])),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+        } else {
+            (
+                "bearer-token".into(),
+                Volume {
+                    name: "bearer-token".into(),
+                    secret: Some(SecretVolumeSource {
+                        secret_name: Some(spec.authentication.secret.name.clone()),
+                        items: Some(vec![KeyToPath {
+                            key: spec.authentication.secret.key.clone(),
+                            mode: None,
+                            path: "bearer-token".into(),
+                        }]),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+        };
+
     Deployment {
         metadata,
         spec: Some(DeploymentSpec {
@@ -175,7 +212,7 @@ fn tunnel_deployment(
                         volume_mounts: Some(vec![VolumeMount {
                             mount_path: BEARER_TOKEN_MOUNT_PATH.into(),
                             name: "bearer-token".into(),
-                            sub_path: Some("bearer-token".into()),
+                            sub_path: Some(bearer_token_path),
                             read_only: Some(true),
                             ..Default::default()
                         }]),
@@ -195,19 +232,7 @@ fn tunnel_deployment(
                     termination_grace_period_seconds: Some(310),
                     tolerations: tunnel.and_then(|t| t.tolerations.clone()),
                     node_selector: tunnel.and_then(|t| t.node_selector.clone()),
-                    volumes: Some(vec![Volume {
-                        name: "bearer-token".into(),
-                        secret: Some(SecretVolumeSource {
-                            secret_name: Some(spec.authentication.secret.name.clone()),
-                            items: Some(vec![KeyToPath {
-                                key: spec.authentication.secret.key.clone(),
-                                mode: None,
-                                path: "bearer-token".into(),
-                            }]),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    }]),
+                    volumes: Some(vec![secret_volume]),
                     ..Default::default()
                 }),
             },
