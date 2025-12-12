@@ -53,8 +53,6 @@ spec:
     register:
       # Replace with your cluster name
       cluster: restate-test
-    # Optional: service path
-    # service_path: /discover
     # Optional: force HTTP/1.1
     # use_http11: true
 
