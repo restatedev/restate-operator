@@ -13,12 +13,7 @@ The operator enforces network isolation by default, handles service versioning/d
 
 ## Development Environment
 
-This project uses **mise** for managing the Rust toolchain. Activate the mise environment:
-```bash
-mise install
-```
-
-Required Rust version: 1.86 (specified in mise.toml)
+Required Rust version: 1.80+
 
 ## Common Development Commands
 
@@ -126,8 +121,6 @@ RestateDeployment supports two modes (see `src/resources/restatedeployments.rs:2
 - Changed tag = versioned update (new Restate deployment ID)
 - No tag = template hash as tag (every template change creates new deployment)
 
-See `docs/design/design-4.md` for detailed Knative architecture.
-
 ### Network Isolation
 
 By default, RestateCluster enforces network isolation via NetworkPolicies:
@@ -151,13 +144,6 @@ Controllers share state via `src/controllers/mod.rs:State`:
 ### kubectl Usage
 
 Always use `kubectl apply --server-side` for CRDs to avoid client-side validation issues.
-
-### ko Tool
-
-This project can use `ko` for fast container image building:
-```bash
-ko build ./cmd/operator --local
-```
 
 ### Local Image Support for Knative Deployments
 
@@ -276,13 +262,6 @@ kubectl delete pod -n restate-operator -l app=restate-operator
 - `awsPodIdentityAssociationCluster` - Enables EKS Pod Identity support
 - `operatorNamespace` - Namespace where operator runs
 - `operatorLabelName/Value` - Labels for network policy selectors
-
-## Design Documents
-
-Key design documents in `docs/design/`:
-- `design-4.md` - Knative Serving Configuration-per-tag architecture
-- `knative-multi-configuration-routing.md` - Knative routing analysis
-- `knative-service-value-proposition.md` - Scale-to-zero benefits
 
 ## Releasing
 

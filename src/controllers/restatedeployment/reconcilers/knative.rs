@@ -41,11 +41,11 @@ pub async fn reconcile_knative(
 
     // Step 2: Reconcile Configuration for current tag
     let config = reconcile_configuration(ctx, rsd, &namespace, &current_tag).await?;
-    info!(configuration = %config.name_any(), "Configuration reconciled");
+    debug!(configuration = %config.name_any(), "Configuration reconciled");
 
     // Step 3: Reconcile Route for current tag
     let route = reconcile_route(ctx, rsd, &namespace, &current_tag, &config).await?;
-    info!(route = %route.name_any(), "Route reconciled");
+    debug!(route = %route.name_any(), "Route reconciled");
 
     // Step 4: Get the latest created revision (observe rollout eagerly)
     let latest_revision = config
@@ -61,7 +61,7 @@ pub async fn reconcile_knative(
             requeue_after: Some(Duration::from_secs(5)),
         })?
         .clone();
-    info!(revision = %latest_revision, "Latest revision created");
+    debug!(revision = %latest_revision, "Latest revision created");
 
     // Fetch the full Revision object for replica counts
     let revision_api: Api<Revision> = Api::namespaced(ctx.client.clone(), &namespace);
@@ -69,11 +69,11 @@ pub async fn reconcile_knative(
 
     // Step 4.5: Wait for Revision to be ready before registration
     check_revision_ready(&revision)?;
-    info!(revision = %revision.name_any(), "Revision is ready");
+    debug!(revision = %revision.name_any(), "Revision is ready");
 
     // Step 4.6: Wait for Route to be ready before registration
     check_route_ready(&route)?;
-    info!(route = %route.name_any(), "Route is ready");
+    debug!(route = %route.name_any(), "Route is ready");
 
     // Step 5: Register or lookup deployment
     let deployment_id = register_or_lookup_deployment(ctx, rsd, &namespace, &config, &route).await?;
@@ -361,7 +361,9 @@ async fn reconcile_route(
     let config_name = config.name_any();
 
     // Create owner reference
-    let owner_reference = rsd.controller_owner_ref(&()).unwrap();
+    // Set Configuration as owner to ensure cascading deletion
+    // If Configuration is deleted, Route will be garbage collected
+    let owner_reference = config.controller_owner_ref(&()).unwrap();
 
     // Build Route annotations
     let mut route_annotations = BTreeMap::new();
@@ -571,6 +573,8 @@ async fn annotate_configuration(
     let config_api: Api<Configuration> = Api::namespaced(ctx.client.clone(), namespace);
     let params = PatchParams::apply("restate-operator/deployment-registration").force();
 
+    // Use patch_metadata to update only the metadata (annotations)
+    // without affecting the spec or other fields.
     config_api
         .patch_metadata(
             &config_name,
@@ -903,7 +907,7 @@ async fn delete_configuration_and_route(
         config_name.to_string()
     };
 
-    info!(
+    debug!(
         configuration = %config_name,
         namespace = %namespace,
         "Deleting old Configuration"
@@ -911,7 +915,7 @@ async fn delete_configuration_and_route(
     let config_api: Api<Configuration> = Api::namespaced(ctx.client.clone(), namespace);
     config_api.delete(config_name, &Default::default()).await?;
 
-    info!(
+    debug!(
         route = %route_name,
         namespace = %namespace,
         "Deleting old Route"
