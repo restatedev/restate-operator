@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use kube::api::{Api, Patch, PatchParams};
+use kube::api::{Api, DeleteParams, Patch, PatchParams, PropagationPolicy};
 use kube::{Resource, ResourceExt};
 use serde_json::json;
 use tracing::*;
@@ -679,6 +679,11 @@ pub async fn cleanup_old_configurations(
                 return false;
             }
 
+            // Skip if already being deleted
+            if config.metadata.deletion_timestamp.is_some() {
+                return false;
+            }
+
             // Must be owned by this RestateDeployment
             config.owner_references().iter().any(|reference| {
                 reference.uid == rsd_uid && reference.kind == RestateDeployment::kind(&())
@@ -822,7 +827,7 @@ pub async fn cleanup_old_configurations(
                 }
 
                 // Delete Configuration and its associated Route
-                delete_configuration_and_route(ctx, namespace, &config_name, rsd).await?;
+                delete_configuration(ctx, namespace, &config_name).await?;
 
                 continue;
             }
@@ -890,43 +895,29 @@ fn get_configuration_tag(config: &Configuration) -> Option<String> {
         .cloned()
 }
 
-/// Delete Configuration and its associated Route
-async fn delete_configuration_and_route(
+/// Delete Configuration using Foreground cascading deletion
+/// This ensures the dependent Route is fully cleaned up before the Configuration is removed
+async fn delete_configuration(
     ctx: &Context,
     namespace: &str,
     config_name: &str,
-    rsd: &RestateDeployment,
 ) -> Result<()> {
-    // Extract tag from configuration name to determine route name
-    // Configuration name format: {rsd-name}-{tag}
-    let rsd_name = rsd.name_any();
-    let route_name = if config_name.starts_with(&format!("{}-", rsd_name)) {
-        config_name.to_string()
-    } else {
-        // Fallback: assume same name
-        config_name.to_string()
-    };
-
     debug!(
         configuration = %config_name,
         namespace = %namespace,
-        "Deleting old Configuration"
+        "Deleting old Configuration (Foreground Cascading)"
     );
     let config_api: Api<Configuration> = Api::namespaced(ctx.client.clone(), namespace);
-    config_api.delete(config_name, &Default::default()).await?;
 
-    debug!(
-        route = %route_name,
-        namespace = %namespace,
-        "Deleting old Route"
-    );
-    let route_api: Api<Route> = Api::namespaced(ctx.client.clone(), namespace);
-    // Route might not exist if it was already deleted, so ignore NotFound errors
-    match route_api.delete(&route_name, &Default::default()).await {
-        Ok(_) => Ok(()),
-        Err(kube::Error::Api(err)) if err.code == 404 => Ok(()),
-        Err(e) => Err(e.into()),
-    }
+    // Use Foreground cascading deletion to ensure Route is cleaned up first
+    let dp = DeleteParams {
+        propagation_policy: Some(PropagationPolicy::Foreground),
+        ..Default::default()
+    };
+
+    config_api.delete(config_name, &dp).await?;
+
+    Ok(())
 }
 
 #[cfg(test)]
