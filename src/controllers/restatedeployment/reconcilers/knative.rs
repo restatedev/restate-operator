@@ -104,7 +104,7 @@ pub async fn reconcile_knative(
         &rsd_uid,
         rsd,
         &deployments,
-        &current_tag,
+        Some(&current_tag),
     )
     .await?;
 
@@ -658,7 +658,7 @@ pub async fn cleanup_old_configurations(
     rsd_uid: &str,
     rsd: &RestateDeployment,
     deployments: &std::collections::HashMap<String, bool>,
-    current_tag: &str,
+    current_tag: Option<&str>,
 ) -> Result<(i32, Option<chrono::DateTime<chrono::Utc>>)> {
     // List all Configurations in the namespace
     let config_api: Api<Configuration> = Api::namespaced(ctx.client.clone(), namespace);
@@ -674,9 +674,11 @@ pub async fn cleanup_old_configurations(
                 return false;
             };
 
-            // Skip current version
-            if tag == current_tag {
-                return false;
+            // Skip current version if a current_tag is provided and matches
+            if let Some(current) = current_tag {
+                if tag == current {
+                    return false;
+                }
             }
 
             // Skip if already being deleted

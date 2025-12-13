@@ -804,7 +804,7 @@ impl RestateDeployment {
                 &my_uid,
                 self,
                 &deployments,
-                "", // current_tag empty means include all configurations
+                None,
             )
             .await?
         } else {
