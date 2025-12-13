@@ -76,10 +76,9 @@ Uses Knative Serving for serverless-style deployment:
 - Tag-based deployment identity
 
 **Manifests:**
-- `k8s/knative-v1.yaml` - Explicit tag "v1" (enables in-place updates)
-- `k8s/knative-v1-fixed.yaml` - In-place fix (same tag, adds ANTIDOTE)
-- `k8s/knative-v2.yaml` - Versioned update (new tag "v2")
-- `k8s/knative-auto.yaml` - Auto-versioning (no tag, uses template hash)
+- `k8s/knative-v1.yaml` - Knative Deployment mode (tag: v1)
+- `k8s/knative-v2.yaml` - Knative Deployment mode (tag: v2)
+- `k8s/knative-auto.yaml` - Knative Deployment mode (auto-versioned)
 
 **Key Differences:**
 
@@ -146,34 +145,16 @@ kubectl get pods -l app=greeter-replicaset -w
 # After 60s, v1 pod terminates
 ```
 
-### 3. Poison/Antidote (Knative In-Place Fix)
+### 4. Fix In-Place (Knative)
 
-Demonstrate fixing stuck invocations by updating an environment variable (Knative mode only):
+Fix the service by adding the `ANTIDOTE` environment variable to the existing deployment.
 
 ```bash
-# Deploy v1 (no antidote)
-kubectl apply -f k8s/knative-v1.yaml
-
-# Poison causes retryable error - invocation gets stuck retrying
-curl localhost:8080/Greeter/greet -d '"poison"'
-# Error 500: "Temporarily poisoned! Restate will retry..."
-
-# Check invocation status using Restate CLI - it's BACKING_OFF, will retry indefinitely
-restate invocations list
-# Shows invocation in "backing-off" status
-
-# Apply the fix (same tag "v1", adds ANTIDOTE=cure)
-kubectl apply -f k8s/knative-v1-fixed.yaml
-
-# Wait for rollout, then check invocation - it eventually succeeds!
-# The stuck invocation retries, hits the fixed code, and completes
-curl localhost:8080/Greeter/greet -d '"poison"' | jq
-# {
-#   "message": "Hello poison! (neutralized with: cure)",
-#   "version": "v1",
-#   "antidote": "cure"
-# }
+kubectl patch restatedeployment greeter-knative --type='json' -p='[{"op": "add", "path": "/spec/template/spec/containers/0/env/-", "value": {"name": "ANTIDOTE", "value": "cure"}}]'
 ```
+
+Knative will automatically create a new revision (e.g., `greeter-knative-v1-00002`) and gradually roll out the traffic. The Restate deployment ID remains the same.
+
 
 **Note:** ReplicaSet mode does NOT support in-place fixes. Every template change creates a new Restate deployment with a different ID. Stuck invocations continue retrying against the old pods, so you must manually cancel them. Use `k8s/greeter-replicaset-v2.yaml` which includes the ANTIDOTE fix as a versioned update.
 
@@ -188,10 +169,9 @@ curl localhost:8080/Greeter/greet -d '"poison"' | jq
 └── k8s/
     ├── greeter-replicaset-v1.yaml  # ReplicaSet: Initial deployment (no ANTIDOTE)
     ├── greeter-replicaset-v2.yaml  # ReplicaSet: Version upgrade (with ANTIDOTE)
-    ├── knative-v1.yaml             # Knative: Tagged deployment (v1, no ANTIDOTE)
-    ├── knative-v1-fixed.yaml       # Knative: In-place fix (same tag v1, with ANTIDOTE)
-    ├── knative-v2.yaml             # Knative: Versioned update (tag v2, with ANTIDOTE)
-    └── knative-auto.yaml           # Knative: Auto-versioning (no tag, template hash)
+├── knative-auto.yaml           # Knative: Auto-versioning (no explicit tag)
+├── knative-v1.yaml             # Knative: Explicit tag v1 (Deployment ID: dp_...)
+├── knative-v2.yaml             # Knative: New tag v2 (New Deployment ID)
 ```
 
 ## Building

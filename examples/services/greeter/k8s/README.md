@@ -27,7 +27,10 @@ This manifest uses an **explicit tag** (`v1`) to create a stable deployment iden
 *   **Scale-to-Zero**: Enabled (`minScale: 0`).
 *   **Poison/Antidote Pattern**:
     *   The service has a "poison" check. Sending `"poison"` to the greeting endpoint will return a 418 error.
-    *   To fix this *in-place*, update the manifest to set the `ANTIDOTE` env var to `"cure"` and re-apply. The deployment ID persists, but the behavior changes.
+    *   To fix this *in-place*, patch the deployment to set the `ANTIDOTE` env var to `"cure"`. The deployment ID persists, but the behavior changes.
+    ```bash
+    kubectl patch restatedeployment greeter-knative --type='json' -p='[{"op": "add", "path": "/spec/template/spec/containers/0/env/-", "value": {"name": "ANTIDOTE", "value": "cure"}}]'
+    ```
 
 ## 2. Versioned Updates (`knative-v2.yaml`)
 
