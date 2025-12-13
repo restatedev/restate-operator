@@ -31,7 +31,6 @@ examples/
     ├── src/           # Service implementation (TypeScript)
     ├── k8s/           # Kubernetes manifests (ReplicaSet & Knative)
     ├── README.md      # Service overview
-    ├── TESTING.md     # Comprehensive test scenarios
     ├── Dockerfile     # Container build
     └── package.json   # Node.js dependencies
 ```
@@ -82,79 +81,6 @@ kubectl apply -f services/greeter/k8s/knative-v1.yaml
 
 **Documentation:**
 - [services/greeter/README.md](services/greeter/README.md) - Service overview and quick reference
-- [services/greeter/TESTING.md](services/greeter/TESTING.md) - Step-by-step test scenarios
-
-## Testing Scenarios
-
-The examples support comprehensive testing of:
-
-### ReplicaSet Deployment
-1. **Basic Deployment** - Deploy v1, verify registration
-2. **Poison Pattern** - Test that v1 fails on "poison" input (no ANTIDOTE)
-3. **Graceful Draining** - Long-running requests during upgrades
-4. **Versioned Upgrade** - Deploy v2 with ANTIDOTE fix (new deployment ID)
-
-### Knative Deployment
-
-#### In-Place Updates (Explicit Tags)
-1. Deploy with tag "v1"
-2. Apply fix (same tag, new Revision)
-3. Verify same deployment ID
-
-#### Versioned Updates (Explicit Tags)
-1. Deploy with tag "v1"
-2. Change tag to "v2"
-3. Verify new Configuration created
-4. Verify multiple Configurations coexist
-
-#### Auto-Versioning (Template Hash)
-1. Deploy without tag
-2. Change template (image, env vars)
-3. Verify new Configuration per template change
-4. Verify automatic versioning
-
-## Architecture Overview
-
-### ReplicaSet Mode
-
-```
-RestateDeployment (greeter)
-    ↓
-ReplicaSet
-    ↓
-Pods
-    ↓
-Service
-    ↓
-Restate Admin API (registration)
-```
-
-**Characteristics:**
-- Manual scaling via `replicas` field
-- Standard Kubernetes pod lifecycle
-- Rolling updates via maxUnavailable/maxSurge
-- No scale-to-zero
-
-### Knative Mode
-
-```
-RestateDeployment (greeter-knative)
-    ↓
-Knative Configuration (greeter-knative-v1)
-    ↓
-Knative Revisions (00001, 00002, ...)
-    ↓
-Knative Route (greeter-knative-v1)
-    ↓
-Restate Admin API (registration)
-```
-
-**Characteristics:**
-- Autoscaling via minScale/maxScale/target
-- Scale-to-zero capability
-- Tag-based deployment identity
-- Gradual rollout (Knative feature)
-- Multiple concurrent deployments (versioned updates)
 
 ## Prerequisites
 
@@ -220,24 +146,6 @@ docker push ghcr.io/restatedev/restate-operator/greeter:dev
 kubectl apply -f services/greeter/k8s/greeter-replicaset-v1.yaml
 ```
 
-### Testing Workflow
-
-```bash
-# 1. Set up cluster
-kubectl apply -f cluster/cluster.yaml
-kubectl -n restate exec -it restate-0 -- restatectl provision
-
-# 2. Port-forward Restate
-kubectl port-forward -n restate svc/restate 8080:8080 &
-
-# 3. Run test scenarios
-# Follow the step-by-step guide in services/greeter/TESTING.md
-
-# 4. Cleanup
-kubectl delete -f services/greeter/k8s/greeter-replicaset-v1.yaml
-kubectl delete restatecluster restate
-```
-
 ### CI/CD Workflow
 
 ```bash
@@ -301,26 +209,6 @@ kubectl describe configuration greeter-knative-v1
 # Check operator logs for Knative errors
 kubectl logs -n restate-operator deployment/restate-operator | grep -i knative
 ```
-
-## Next Steps
-
-1. **Start with the Basics:**
-   - Deploy the Restate cluster: [cluster/README.md](cluster/README.md)
-   - Deploy the greeter service: [services/greeter/README.md](services/greeter/README.md)
-
-2. **Run Test Scenarios:**
-   - Follow the testing guide: [services/greeter/TESTING.md](services/greeter/TESTING.md)
-   - Experiment with both ReplicaSet and Knative modes
-
-3. **Explore Advanced Features:**
-   - Read the design documentation: `docs/design/design-4.md`
-   - Try multi-node Restate clusters with S3
-   - Configure custom autoscaling policies
-
-4. **Build Your Own Service:**
-   - Use the greeter service as a template
-   - Follow the Restate SDK documentation: https://restate.dev/
-   - Deploy with the RestateDeployment CRD
 
 ## Resources
 

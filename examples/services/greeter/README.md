@@ -97,8 +97,6 @@ Uses Knative Serving for serverless-style deployment:
 - Use **ReplicaSet** for traditional workloads with predictable load
 - Use **Knative** for variable workloads, development/testing, or to leverage scale-to-zero
 
-For detailed test scenarios, see [TESTING.md](TESTING.md).
-
 ## Demo Scenarios
 
 ### 1. Version Routing
@@ -187,7 +185,6 @@ curl localhost:8080/Greeter/greet -d '"poison"' | jq
 ├── package.json
 ├── tsconfig.json
 ├── README.md                       # This file
-├── TESTING.md                      # Detailed test scenarios
 └── k8s/
     ├── greeter-replicaset-v1.yaml  # ReplicaSet: Initial deployment (no ANTIDOTE)
     ├── greeter-replicaset-v2.yaml  # ReplicaSet: Version upgrade (with ANTIDOTE)

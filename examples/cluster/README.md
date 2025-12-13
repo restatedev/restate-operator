@@ -299,7 +299,6 @@ kubectl get namespace restate
 ## Next Steps
 
 - [Deploy the greeter service](../service/README.md)
-- [Run the testing scenarios](../service/TESTING.md)
 - [Explore Knative deployment modes](../service/k8s/)
 
 ## References
