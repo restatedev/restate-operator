@@ -184,11 +184,8 @@ Restate Admin API (registration)
 ### Installing the Restate CLI
 
 ```bash
-# Install Restate CLI (see https://docs.restate.dev/operate/cli)
-curl https://restate.dev/install.sh | bash
-
-# Configure CLI to use port-forwarded Restate
-export RESTATE_HOST=localhost:9070
+# Install Restate CLI (see https://docs.restate.dev/installation)
+brew install restatedev/tap/restate-server restatedev/tap/restate
 
 # List deployments
 restate deployments list
@@ -196,40 +193,6 @@ restate deployments list
 # List invocations
 restate invocations list
 ```
-
-## Key Concepts
-
-### Deployment Identity
-
-The Restate operator uses **deployment identity** to determine whether to create a new Restate deployment or update an existing one:
-
-**ReplicaSet Mode:**
-- Always uses template hash as deployment identity
-- Every template change → new Restate deployment (versioned update only)
-- Does NOT support in-place updates
-
-**Knative Mode with Explicit Tag:**
-- Tag value determines deployment ID
-- Same tag → same Restate deployment (in-place update)
-- Different tag → new Restate deployment (versioned update)
-
-**Knative Mode without Tag:**
-- Uses template hash as tag (auto-versioning)
-- Every template change → new tag → new deployment
-
-### In-Place vs. Versioned Updates
-
-**In-Place Update:**
-- Same deployment identity
-- Updates implementation without changing deployment ID
-- Gradual rollout within the same deployment
-- Use for: Bug fixes, config changes, minor updates
-
-**Versioned Update:**
-- New deployment identity
-- Creates new deployment in Restate
-- Multiple deployments coexist temporarily
-- Use for: Major versions, breaking changes, parallel testing
 
 ## Common Workflows
 

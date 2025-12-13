@@ -200,7 +200,7 @@ spec:
 
 ### S3-Backed Metadata
 
-For production, use S3 for metadata storage:
+Use S3 for metadata storage (as an alternative to Raft-based metadata):
 
 ```yaml
 spec:
