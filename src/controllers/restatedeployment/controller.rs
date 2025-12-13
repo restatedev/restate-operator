@@ -436,7 +436,7 @@ impl RestateDeployment {
         let is_knative = matches!(self.spec.deployment_mode, Some(DeploymentMode::Knative))
             || self.spec.knative.is_some();
 
-        info!(
+        debug!(
             deployment_mode = if is_knative { "Knative" } else { "ReplicaSet" },
             name = %self.metadata.name.as_deref().unwrap_or("unknown"),
             namespace = %namespace,
@@ -486,7 +486,7 @@ impl RestateDeployment {
                     requeue_after,
                 }) => {
                     let requeue_after = requeue_after.unwrap_or(Duration::from_secs(10));
-                    warn!(
+                    debug!(
                         name = %self.metadata.name.as_deref().unwrap_or("unknown"),
                         namespace = %namespace,
                         reason = %reason,
@@ -506,7 +506,7 @@ impl RestateDeployment {
                     requeue_after,
                 }) => {
                     let requeue_after = requeue_after.unwrap_or(Duration::from_secs(10));
-                    warn!(
+                    debug!(
                         name = %self.metadata.name.as_deref().unwrap_or("unknown"),
                         namespace = %namespace,
                         reason = %reason,
@@ -521,13 +521,7 @@ impl RestateDeployment {
                     )
                 }
                 Err(err) => {
-                    let message = err.to_string();
-                    warn!(
-                        name = %self.metadata.name.as_deref().unwrap_or("unknown"),
-                        namespace = %namespace,
-                        error = %message,
-                        "Knative reconciliation failed"
-                    );
+                    let message = err.to_string();       
                     (
                         Err(err),
                         message,
