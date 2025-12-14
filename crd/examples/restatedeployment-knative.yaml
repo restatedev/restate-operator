@@ -17,8 +17,8 @@ spec:
     #   Restate deployment (in-place updates)
     # - Change: Creates new Restate deployment with new deployment ID
     #
-    # Example: tag "v1.0" maps to Restate deployment "dp_abc123"
-    tag: "v1.0"
+    # Example: tag "v1-0" maps to Restate deployment "dp_abc123"
+    tag: "v1-0"
 
     # Scale-to-zero configuration
     minScale: 0          # Allow scaling to zero

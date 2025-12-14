@@ -121,17 +121,12 @@ pub async fn reconcile_knative(
 fn determine_tag(rsd: &RestateDeployment) -> Result<String> {
     if let Some(tag) = rsd.spec.knative.as_ref().and_then(|k| k.tag.as_ref()) {
         // User-specified tag (enables in-place updates)
-        Ok(dns_safe_tag(tag))
+        Ok(tag.clone())
     } else {
         // Default: template hash (enables versioned updates)
         let pod_template = serde_json::to_string(&rsd.spec.template)?;
         Ok(generate_pod_template_hash(rsd, &pod_template))
     }
-}
-
-/// Convert tag to DNS-safe format (replace dots with hyphens)
-fn dns_safe_tag(tag: &str) -> String {
-    tag.replace('.', "-")
 }
 
 /// Reconcile Knative Configuration resource
@@ -942,16 +937,4 @@ async fn delete_configuration(ctx: &Context, namespace: &str, config_name: &str)
     config_api.delete(config_name, &dp).await?;
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_dns_safe_tag() {
-        assert_eq!(dns_safe_tag("v1.0"), "v1-0");
-        assert_eq!(dns_safe_tag("v1.2.3"), "v1-2-3");
-        assert_eq!(dns_safe_tag("stable"), "stable");
-    }
 }

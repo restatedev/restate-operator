@@ -47,9 +47,15 @@ pub struct KnativeDeploymentSpec {
     /// - **No tag specified**: Uses template hash as tag, causing every template change
     ///   to create a new Restate deployment
     ///
-    /// Example: tag "v1.0" → Configuration "my-service-v1-0" → Restate deployment "dp_abc123"
+    /// The tag must be a valid DNS-1035 label: a lowercase RFC 1123 label that consists of
+    /// lower case alphanumeric characters or '-', and must start and end with an alphanumeric
+    /// character (e.g. 'my-name',  or '123-abc', regex used for validation is
+    /// '[a-z]([-a-z0-9]*[a-z0-9])?').
+    ///
+    /// Example: tag "v1-0" → Configuration "my-service-v1-0" → Restate deployment "dp_abc123"
     ///          Multiple Knative Revisions (00001, 00002, ...) all serve this deployment.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(regex(pattern = r"^[a-z]([-a-z0-9]*[a-z0-9])?$"))]
     pub tag: Option<String>,
 
     /// Minimum number of replicas (default: 0 for scale-to-zero)

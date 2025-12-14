@@ -5,6 +5,7 @@ metadata:
 spec:
   group: restate.dev
   names:
+    categories: []
     kind: RestateDeployment
     plural: restatedeployments
     shortNames:
@@ -104,8 +105,11 @@ spec:
 
                       The tag acts as a stable label that groups multiple Knative Revisions under a single Restate deployment: - **Same tag**: In-place updates create new Knative Revisions within the same Restate deployment (no new registration) - **Changed tag**: Creates a new Restate deployment with a new deployment ID (versioned update) - **No tag specified**: Uses template hash as tag, causing every template change to create a new Restate deployment
 
-                      Example: tag "v1.0" → Configuration "my-service-v1-0" → Restate deployment "dp_abc123" Multiple Knative Revisions (00001, 00002, ...) all serve this deployment.
+                      The tag must be a valid DNS-1035 label: a lowercase RFC 1123 label that consists of lower case alphanumeric characters or '-', and must start and end with an alphanumeric character (e.g. 'my-name',  or '123-abc', regex used for validation is '[a-z]([-a-z0-9]*[a-z0-9])?').
+
+                      Example: tag "v1-0" → Configuration "my-service-v1-0" → Restate deployment "dp_abc123" Multiple Knative Revisions (00001, 00002, ...) all serve this deployment.
                     nullable: true
+                    pattern: ^[a-z]([-a-z0-9]*[a-z0-9])?$
                     type: string
                   target:
                     description: 'Target concurrent requests per replica (default: 100)'
