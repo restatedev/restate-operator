@@ -1,6 +1,4 @@
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap};
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -64,6 +62,8 @@ pub(super) struct Context {
     pub rce_store: Store<RestateCloudEnvironment>,
     /// Store for secrets in the same namespace as the operator
     pub secret_store: Store<Secret>,
+    /// Store for Knative Revisions
+    pub revision_store: Store<Revision>,
     /// The namespace in which this operator runs
     pub operator_namespace: String,
     /// Diagnostics read by the web server
@@ -80,6 +80,7 @@ impl Context {
         replicasets_store: Store<ReplicaSet>,
         rce_store: Store<RestateCloudEnvironment>,
         secret_store: Store<Secret>,
+        revision_store: Store<Revision>,
         metrics: Metrics,
         state: State,
     ) -> Arc<Context> {
@@ -89,6 +90,7 @@ impl Context {
             replicasets_store,
             rce_store,
             secret_store,
+            revision_store,
             operator_namespace: state.operator_namespace,
             metrics,
             diagnostics: state.diagnostics.clone(),
@@ -1006,21 +1008,19 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
 
     let configurations: Api<Configuration> = Api::all(client.clone());
     let config_watcher = metadata_watcher(configurations, cfg.clone())
-        .map(ensure_deletion_change)
         .touched_objects()
-        .predicate_filter(changed_predicate);
+        .default_backoff();
 
     let routes: Api<Route> = Api::all(client.clone());
     let route_watcher = metadata_watcher(routes, cfg.clone())
-        .map(ensure_deletion_change)
         .touched_objects()
-        .predicate_filter(changed_predicate);
+        .default_backoff();
 
     let revisions: Api<Revision> = Api::all(client.clone());
-    let revision_watcher = metadata_watcher(revisions, cfg.clone())
-        .map(ensure_deletion_change)
+    let (revision_store, revision_writer) = reflector::store();
+    let revision_reflector = reflector(revision_writer, watcher(revisions, cfg.clone()))
         .touched_objects()
-        .predicate_filter(changed_predicate);
+        .default_backoff();
 
     controller
         .watches_stream(config_watcher, |meta| {
@@ -1035,10 +1035,10 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
             let namespace = meta.namespace()?;
             Some(ObjectRef::new(name).within(&namespace))
         })
-        .watches_stream(revision_watcher, |meta| {
+        .watches_stream(revision_reflector, |obj| {
             // Extract parent RestateDeployment name from annotation
-            let name = meta.annotations().get("restate.dev/deployment")?;
-            let namespace = meta.namespace()?;
+            let name = obj.annotations().get("restate.dev/deployment")?;
+            let namespace = obj.namespace()?;
             Some(ObjectRef::new(name).within(&namespace))
         })
         // just so that these get polled; we have no way to figure out which rsd may use the updated rce or secret
@@ -1053,6 +1053,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
                 replicasets_store,
                 rce_store,
                 secret_store,
+                revision_store,
                 metrics,
                 state,
             ),
@@ -1066,31 +1067,4 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
 /// Only triggers reconciliation when metadata.generation changes (spec changes)
 fn generation_predicate<K: Resource>(obj: &K) -> Option<u64> {
     obj.meta().generation.map(|g| g as u64)
-}
-
-// deletion apparently doesn't lead to any change in metadata otherwise, which means the changed_predicate
-// would drop them.
-fn ensure_deletion_change<K: Resource, E>(
-    mut event: Result<kube::runtime::watcher::Event<K>, E>,
-) -> Result<kube::runtime::watcher::Event<K>, E> {
-    if let Ok(kube::runtime::watcher::Event::Delete(ref mut object)) = event {
-        let meta = object.meta_mut();
-        meta.generation = match meta.generation {
-            Some(val) => Some(val + 1),
-            None => Some(0),
-        }
-    }
-    event
-}
-
-fn changed_predicate<K: Resource>(obj: &K) -> Option<u64> {
-    let mut hasher = DefaultHasher::new();
-    if let Some(g) = obj.meta().generation {
-        // covers spec but not metadata or status
-        g.hash(&mut hasher)
-    }
-    obj.labels().hash(&mut hasher);
-    obj.annotations().hash(&mut hasher);
-    // ignore status
-    Some(hasher.finish())
 }

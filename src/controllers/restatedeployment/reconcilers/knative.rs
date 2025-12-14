@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use kube::api::{Api, DeleteParams, Patch, PatchParams, PropagationPolicy};
+use kube::runtime::reflector::ObjectRef;
 use kube::{Resource, ResourceExt};
 use serde_json::json;
 use tracing::*;
@@ -64,8 +65,14 @@ pub async fn reconcile_knative(
     debug!(revision = %latest_revision, "Latest revision created");
 
     // Fetch the full Revision object for replica counts
-    let revision_api: Api<Revision> = Api::namespaced(ctx.client.clone(), &namespace);
-    let revision = revision_api.get(&latest_revision).await?;
+    let revision = ctx
+        .revision_store
+        .get(&ObjectRef::new(&latest_revision).within(&namespace))
+        .ok_or_else(|| Error::ConfigurationNotReady {
+            message: format!("Revision {} not found in store", latest_revision),
+            reason: "RevisionNotFound".into(),
+            requeue_after: Some(Duration::from_secs(1)),
+        })?;
 
     // Step 4.5: Wait for Revision to be ready before registration
     check_revision_ready(&revision)?;
