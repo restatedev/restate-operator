@@ -227,7 +227,7 @@ impl JsonSchema for PodTemplateSpec {
         "PodTemplateSpec".to_string()
     }
 
-    fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> Schema {
+    fn json_schema(_gen: &mut schemars::gen::SchemaGenerator) -> Schema {
         serde_json::from_value(serde_json::json!({
             "description": "Template describes the pods that will be created.",
             "type": "object",

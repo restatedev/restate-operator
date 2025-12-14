@@ -22,11 +22,11 @@ use kube::runtime::events::{Event, EventType, Recorder};
 use kube::runtime::finalizer::{finalizer, Event as Finalizer};
 use kube::runtime::reflector::{ObjectRef, Store};
 use kube::runtime::watcher::Config;
-use kube::runtime::{controller, reflector, watcher, WatchStreamExt};
+use kube::runtime::{controller, metadata_watcher, reflector, watcher, WatchStreamExt};
 
 use kube::Resource;
 use reqwest::Method;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::RwLock;
 use tracing::*;
@@ -207,7 +207,7 @@ impl RestateDeployment {
                     match_labels.insert(POD_TEMPLATE_HASH_LABEL.to_owned(), hash.clone());
                     match_labels
                 }
-            }
+            },
         };
 
         let mut annotations = self.annotations().clone();
@@ -521,7 +521,7 @@ impl RestateDeployment {
                     )
                 }
                 Err(err) => {
-                    let message = err.to_string();       
+                    let message = err.to_string();
                     (
                         Err(err),
                         message,
@@ -533,58 +533,58 @@ impl RestateDeployment {
         } else {
             // ReplicaSet mode
             match self.reconcile(ctx, namespace).await {
-            Ok((current_replicaset, next_removal)) => {
-                let action = match next_removal {
-                    Some(next_removal) if next_removal < now => Action::requeue(Duration::ZERO), // immediate requeue
-                    Some(next_removal) => {
-                        let secs = (next_removal - now).num_seconds() as u64;
-                        if secs < 5 * 60 {
-                            Action::requeue(Duration::from_secs(secs))
-                        } else {
-                            Action::requeue(Duration::from_secs(5 * 60))
+                Ok((current_replicaset, next_removal)) => {
+                    let action = match next_removal {
+                        Some(next_removal) if next_removal < now => Action::requeue(Duration::ZERO), // immediate requeue
+                        Some(next_removal) => {
+                            let secs = (next_removal - now).num_seconds() as u64;
+                            if secs < 5 * 60 {
+                                Action::requeue(Duration::from_secs(secs))
+                            } else {
+                                Action::requeue(Duration::from_secs(5 * 60))
+                            }
                         }
-                    }
-                    None => Action::requeue(Duration::from_secs(5 * 60)),
-                };
+                        None => Action::requeue(Duration::from_secs(5 * 60)),
+                    };
 
-                status_from_replica_set(
-                    self.spec.replicas,
-                    &mut rsd_status,
-                    current_replicaset.status.as_ref(),
-                );
+                    status_from_replica_set(
+                        self.spec.replicas,
+                        &mut rsd_status,
+                        current_replicaset.status.as_ref(),
+                    );
 
-                (
-                    Ok(action),
-                    "RestateDeployment is deployed".into(),
-                    "Deployed".into(),
-                    "True".into(),
-                )
-            }
-            Err(Error::DeploymentNotReady {
-                message,
-                reason,
-                requeue_after,
-                replica_set_status,
-            }) => {
-                let requeue_after = requeue_after.unwrap_or(Duration::from_secs(60));
-
-                status_from_replica_set(
-                    self.spec.replicas,
-                    &mut rsd_status,
-                    replica_set_status.as_deref(),
-                );
-
-                (
-                    Ok(Action::requeue(requeue_after)),
+                    (
+                        Ok(action),
+                        "RestateDeployment is deployed".into(),
+                        "Deployed".into(),
+                        "True".into(),
+                    )
+                }
+                Err(Error::DeploymentNotReady {
                     message,
                     reason,
-                    "False".into(),
-                )
-            }
-            Err(Error::HashCollision) => {
-                rsd_status.collision_count = Some(rsd_status.collision_count.unwrap_or(0) + 1);
+                    requeue_after,
+                    replica_set_status,
+                }) => {
+                    let requeue_after = requeue_after.unwrap_or(Duration::from_secs(60));
 
-                (
+                    status_from_replica_set(
+                        self.spec.replicas,
+                        &mut rsd_status,
+                        replica_set_status.as_deref(),
+                    );
+
+                    (
+                        Ok(Action::requeue(requeue_after)),
+                        message,
+                        reason,
+                        "False".into(),
+                    )
+                }
+                Err(Error::HashCollision) => {
+                    rsd_status.collision_count = Some(rsd_status.collision_count.unwrap_or(0) + 1);
+
+                    (
                     // requeue immediately, although in practice the status update should requeue us
                     Ok(Action::requeue(Duration::ZERO)),
                     "Encountered a ReplicaSet hash collision, will retry with a new template hash"
@@ -592,16 +592,16 @@ impl RestateDeployment {
                     "HashCollision".into(),
                     "False".into(),
                 )
-            }
-            Err(err) => {
-                let message = err.to_string();
-                (
-                    Err(err),
-                    message,
-                    "FailedReconcile".into(),
-                    "Unknown".into(),
-                )
-            }
+                }
+                Err(err) => {
+                    let message = err.to_string();
+                    (
+                        Err(err),
+                        message,
+                        "FailedReconcile".into(),
+                        "Unknown".into(),
+                    )
+                }
             }
         };
 
@@ -625,7 +625,11 @@ impl RestateDeployment {
 
         // Only set labelSelector for ReplicaSet mode (Knative manages pods directly)
         if !is_knative {
-            let selector: Option<Selector> = self.spec.selector.as_ref().and_then(|s| s.clone().try_into().ok());
+            let selector: Option<Selector> = self
+                .spec
+                .selector
+                .as_ref()
+                .and_then(|s| s.clone().try_into().ok());
             rsd_status.label_selector = selector.as_ref().map(Selector::to_string);
         }
         rsd_status.observed_generation = self.metadata.generation;
@@ -983,39 +987,6 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     .touched_objects()
     .default_backoff();
 
-    // Configuration reflector - watch status changes only for Knative mode
-    let configurations: Api<Configuration> = Api::all(client.clone());
-    let (config_store, config_writer) = reflector::store();
-    let config_reflector = reflector(
-        config_writer,
-        watcher(configurations, cfg.clone()),
-    )
-    .touched_objects()
-    .default_backoff()
-    .predicate_filter(status_predicate_serde);
-
-    // Route reflector - watch status changes only for Knative mode
-    let routes: Api<Route> = Api::all(client.clone());
-    let (route_store, route_writer) = reflector::store();
-    let route_reflector = reflector(
-        route_writer,
-        watcher(routes, cfg.clone()),
-    )
-    .touched_objects()
-    .default_backoff()
-    .predicate_filter(status_predicate_serde);
-
-    // Revision reflector - watch status changes only for Knative mode
-    let revisions: Api<Revision> = Api::all(client.clone());
-    let (revision_store, revision_writer) = reflector::store();
-    let revision_reflector = reflector(
-        revision_writer,
-        watcher(revisions, cfg.clone()),
-    )
-    .touched_objects()
-    .default_backoff()
-    .predicate_filter(status_predicate_serde);
-
     // RestateDeployment reflector - watch generation changes only (ignore status-only updates)
     let deployments_for_reflector: Api<RestateDeployment> = Api::all(client.clone());
     let (deployments_store, deployments_writer) = reflector::store();
@@ -1029,40 +1000,47 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
 
     // Create a controller for RestateDeployment
     // Use deployments_reflector with generation predicate to filter out status-only changes
-    controller::Controller::for_stream(deployments_reflector, deployments_store)
+    let controller = controller::Controller::for_stream(deployments_reflector, deployments_store)
         .shutdown_on_signal()
-        .owns_stream(replicaset_reflector)
-        .watches_stream(
-            config_reflector,
-            |config| -> Option<ObjectRef<RestateDeployment>> {
-                // Extract parent RestateDeployment from owner reference
-                let owner = config.owner_references()
-                    .iter()
-                    .find(|o| o.kind == "RestateDeployment")?;
-                let namespace = config.namespace()?;
-                Some(ObjectRef::new(&owner.name).within(&namespace))
-            },
-        )
-        .watches_stream(
-            route_reflector,
-            |route| -> Option<ObjectRef<RestateDeployment>> {
-                // Extract parent RestateDeployment from owner reference
-                let owner = route.owner_references()
-                    .iter()
-                    .find(|o| o.kind == "RestateDeployment")?;
-                let namespace = route.namespace()?;
-                Some(ObjectRef::new(&owner.name).within(&namespace))
-            },
-        )
-        .watches_stream(
-            revision_reflector,
-            |revision| -> Option<ObjectRef<RestateDeployment>> {
-                // Extract parent RestateDeployment name from annotation
-                let name = revision.annotations().get("restate.dev/deployment")?;
-                let namespace = revision.namespace()?;
-                Some(ObjectRef::new(name).within(&namespace))
-            },
-        )
+        .owns_stream(replicaset_reflector);
+
+    let configurations: Api<Configuration> = Api::all(client.clone());
+    let config_watcher = metadata_watcher(configurations, cfg.clone())
+        .map(ensure_deletion_change)
+        .touched_objects()
+        .predicate_filter(changed_predicate);
+
+    let routes: Api<Route> = Api::all(client.clone());
+    let route_watcher = metadata_watcher(routes, cfg.clone())
+        .map(ensure_deletion_change)
+        .touched_objects()
+        .predicate_filter(changed_predicate);
+
+    let revisions: Api<Revision> = Api::all(client.clone());
+    let revision_watcher = metadata_watcher(revisions, cfg.clone())
+        .map(ensure_deletion_change)
+        .touched_objects()
+        .predicate_filter(changed_predicate);
+
+    controller
+        .watches_stream(config_watcher, |meta| {
+            // Extract parent RestateDeployment name from annotation
+            let name = meta.annotations().get("restate.dev/deployment")?;
+            let namespace = meta.namespace()?;
+            Some(ObjectRef::new(name).within(&namespace))
+        })
+        .watches_stream(route_watcher, |meta| {
+            // Extract parent RestateDeployment name from annotation
+            let name = meta.annotations().get("restate.dev/deployment")?;
+            let namespace = meta.namespace()?;
+            Some(ObjectRef::new(name).within(&namespace))
+        })
+        .watches_stream(revision_watcher, |meta| {
+            // Extract parent RestateDeployment name from annotation
+            let name = meta.annotations().get("restate.dev/deployment")?;
+            let namespace = meta.namespace()?;
+            Some(ObjectRef::new(name).within(&namespace))
+        })
         // just so that these get polled; we have no way to figure out which rsd may use the updated rce or secret
         .watches_stream(rce_reflector, |_| std::iter::empty())
         .watches_stream(secret_reflector, |_| std::iter::empty())
@@ -1084,53 +1062,35 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         .await;
 }
 
-// Helper trait for status predicate filtering on Knative resources
-trait MyHasStatus {
-    type Status;
-
-    fn status(&self) -> Option<&Self::Status>;
-}
-
-impl MyHasStatus for Configuration {
-    type Status = crate::resources::knative::ConfigurationStatus;
-
-    fn status(&self) -> Option<&Self::Status> {
-        self.status.as_ref()
-    }
-}
-
-impl MyHasStatus for Route {
-    type Status = crate::resources::knative::RouteStatus;
-
-    fn status(&self) -> Option<&Self::Status> {
-        self.status.as_ref()
-    }
-}
-
-impl MyHasStatus for Revision {
-    type Status = crate::resources::knative::RevisionStatus;
-
-    fn status(&self) -> Option<&Self::Status> {
-        self.status.as_ref()
-    }
-}
-
-fn status_predicate_serde<K: Resource<DynamicType = ()> + MyHasStatus>(obj: &K) -> Option<u64>
-where
-    K::Status: Serialize,
-{
-    let mut hasher = DefaultHasher::new();
-    if let Some(s) = obj.status() {
-        serde_hashkey::to_key(s)
-            .expect("serde_hashkey never to return an error")
-            .hash(&mut hasher);
-    }
-    let hash = hasher.finish();
-    Some(hash)
-}
-
 /// Generation-based predicate to filter out status-only changes
 /// Only triggers reconciliation when metadata.generation changes (spec changes)
 fn generation_predicate<K: Resource>(obj: &K) -> Option<u64> {
     obj.meta().generation.map(|g| g as u64)
+}
+
+// deletion apparently doesn't lead to any change in metadata otherwise, which means the changed_predicate
+// would drop them.
+fn ensure_deletion_change<K: Resource, E>(
+    mut event: Result<kube::runtime::watcher::Event<K>, E>,
+) -> Result<kube::runtime::watcher::Event<K>, E> {
+    if let Ok(kube::runtime::watcher::Event::Delete(ref mut object)) = event {
+        let meta = object.meta_mut();
+        meta.generation = match meta.generation {
+            Some(val) => Some(val + 1),
+            None => Some(0),
+        }
+    }
+    event
+}
+
+fn changed_predicate<K: Resource>(obj: &K) -> Option<u64> {
+    let mut hasher = DefaultHasher::new();
+    if let Some(g) = obj.meta().generation {
+        // covers spec but not metadata or status
+        g.hash(&mut hasher)
+    }
+    obj.labels().hash(&mut hasher);
+    obj.annotations().hash(&mut hasher);
+    // ignore status
+    Some(hasher.finish())
 }

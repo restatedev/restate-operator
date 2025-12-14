@@ -25,9 +25,9 @@ pub async fn reconcile_knative(
     rsd: &RestateDeployment,
     status: &mut crate::resources::restatedeployments::RestateDeploymentStatus,
 ) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
-    let namespace = rsd
-        .namespace()
-        .ok_or_else(|| Error::InvalidRestateDeployment("RestateDeployment must have a namespace".into()))?;
+    let namespace = rsd.namespace().ok_or_else(|| {
+        Error::InvalidRestateDeployment("RestateDeployment must have a namespace".into())
+    })?;
 
     info!(
         namespace = %namespace,
@@ -76,7 +76,8 @@ pub async fn reconcile_knative(
     debug!(route = %route.name_any(), "Route is ready");
 
     // Step 5: Register or lookup deployment
-    let deployment_id = register_or_lookup_deployment(ctx, rsd, &namespace, &config, &route).await?;
+    let deployment_id =
+        register_or_lookup_deployment(ctx, rsd, &namespace, &config, &route).await?;
     info!(deployment_id = %deployment_id, "Deployment registered/looked up");
 
     // Step 6: Annotate Configuration with deployment metadata
@@ -94,9 +95,9 @@ pub async fn reconcile_knative(
 
     // Step 8: Cleanup old Configurations (mirrors ReplicaSet cleanup pattern)
     let deployments = rsd.list_deployments(ctx).await?;
-    let rsd_uid = rsd.uid().ok_or_else(|| {
-        Error::InvalidRestateDeployment("RestateDeployment must have UID".into())
-    })?;
+    let rsd_uid = rsd
+        .uid()
+        .ok_or_else(|| Error::InvalidRestateDeployment("RestateDeployment must have UID".into()))?;
 
     let (_, next_removal) = cleanup_old_configurations(
         &namespace,
@@ -183,25 +184,34 @@ fn build_configuration_spec(
 
     // Step 2: Apply operator-managed autoscaling annotations (overriding user values)
     if let Some(min) = knative_spec.min_scale {
-        annotations.insert("autoscaling.knative.dev/min-scale".to_string(), min.to_string());
+        annotations.insert(
+            "autoscaling.knative.dev/min-scale".to_string(),
+            min.to_string(),
+        );
     } else {
         // Default to scale-to-zero
-        annotations.insert("autoscaling.knative.dev/min-scale".to_string(), "0".to_string());
+        annotations.insert(
+            "autoscaling.knative.dev/min-scale".to_string(),
+            "0".to_string(),
+        );
     }
 
     if let Some(max) = knative_spec.max_scale {
-        annotations.insert("autoscaling.knative.dev/max-scale".to_string(), max.to_string());
+        annotations.insert(
+            "autoscaling.knative.dev/max-scale".to_string(),
+            max.to_string(),
+        );
     }
 
     if let Some(target) = knative_spec.target {
-        annotations.insert("autoscaling.knative.dev/target".to_string(), target.to_string());
+        annotations.insert(
+            "autoscaling.knative.dev/target".to_string(),
+            target.to_string(),
+        );
     }
 
     // Step 3: Always set parent deployment tracking (operator-managed)
-    annotations.insert(
-        RESTATE_DEPLOYMENT_ANNOTATION.to_string(),
-        rsd.name_any(),
-    );
+    annotations.insert(RESTATE_DEPLOYMENT_ANNOTATION.to_string(), rsd.name_any());
 
     // Get container spec from template
     let containers = rsd
@@ -221,6 +231,9 @@ fn build_configuration_spec(
     // Create owner reference
     let owner_reference = rsd.controller_owner_ref(&()).unwrap();
 
+    let mut config_annotations = BTreeMap::new();
+    config_annotations.insert(RESTATE_DEPLOYMENT_ANNOTATION.to_string(), rsd.name_any());
+
     Ok(json!({
         "apiVersion": "serving.knative.dev/v1",
         "kind": "Configuration",
@@ -228,6 +241,7 @@ fn build_configuration_spec(
             "name": name,
             "namespace": namespace,
             "ownerReferences": [owner_reference],
+            "annotations": config_annotations,
             "labels": {
                 "app.kubernetes.io/managed-by": "restate-operator"
             }
@@ -278,7 +292,7 @@ fn validate_knative_containers(containers: &[serde_json::Value]) -> Result<()> {
 
 /// Ensure containers have Restate port 9080 with h2c protocol
 /// If port 9080 doesn't exist, add it. Otherwise, leave ports as-is.
-fn ensure_restate_port(containers: &mut Vec<serde_json::Value>) -> Result<()> {
+fn ensure_restate_port(containers: &mut [serde_json::Value]) -> Result<()> {
     for container in containers.iter_mut() {
         let ports = container.get_mut("ports").and_then(|p| p.as_array_mut());
 
@@ -319,7 +333,7 @@ fn ensure_restate_port(containers: &mut Vec<serde_json::Value>) -> Result<()> {
 /// If no readiness probe exists, inject a TCP probe on port 9080 (Restate ingress port)
 /// with quick timing parameters suitable for fast-starting Restate SDK services.
 /// Preserves user-specified probes without modification.
-fn ensure_readiness_probe(containers: &mut Vec<serde_json::Value>) -> Result<()> {
+fn ensure_readiness_probe(containers: &mut [serde_json::Value]) -> Result<()> {
     for container in containers.iter_mut() {
         // Check if readiness probe already exists
         if container.get("readinessProbe").is_some() {
@@ -375,7 +389,8 @@ async fn reconcile_route(
         }
     }
 
-    // Operator-managed route annotations can override if needed (currently none)
+    // Operator-managed route annotations can override if needed
+    route_annotations.insert(RESTATE_DEPLOYMENT_ANNOTATION.to_string(), rsd.name_any());
 
     let route_spec = json!({
         "apiVersion": "serving.knative.dev/v1",
@@ -501,10 +516,7 @@ async fn register_or_lookup_deployment(
         .as_ref()
         .and_then(|s| s.url.as_ref())
         .ok_or_else(|| Error::RouteNotReady {
-            message: format!(
-                "Route {} does not have URL in status",
-                route.name_any()
-            ),
+            message: format!("Route {} does not have URL in status", route.name_any()),
             reason: "RouteURLNotReady".into(),
             requeue_after: Some(Duration::from_secs(5)),
         })?;
@@ -711,7 +723,10 @@ pub async fn cleanup_old_configurations(
     for config in configurations {
         let config_name = config.name_any();
 
-        let config_deployment_id = config.metadata.annotations.as_ref()
+        let config_deployment_id = config
+            .metadata
+            .annotations
+            .as_ref()
             .and_then(|a| a.get(RESTATE_DEPLOYMENT_ID_ANNOTATION));
 
         // Skip active deployments
@@ -723,7 +738,10 @@ pub async fn cleanup_old_configurations(
         if deployment_active {
             active_count += 1;
 
-            if config.metadata.annotations.as_ref()
+            if config
+                .metadata
+                .annotations
+                .as_ref()
                 .and_then(|a| a.get(RESTATE_REMOVE_VERSION_AT_ANNOTATION))
                 .is_none()
             {
@@ -763,7 +781,10 @@ pub async fn cleanup_old_configurations(
             continue;
         }
 
-        let current_remove_at = config.metadata.annotations.as_ref()
+        let current_remove_at = config
+            .metadata
+            .annotations
+            .as_ref()
             .and_then(|a| a.get(RESTATE_REMOVE_VERSION_AT_ANNOTATION))
             .and_then(|remove_at| {
                 chrono::DateTime::parse_from_rfc3339(remove_at)
@@ -809,12 +830,11 @@ pub async fn cleanup_old_configurations(
                         &ctx.operator_namespace,
                     )?;
 
-                    let mut request = ctx
-                        .http_client
-                        .request(
-                            reqwest::Method::DELETE,
-                            admin_url.join(&format!("/deployments/{}?force=true", config_deployment_id))?,
-                        );
+                    let mut request = ctx.http_client.request(
+                        reqwest::Method::DELETE,
+                        admin_url
+                            .join(&format!("/deployments/{}?force=true", config_deployment_id))?,
+                    );
 
                     if let Some(token) = bearer_token {
                         request = request.bearer_auth(token);
@@ -892,18 +912,17 @@ pub async fn cleanup_old_configurations(
 
 /// Get tag from Configuration annotation
 fn get_configuration_tag(config: &Configuration) -> Option<String> {
-    config.metadata.annotations.as_ref()
+    config
+        .metadata
+        .annotations
+        .as_ref()
         .and_then(|a| a.get(RESTATE_TAG_ANNOTATION))
         .cloned()
 }
 
 /// Delete Configuration using Foreground cascading deletion
 /// This ensures the dependent Route is fully cleaned up before the Configuration is removed
-async fn delete_configuration(
-    ctx: &Context,
-    namespace: &str,
-    config_name: &str,
-) -> Result<()> {
+async fn delete_configuration(ctx: &Context, namespace: &str, config_name: &str) -> Result<()> {
     debug!(
         configuration = %config_name,
         namespace = %namespace,
