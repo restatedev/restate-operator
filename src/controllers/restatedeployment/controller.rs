@@ -460,7 +460,9 @@ impl RestateDeployment {
 
         let (result, message, reason, status) = if is_knative {
             // Delegate to Knative reconciler
-            match reconcilers::knative::reconcile_knative(&ctx, self, &mut rsd_status).await {
+            match reconcilers::knative::reconcile_knative(&ctx, self, namespace, &mut rsd_status)
+                .await
+            {
                 Ok(next_removal) => {
                     let action = match next_removal {
                         Some(next_removal) if next_removal < now => Action::requeue(Duration::ZERO),

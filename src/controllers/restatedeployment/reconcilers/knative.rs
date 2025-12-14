@@ -24,12 +24,9 @@ const RESTATE_DEPLOYMENT_ANNOTATION: &str = "restate.dev/deployment";
 pub async fn reconcile_knative(
     ctx: &Context,
     rsd: &RestateDeployment,
+    namespace: &str,
     status: &mut crate::resources::restatedeployments::RestateDeploymentStatus,
 ) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
-    let namespace = rsd.namespace().ok_or_else(|| {
-        Error::InvalidRestateDeployment("RestateDeployment must have a namespace".into())
-    })?;
-
     info!(
         namespace = %namespace,
         name = %rsd.name_any(),
@@ -41,11 +38,11 @@ pub async fn reconcile_knative(
     info!(tag = %current_tag, "Determined deployment tag");
 
     // Step 2: Reconcile Configuration for current tag
-    let config = reconcile_configuration(ctx, rsd, &namespace, &current_tag).await?;
+    let config = reconcile_configuration(ctx, rsd, namespace, &current_tag).await?;
     debug!(configuration = %config.name_any(), "Configuration reconciled");
 
     // Step 3: Reconcile Route for current tag
-    let route = reconcile_route(ctx, rsd, &namespace, &current_tag, &config).await?;
+    let route = reconcile_route(ctx, rsd, namespace, &current_tag, &config).await?;
     debug!(route = %route.name_any(), "Route reconciled");
 
     // Step 4: Get the latest created revision (observe rollout eagerly)
@@ -67,7 +64,7 @@ pub async fn reconcile_knative(
     // Fetch the full Revision object for replica counts
     let revision = ctx
         .revision_store
-        .get(&ObjectRef::new(&latest_revision).within(&namespace))
+        .get(&ObjectRef::new(&latest_revision).within(namespace))
         .ok_or_else(|| Error::ConfigurationNotReady {
             message: format!("Revision {} not found in store", latest_revision),
             reason: "RevisionNotFound".into(),
@@ -83,12 +80,11 @@ pub async fn reconcile_knative(
     debug!(route = %route.name_any(), "Route is ready");
 
     // Step 5: Register or lookup deployment
-    let deployment_id =
-        register_or_lookup_deployment(ctx, rsd, &namespace, &config, &route).await?;
+    let deployment_id = register_or_lookup_deployment(ctx, rsd, namespace, &config, &route).await?;
     info!(deployment_id = %deployment_id, "Deployment registered/looked up");
 
     // Step 6: Annotate Configuration with deployment metadata
-    annotate_configuration(ctx, &namespace, &config, &deployment_id, &current_tag).await?;
+    annotate_configuration(ctx, namespace, &config, &deployment_id, &current_tag).await?;
 
     // Step 7: Update RestateDeployment status in-place
     update_status(
@@ -107,7 +103,7 @@ pub async fn reconcile_knative(
         .ok_or_else(|| Error::InvalidRestateDeployment("RestateDeployment must have UID".into()))?;
 
     let (_, next_removal) = cleanup_old_configurations(
-        &namespace,
+        namespace,
         ctx,
         &rsd_uid,
         rsd,
