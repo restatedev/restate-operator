@@ -657,7 +657,6 @@ fn update_status(
         route_name: Some(route.name_any()),
         url,
         latest_revision: Some(revision.name_any()),
-        deployment_id: Some(deployment_id.to_string()),
     };
 
     // Extract replica counts from Revision status
@@ -680,6 +679,7 @@ fn update_status(
 
     // Update status fields in-place
     status.knative = Some(knative_status);
+    status.deployment_id = Some(deployment_id.to_string());
     status.replicas = actual;
     status.desired_replicas = Some(desired);
     status.ready_replicas = ready_replicas;

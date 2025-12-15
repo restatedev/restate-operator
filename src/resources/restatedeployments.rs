@@ -471,6 +471,10 @@ pub struct ServiceReference {
 #[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RestateDeploymentStatus {
+    /// Restate deployment ID for the current tag
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployment_id: Option<String>,
+
     /// Knative-specific status
     /// Only populated when deployment_mode is knative
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -536,10 +540,6 @@ pub struct KnativeDeploymentStatus {
     /// Latest ready revision name for the current Configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_revision: Option<String>,
-
-    /// Restate deployment ID for the current tag
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub deployment_id: Option<String>,
 }
 
 /// Conditions for the RestateDeployment status

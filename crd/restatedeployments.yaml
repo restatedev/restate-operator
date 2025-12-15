@@ -274,6 +274,10 @@ spec:
             description: Status of the RestateDeployment This is set and managed automatically by the controller
             nullable: true
             properties:
+              deploymentId:
+                description: Restate deployment ID for the current tag
+                nullable: true
+                type: string
               availableReplicas:
                 description: Total number of updated available pods (ready for at least minReadySeconds)
                 format: int32
@@ -329,10 +333,6 @@ spec:
                     type: string
                   currentTag:
                     description: Current tag value from spec (or computed template hash)
-                    nullable: true
-                    type: string
-                  deploymentId:
-                    description: Restate deployment ID for the current tag
                     nullable: true
                     type: string
                   latestRevision:

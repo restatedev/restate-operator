@@ -557,6 +557,13 @@ impl RestateDeployment {
                         current_replicaset.status.as_ref(),
                     );
 
+                    if let Some(id) = current_replicaset
+                        .annotations()
+                        .get(RESTATE_DEPLOYMENT_ID_ANNOTATION)
+                    {
+                        rsd_status.deployment_id = Some(id.clone());
+                    }
+
                     (
                         Ok(action),
                         "RestateDeployment is deployed".into(),
