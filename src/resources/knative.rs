@@ -86,6 +86,7 @@ pub struct RevisionTemplateSpec {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[derive(Default)]
 pub struct TrafficTarget {
     /// Configuration name (for routing to latest revision of a Configuration)
     #[serde(skip_serializing_if = "Option::is_none", rename = "configurationName")]
@@ -122,6 +123,7 @@ pub struct TrafficTarget {
     namespaced
 )]
 #[kube(status = "RevisionStatus")]
+#[derive(Default)]
 pub struct RevisionSpec {
     /// Containers in the Revision
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -1,3 +1,4 @@
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -11,7 +12,7 @@ use crate::controllers::restatedeployment::controller::{
     Context, RESTATE_DEPLOYMENT_ID_ANNOTATION,
 };
 use crate::controllers::restatedeployment::reconcilers::replicaset::generate_pod_template_hash;
-use crate::resources::knative::{Configuration, Revision, Route};
+use crate::resources::knative::{Configuration, ConfigurationSpec, Revision, RevisionSpec, RevisionTemplateSpec, Route, RouteSpec, TrafficTarget};
 use crate::resources::restatedeployments::{KnativeDeploymentStatus, RestateDeployment};
 use crate::{Error, Result};
 
@@ -27,7 +28,7 @@ pub async fn reconcile_knative(
     namespace: &str,
     status: &mut crate::resources::restatedeployments::RestateDeploymentStatus,
 ) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
-    info!(
+    debug!(
         namespace = %namespace,
         name = %rsd.name_any(),
         "Reconciling Knative deployment"
@@ -141,7 +142,7 @@ async fn reconcile_configuration(
     // Build Configuration spec
     let config_spec = build_configuration_spec(rsd, &config_name, namespace, tag)?;
 
-    info!(
+    debug!(
         configuration_name = %config_name,
         namespace = %namespace,
         tag = %tag,
@@ -165,7 +166,7 @@ fn build_configuration_spec(
     name: &str,
     namespace: &str,
     _tag: &str,
-) -> Result<serde_json::Value> {
+) -> Result<Configuration> {
     let knative_spec = rsd
         .spec
         .knative
@@ -232,32 +233,44 @@ fn build_configuration_spec(
     let mut config_annotations = BTreeMap::new();
     config_annotations.insert(RESTATE_DEPLOYMENT_ANNOTATION.to_string(), rsd.name_any());
 
-    Ok(json!({
-        "apiVersion": "serving.knative.dev/v1",
-        "kind": "Configuration",
-        "metadata": {
-            "name": name,
-            "namespace": namespace,
-            "ownerReferences": [owner_reference],
-            "annotations": config_annotations,
-            "labels": {
-                "app.kubernetes.io/managed-by": "restate-operator"
-            }
-        },
-        "spec": {
-            "template": {
-                "metadata": {
-                    "annotations": annotations,
-                    "labels": {
-                        "app.kubernetes.io/managed-by": "restate-operator"
-                    }
-                },
-                "spec": {
-                    "containers": containers_array,
-                }
-            }
-        }
-    }))
+    let configuration_metadata = ObjectMeta {
+        name: Some(name.to_string()),
+        namespace: Some(namespace.to_string()),
+        owner_references: Some(vec![owner_reference]),
+        annotations: Some(config_annotations),
+        labels: Some(BTreeMap::from([(
+            "app.kubernetes.io/managed-by".to_string(),
+            "restate-operator".to_string(),
+        )])),
+        ..Default::default()
+    };
+
+    let revision_template_metadata = ObjectMeta {
+        annotations: Some(annotations),
+        labels: Some(BTreeMap::from([(
+            "app.kubernetes.io/managed-by".to_string(),
+            "restate-operator".to_string(),
+        )])),
+        ..Default::default()
+    };
+
+    let revision_spec = RevisionSpec {
+        containers: Some(containers_array),
+        ..Default::default()
+    };
+
+    let configuration_spec = ConfigurationSpec {
+        template: Some(RevisionTemplateSpec {
+            metadata: Some(revision_template_metadata),
+            spec: Some(revision_spec),
+        }),
+    };
+
+    Ok(Configuration {
+        metadata: configuration_metadata,
+        spec: configuration_spec,
+        status: None,
+    })
 }
 
 /// Validate containers for Knative compatibility
@@ -372,6 +385,36 @@ async fn reconcile_route(
     let route_name = format!("{}-{}", rsd.name_any(), tag);
     let config_name = config.name_any();
 
+    debug!(
+        route_name = %route_name,
+        namespace = %namespace,
+        tag = %tag,
+        configuration = %config_name,
+        "Applying Knative Route"
+    );
+
+    // Build Route spec
+    let route_obj = build_route_spec(rsd, &route_name, namespace, &config_name, config)?;
+
+    // Apply Route using server-side apply
+    let route_api: Api<Route> = Api::namespaced(ctx.client.clone(), namespace);
+    let params = PatchParams::apply("restate-operator").force();
+
+    let route = route_api
+        .patch(&route_name, &params, &Patch::Apply(&route_obj))
+        .await?;
+
+    Ok(route)
+}
+
+/// Build Route resource specification
+fn build_route_spec(
+    rsd: &RestateDeployment,
+    name: &str,
+    namespace: &str,
+    config_name: &str,
+    config: &Configuration,
+) -> Result<Route> {
     // Create owner reference
     // Set Configuration as owner to ensure cascading deletion
     // If Configuration is deleted, Route will be garbage collected
@@ -390,45 +433,34 @@ async fn reconcile_route(
     // Operator-managed route annotations can override if needed
     route_annotations.insert(RESTATE_DEPLOYMENT_ANNOTATION.to_string(), rsd.name_any());
 
-    let route_spec = json!({
-        "apiVersion": "serving.knative.dev/v1",
-        "kind": "Route",
-        "metadata": {
-            "name": route_name,
-            "namespace": namespace,
-            "ownerReferences": [owner_reference],
-            "labels": {
-                "app.kubernetes.io/managed-by": "restate-operator",
-                "networking.knative.dev/visibility": "cluster-local"
-            },
-            "annotations": route_annotations
-        },
-        "spec": {
-            "traffic": [{
-                "configurationName": config_name,
-                "latestRevision": true,
-                "percent": 100,
-            }]
-        }
-    });
+    let route_metadata = ObjectMeta {
+        name: Some(name.to_string()),
+        namespace: Some(namespace.to_string()),
+        owner_references: Some(vec![owner_reference]),
+        annotations: Some(route_annotations),
+        labels: Some(BTreeMap::from([
+            ("app.kubernetes.io/managed-by".to_string(), "restate-operator".to_string()),
+            ("networking.knative.dev/visibility".to_string(), "cluster-local".to_string()),
+        ])),
+        ..Default::default()
+    };
 
-    info!(
-        route_name = %route_name,
-        namespace = %namespace,
-        tag = %tag,
-        configuration = %config_name,
-        "Applying Knative Route"
-    );
+    let traffic_target = TrafficTarget {
+        configuration_name: Some(config_name.to_string()),
+        latest_revision: Some(true),
+        percent: Some(100),
+        ..Default::default()
+    };
 
-    // Apply Route using server-side apply
-    let route_api: Api<Route> = Api::namespaced(ctx.client.clone(), namespace);
-    let params = PatchParams::apply("restate-operator").force();
+    let route_spec = RouteSpec {
+        traffic: Some(vec![traffic_target]),
+    };
 
-    let route = route_api
-        .patch(&route_name, &params, &Patch::Apply(&route_spec))
-        .await?;
-
-    Ok(route)
+    Ok(Route {
+        metadata: route_metadata,
+        spec: route_spec,
+        status: None,
+    })
 }
 
 /// Check if Route is ready to serve traffic
@@ -500,7 +532,7 @@ async fn register_or_lookup_deployment(
     // Check if Configuration already has deployment-id annotation
     if let Some(annotations) = &config.metadata.annotations {
         if let Some(deployment_id) = annotations.get(RESTATE_DEPLOYMENT_ID_ANNOTATION) {
-            info!(
+            debug!(
                 deployment_id = %deployment_id,
                 "Found existing deployment ID in Configuration annotation"
             );
