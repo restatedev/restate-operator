@@ -278,8 +278,8 @@ kubectl delete pod -n restate-operator -l app=restate-operator
 export OPERATOR_NAMESPACE=restate-operator
 export RUST_LOG=info
 
-# Run with mise environment
-mise exec -- cargo run
+# Run with cargo
+cargo run
 ```
 
 ### Viewing Logs

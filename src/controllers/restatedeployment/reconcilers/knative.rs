@@ -1,4 +1,3 @@
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use std::collections::BTreeMap;
 use std::time::Duration;
 use url::Url;
@@ -13,7 +12,7 @@ use crate::controllers::restatedeployment::controller::{
     Context, RESTATE_DEPLOYMENT_ID_ANNOTATION,
 };
 use crate::controllers::restatedeployment::reconcilers::replicaset::generate_pod_template_hash;
-use crate::resources::knative::{Configuration, ConfigurationSpec, Revision, RevisionSpec, RevisionTemplateSpec, Route, RouteSpec, TrafficTarget};
+use crate::resources::knative::{Configuration, Revision, Route, ConfigurationTemplate, ConfigurationTemplateMetadata, ConfigurationTemplateSpec, RouteTraffic, ObjectMeta, ConfigurationTemplateSpecContainers, ConfigurationSpec, RouteSpec};
 use crate::resources::restatedeployments::{KnativeDeploymentStatus, RestateDeployment};
 use crate::{Error, Result};
 
@@ -246,7 +245,7 @@ fn build_configuration_spec(
         ..Default::default()
     };
 
-    let revision_template_metadata = ObjectMeta {
+    let configuration_template_metadata = ConfigurationTemplateMetadata {
         annotations: Some(annotations),
         labels: Some(BTreeMap::from([(
             "app.kubernetes.io/managed-by".to_string(),
@@ -255,15 +254,18 @@ fn build_configuration_spec(
         ..Default::default()
     };
 
-    let revision_spec = RevisionSpec {
-        containers: Some(containers_array),
+    let configuration_template_spec = ConfigurationTemplateSpec {
+        containers: containers_array.into_iter().map(|c| {
+            serde_json::from_value(c)
+                .map_err(|e| Error::InvalidRestateConfig(format!("Failed to parse container spec: {}", e)))
+        }).collect::<Result<Vec<ConfigurationTemplateSpecContainers>>>()?,
         ..Default::default()
     };
 
     let configuration_spec = ConfigurationSpec {
-        template: Some(RevisionTemplateSpec {
-            metadata: Some(revision_template_metadata),
-            spec: Some(revision_spec),
+        template: Some(ConfigurationTemplate {
+            metadata: Some(configuration_template_metadata),
+            spec: Some(configuration_template_spec),
         }),
     };
 
@@ -446,7 +448,7 @@ fn build_route_spec(
         ..Default::default()
     };
 
-    let traffic_target = TrafficTarget {
+    let traffic_target = RouteTraffic {
         configuration_name: Some(config_name.to_string()),
         latest_revision: Some(true),
         percent: Some(100),

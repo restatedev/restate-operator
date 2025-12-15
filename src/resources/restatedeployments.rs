@@ -222,7 +222,7 @@ pub struct PodTemplateSpec {
     pub metadata: Option<PodTemplateMetadata>,
 
     /// Specification of the desired behavior of the pod. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status.
-    /// The contents of this field are passed through directly from the operator to the created ReplicaSet and are not validated.
+    /// The contents of this field are passed through directly from the operator to the created ReplicaSet (or Configuration in Knative mode) and are not validated.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spec: Option<serde_json::Value>,
 }
@@ -262,7 +262,7 @@ impl JsonSchema for PodTemplateSpec {
                     }
                 },
                 "spec": {
-                    "description": "Specification of the desired behavior of the pod. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status. The contents of this field are passed through directly from the operator to the created ReplicaSet and are not validated.",
+                    "description": "Specification of the desired behavior of the pod. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status. The contents of this field are passed through directly from the operator to the created ReplicaSet (or Configuration in Knative mode) and are not validated.",
                     "x-kubernetes-preserve-unknown-fields": true,
                     "nullable": true
                 }
