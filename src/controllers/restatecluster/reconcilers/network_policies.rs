@@ -172,7 +172,9 @@ fn allow_access(
             policy_types: Some(vec!["Ingress".into()]),
             ingress: peers.map(|peers| {
                 vec![NetworkPolicyIngressRule {
-                    from: Some(peers),
+                    // 'If this field is empty or missing, this rule matches all sources (traffic not restricted by source)'
+                    // Empty array is normalised by apiserver -> missing array, so to avoid a reconcile loop we do that here
+                    from: if peers.is_empty() { None } else { Some(peers) },
                     ports: Some(vec![NetworkPolicyPort {
                         protocol: Some("TCP".into()),
                         port: Some(IntOrString::Int(port)),
