@@ -665,7 +665,7 @@ impl RestateDeployment {
     }
 
     /// Register a service version with the Restate cluster
-    async fn register_service_with_restate(
+    pub(super) async fn register_service_with_restate(
         &self,
         ctx: &Context,
         service_endpoint: &Url,

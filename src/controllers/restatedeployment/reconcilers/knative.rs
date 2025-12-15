@@ -1,6 +1,7 @@
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use std::collections::BTreeMap;
 use std::time::Duration;
+use url::Url;
 
 use kube::api::{Api, DeleteParams, Patch, PatchParams, PropagationPolicy};
 use kube::runtime::reflector::ObjectRef;
@@ -101,7 +102,7 @@ pub async fn reconcile_knative(
     let deployments = rsd.list_deployments(ctx).await?;
     let rsd_uid = rsd
         .uid()
-        .ok_or_else(|| Error::InvalidRestateDeployment("RestateDeployment must have UID".into()))?;
+        .ok_or_else(|| Error::InvalidRestateConfig("RestateDeployment must have UID".into()))?;
 
     let (_, next_removal) = cleanup_old_configurations(
         namespace,
@@ -171,7 +172,7 @@ fn build_configuration_spec(
         .spec
         .knative
         .as_ref()
-        .ok_or_else(|| Error::InvalidRestateDeployment("Missing knative spec".into()))?;
+        .ok_or_else(|| Error::InvalidRestateConfig("Missing knative spec".into()))?;
 
     // Build revision template annotations
     let mut annotations = BTreeMap::new();
@@ -219,7 +220,7 @@ fn build_configuration_spec(
         .spec
         .as_ref()
         .and_then(|spec| spec.get("containers"))
-        .ok_or_else(|| Error::InvalidRestateDeployment("Missing containers in template".into()))?;
+        .ok_or_else(|| Error::InvalidRestateConfig("Missing containers in template".into()))?;
 
     // Ensure Restate port and validate for Knative compatibility
     let mut containers_array: Vec<serde_json::Value> = serde_json::from_value(containers.clone())?;
@@ -283,7 +284,7 @@ fn validate_knative_containers(containers: &[serde_json::Value]) -> Result<()> {
             for port in ports {
                 if let Some(port_name) = port.get("name").and_then(|n| n.as_str()) {
                     if port_name != "h2c" && port_name != "http1" {
-                        return Err(Error::InvalidRestateDeployment(
+                        return Err(Error::InvalidRestateConfig(
                             format!(
                                 "Container {} has invalid port name '{}'. Knative only allows port names: 'h2c' or 'http1'. \
                                 Please update the port name in spec.template.spec.containers[{}].ports",
@@ -541,7 +542,7 @@ async fn register_or_lookup_deployment(
     }
 
     // Build endpoint URL from Route default URL
-    let url = route
+    let url_str = route
         .status
         .as_ref()
         .and_then(|s| s.url.as_ref())
@@ -551,48 +552,17 @@ async fn register_or_lookup_deployment(
             requeue_after: Some(Duration::from_secs(5)),
         })?;
 
+    let url = Url::parse(url_str)?;
+
     info!(url = %url, "Registering new deployment with Restate");
 
-    // Get admin URL
-    let admin_url = rsd.spec.restate.register.admin_url(&ctx.rce_store)?;
-
-    // Get bearer token if needed
-    let bearer_token = rsd.spec.restate.register.bearer_token(
-        &ctx.rce_store,
-        &ctx.secret_store,
-        &ctx.operator_namespace,
-    )?;
-
-    // Build registration request
-    let mut request = ctx
-        .http_client
-        .request(reqwest::Method::POST, admin_url.join("/deployments")?)
-        .json(&json!({
-            "uri": url,
-            "use_http_11": rsd.spec.restate.use_http11.unwrap_or(false),
-        }));
-
-    if let Some(token) = bearer_token {
-        request = request.bearer_auth(token);
-    }
-
-    let response = request.send().await.map_err(Error::AdminCallFailed)?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.map_err(Error::AdminCallFailed)?;
-        return Err(Error::RestateRegistrationFailed(format!(
-            "Failed to register deployment: {} - {}",
-            status, body
-        )));
-    }
-
-    let response_json: serde_json::Value = response.json().await.map_err(Error::AdminCallFailed)?;
-    let deployment_id = response_json
-        .get("id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::RestateRegistrationFailed("No deployment ID in response".into()))?
-        .to_string();
+    let deployment_id = rsd
+        .register_service_with_restate(
+            ctx,
+            &url,
+            rsd.spec.restate.use_http11.as_ref().cloned(),
+        )
+        .await?;
 
     info!(
         deployment_id = %deployment_id,

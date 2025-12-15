@@ -77,12 +77,6 @@ pub enum Error {
         requeue_after: Option<Duration>,
     },
 
-    #[error("Failed to register deployment with Restate: {0}")]
-    RestateRegistrationFailed(String),
-
-    #[error("Invalid RestateDeployment: {0}")]
-    InvalidRestateDeployment(String),
-
     #[error(transparent)]
     InvalidUrl(#[from] url::ParseError),
 }
@@ -110,8 +104,6 @@ impl Error {
             Error::DeploymentDraining { .. } => "DeploymentDraining",
             Error::ConfigurationNotReady { .. } => "ConfigurationNotReady",
             Error::RouteNotReady { .. } => "RouteNotReady",
-            Error::RestateRegistrationFailed(_) => "RestateRegistrationFailed",
-            Error::InvalidRestateDeployment(_) => "InvalidRestateDeployment",
             Error::InvalidUrl { .. } => "InvalidUrl",
         }
     }
