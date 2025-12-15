@@ -1,18 +1,3 @@
-# V2 Deployment - Apply after v1 to demonstrate version upgrade
-#
-# When applied:
-#   - New ReplicaSet created with v2 pods
-#   - New invocations route to v2
-#   - v1 pods stay alive while in-flight invocations complete
-#   - Once v1 invocations drain, v1 pods terminate
-#
-# Test with:
-#   1. Start slow request: curl localhost:8080/Greeter/slowGreet -d '{"name":"Alice","delaySeconds":60}' &
-#   2. Apply this manifest: kubectl apply -f greeter-replicaset-v2.yaml
-#   3. Watch pods: kubectl get pods -l app=greeter-replicaset -w
-#   4. New requests go to v2, old request completes on v1
-
----
 apiVersion: restate.dev/v1beta1
 kind: RestateDeployment
 metadata:
@@ -21,7 +6,7 @@ spec:
   replicas: 1
   restate:
     register:
-      cluster: restate
+      cluster: restate  # Name of your RestateCluster
   selector:
     matchLabels:
       app: greeter-replicaset
@@ -39,14 +24,14 @@ spec:
               containerPort: 9080
           env:
             - name: SERVICE_VERSION
-              value: "v2"
+              value: "v1"
             - name: POD_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-            # v2 includes the antidote fix
-            - name: ANTIDOTE
-              value: "cure"
+            # Uncomment to fix "poison" input handling:
+            # - name: ANTIDOTE
+            #   value: "cure"
           resources:
             requests:
               memory: "64Mi"

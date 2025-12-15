@@ -10,7 +10,7 @@ kubectl apply -f cluster/cluster.yaml
 kubectl -n restate exec -it restate-0 -- restatectl provision
 
 # 2. Deploy example service (ReplicaSet mode)
-kubectl apply -f services/greeter/k8s/greeter-replicaset-v1.yaml
+kubectl apply -f services/greeter/k8s/replicaset-v1.yaml
 
 # 3. Port-forward to access Restate
 kubectl port-forward -n restate svc/restate 8080:8080
@@ -71,7 +71,7 @@ A complete example Restate service demonstrating immutable deployments.
 
 **Quick Start (ReplicaSet):**
 ```bash
-kubectl apply -f services/greeter/k8s/greeter-replicaset-v1.yaml
+kubectl apply -f services/greeter/k8s/replicaset-v1.yaml
 ```
 
 **Quick Start (Knative):**
@@ -130,7 +130,7 @@ kubectl apply -f cluster/cluster.yaml
 kubectl -n restate exec -it restate-0 -- restatectl provision
 
 # 2. Deploy service
-kubectl apply -f services/greeter/k8s/greeter-replicaset-v1.yaml
+kubectl apply -f services/greeter/k8s/replicaset-v1.yaml
 
 # 3. Make changes to service code
 # (edit services/greeter/src/index.ts)
@@ -140,10 +140,10 @@ docker build -t ghcr.io/restatedev/restate-operator/greeter:dev services/greeter
 docker push ghcr.io/restatedev/restate-operator/greeter:dev
 
 # 5. Update manifest with new image
-# (edit services/greeter/k8s/greeter-replicaset-v1.yaml)
+# (edit services/greeter/k8s/replicaset-v1.yaml)
 
 # 6. Apply update
-kubectl apply -f services/greeter/k8s/greeter-replicaset-v1.yaml
+kubectl apply -f services/greeter/k8s/replicaset-v1.yaml
 ```
 
 ### CI/CD Workflow

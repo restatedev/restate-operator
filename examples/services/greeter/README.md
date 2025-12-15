@@ -64,8 +64,8 @@ Uses Kubernetes ReplicaSet for traditional pod management:
 - **Every template change creates a NEW Restate deployment** (versioned updates only)
 
 **Manifests:**
-- `k8s/greeter-replicaset-v1.yaml` - Initial deployment (no ANTIDOTE)
-- `k8s/greeter-replicaset-v2.yaml` - Version upgrade (includes ANTIDOTE fix)
+- `k8s/replicaset-v1.yaml` - Initial deployment (no ANTIDOTE)
+- `k8s/replicaset-v2.yaml` - Version upgrade (includes ANTIDOTE fix)
 
 ### Knative Mode
 
@@ -104,7 +104,7 @@ See which deployment handles each request:
 
 ```bash
 # Deploy v1
-kubectl apply -f k8s/greeter-replicaset-v1.yaml
+kubectl apply -f k8s/replicaset-v1.yaml
 
 curl localhost:8080/Greeter/greet -d '"Alice"' | jq
 # {
@@ -114,7 +114,7 @@ curl localhost:8080/Greeter/greet -d '"Alice"' | jq
 # }
 
 # Deploy v2
-kubectl apply -f k8s/greeter-replicaset-v2.yaml
+kubectl apply -f k8s/replicaset-v2.yaml
 
 curl localhost:8080/Greeter/greet -d '"Alice"' | jq
 # {
@@ -134,7 +134,7 @@ curl localhost:8080/Greeter/slowGreet \
   -d '{"name":"Bob","delaySeconds":60}' &
 
 # Immediately deploy v2
-kubectl apply -f k8s/greeter-replicaset-v2.yaml
+kubectl apply -f k8s/replicaset-v2.yaml
 
 # Watch pods - v1 stays until slowGreet completes
 kubectl get pods -l app=greeter-replicaset -w
@@ -145,7 +145,7 @@ kubectl get pods -l app=greeter-replicaset -w
 # After 60s, v1 pod terminates
 ```
 
-### 4. Fix In-Place (Knative)
+### 3. Fix In-Place (Knative)
 
 Fix the service by adding the `ANTIDOTE` environment variable to the existing deployment.
 
@@ -156,7 +156,7 @@ kubectl patch restatedeployment greeter-knative --type='json' -p='[{"op": "add",
 Knative will automatically create a new revision (e.g., `greeter-knative-v1-00002`) and gradually roll out the traffic. The Restate deployment ID remains the same.
 
 
-**Note:** ReplicaSet mode does NOT support in-place fixes. Every template change creates a new Restate deployment with a different ID. Stuck invocations continue retrying against the old pods, so you must manually cancel them. Use `k8s/greeter-replicaset-v2.yaml` which includes the ANTIDOTE fix as a versioned update.
+**Note:** ReplicaSet mode does NOT support in-place fixes. Every template change creates a new Restate deployment with a different ID. Stuck invocations continue retrying against the old pods, so you must manually cancel them. Use `k8s/replicaset-v2.yaml` which includes the ANTIDOTE fix as a versioned update.
 
 ## Files
 
@@ -167,8 +167,8 @@ Knative will automatically create a new revision (e.g., `greeter-knative-v1-0000
 ├── tsconfig.json
 ├── README.md                       # This file
 └── k8s/
-    ├── greeter-replicaset-v1.yaml  # ReplicaSet: Initial deployment (no ANTIDOTE)
-    ├── greeter-replicaset-v2.yaml  # ReplicaSet: Version upgrade (with ANTIDOTE)
+    ├── replicaset-v1.yaml  # ReplicaSet: Initial deployment (no ANTIDOTE)
+    ├── replicaset-v2.yaml  # ReplicaSet: Version upgrade (with ANTIDOTE)
 ├── knative-auto.yaml           # Knative: Auto-versioning (no explicit tag)
 ├── knative-v1.yaml             # Knative: Explicit tag v1 (Deployment ID: dp_...)
 ├── knative-v2.yaml             # Knative: New tag v2 (New Deployment ID)
