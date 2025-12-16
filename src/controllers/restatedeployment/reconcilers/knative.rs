@@ -1,18 +1,19 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
-use url::Url;
 
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{Api, DeleteParams, Patch, PatchParams, PropagationPolicy};
 use kube::runtime::reflector::ObjectRef;
 use kube::{Resource, ResourceExt};
 use serde_json::json;
 use tracing::*;
+use url::Url;
 
 use crate::controllers::restatedeployment::controller::{
-    Context, RESTATE_DEPLOYMENT_ID_ANNOTATION,
+ Context, RESTATE_DEPLOYMENT_ID_ANNOTATION,
 };
 use crate::controllers::restatedeployment::reconcilers::replicaset::generate_pod_template_hash;
-use crate::resources::knative::{Configuration, Revision, Route, ConfigurationTemplate, ConfigurationTemplateMetadata, ConfigurationTemplateSpec, RouteTraffic, ObjectMeta, ConfigurationTemplateSpecContainers, ConfigurationSpec, RouteSpec};
+use crate::resources::knative::{Configuration, Revision, Route, ConfigurationTemplate, ConfigurationTemplateMetadata, ConfigurationTemplateSpec, RouteTraffic, ConfigurationTemplateSpecContainers, ConfigurationSpec, RouteSpec};
 use crate::resources::restatedeployments::{KnativeDeploymentStatus, RestateDeployment};
 use crate::{Error, Result};
 
