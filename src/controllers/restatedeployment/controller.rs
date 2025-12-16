@@ -596,7 +596,7 @@ impl RestateDeployment {
                     rsd_status.collision_count = Some(rsd_status.collision_count.unwrap_or(0) + 1);
 
                     (
-                    // requeue immediately, although in practice the status update should requeue us
+                    // requeue immediately
                     Ok(Action::requeue(Duration::ZERO)),
                     "Encountered a ReplicaSet hash collision, will retry with a new template hash"
                         .into(),
