@@ -814,8 +814,7 @@ impl RestateDeployment {
         let my_uid = self.uid().expect("RestateDeployment to have a uid");
 
         // Check if Knative mode
-        use crate::resources::restatedeployments::DeploymentMode;
-        let is_knative = matches!(self.spec.deployment_mode, Some(DeploymentMode::Knative))
+        let is_knative = matches!(self.spec.deployment_mode, Some(crate::resources::restatedeployments::DeploymentMode::Knative))
             || self.spec.knative.is_some();
 
         let (active_count, next_removal) = if is_knative {
