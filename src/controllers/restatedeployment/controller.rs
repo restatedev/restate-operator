@@ -701,6 +701,13 @@ impl RestateDeployment {
             .await
             .map_err(Error::AdminCallFailed)?;
 
+        let deployment_id = &resp.id;
+        info!(
+            deployment_id = %deployment_id,
+            url = %service_endpoint,
+            "Successfully registered Restate deployment"
+        );
+        
         Ok(resp.id)
     }
 

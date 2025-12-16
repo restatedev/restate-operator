@@ -36,7 +36,7 @@ pub async fn reconcile_knative(
 
     // Step 1: Determine current tag
     let current_tag = determine_tag(rsd)?;
-    info!(tag = %current_tag, "Determined deployment tag");
+    trace!(tag = %current_tag, "Determined deployment tag");
 
     // Step 2: Reconcile Configuration for current tag
     let config = reconcile_configuration(ctx, rsd, namespace, &current_tag).await?;
@@ -82,7 +82,7 @@ pub async fn reconcile_knative(
 
     // Step 5: Register or lookup deployment
     let deployment_id = register_or_lookup_deployment(ctx, rsd, namespace, &config, &route).await?;
-    info!(deployment_id = %deployment_id, "Deployment registered/looked up");
+    debug!(deployment_id = %deployment_id, "Deployment registered/looked up");
 
     // Step 6: Annotate Configuration with deployment metadata
     annotate_configuration(ctx, namespace, &config, &deployment_id, &current_tag).await?;
@@ -556,8 +556,6 @@ async fn register_or_lookup_deployment(
 
     let url = Url::parse(url_str)?;
 
-    info!(url = %url, "Registering new deployment with Restate");
-
     let deployment_id = rsd
         .register_service_with_restate(
             ctx,
@@ -565,11 +563,6 @@ async fn register_or_lookup_deployment(
             rsd.spec.restate.use_http11.as_ref().cloned(),
         )
         .await?;
-
-    info!(
-        deployment_id = %deployment_id,
-        "Successfully registered deployment"
-    );
 
     Ok(deployment_id)
 }
