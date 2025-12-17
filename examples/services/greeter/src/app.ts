@@ -1,5 +1,4 @@
 import * as restate from "@restatedev/restate-sdk";
-import * as http2 from "http2";
 
 // Deployment identity from environment
 const VERSION = process.env.SERVICE_VERSION || "v1";
@@ -115,30 +114,7 @@ console.log(`
 └─────────────────────────────────────────────────────┘
 `);
 
-// Create HTTP2 server with manual lifecycle control for graceful shutdown
-const handler = restate.createEndpointHandler({ services: [greeter] });
-const server = http2.createServer(handler);
-
-const PORT = 9080;
-server.listen(PORT, () => {
-  console.log(`[${VERSION}/${POD_NAME}] Server listening on port ${PORT}`);
+restate.serve({
+  services: [greeter],
+  port: 9080,
 });
-
-// Graceful shutdown on SIGTERM (kubelet) and SIGINT (Ctrl+C)
-const shutdown = (signal: string) => {
-  console.log(`[${VERSION}/${POD_NAME}] Received ${signal}, shutting down gracefully...`);
-
-  server.close(() => {
-    console.log(`[${VERSION}/${POD_NAME}] Server closed, exiting.`);
-    process.exit(0);
-  });
-
-  // Force exit after 30s if graceful shutdown hangs
-  setTimeout(() => {
-    console.error(`[${VERSION}/${POD_NAME}] Graceful shutdown timeout, forcing exit.`);
-    process.exit(1);
-  }, 30000);
-};
-
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
