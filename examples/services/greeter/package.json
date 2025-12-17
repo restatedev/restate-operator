@@ -2,11 +2,16 @@
   "name": "@restatedev/greeter",
   "version": "1.0.0",
   "description": "Greeter example service for demonstrating RestateDeployment immutable deployments",
-  "main": "dist/index.js",
+  "main": "dist/app.js",
   "scripts": {
-    "build": "tsc",
-    "start": "node dist/index.js",
-    "dev": "tsx src/index.ts"
+    "build": "tsc --noEmitOnError",
+    "start": "node dist/app.js",
+    "dev": "tsx src/app.ts",
+    "prebundle": "rm -rf dist",
+    "bundle": "esbuild src/app.ts --bundle --minify --sourcemap --platform=node --target=es2020 --outfile=dist/app.js",
+    "postbundle": "cd dist && zip -r index.zip app.js*",
+    "app": "npm run start",
+    "app-dev": "npm run dev"
   },
   "keywords": [
     "restate",
@@ -20,6 +25,7 @@
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "esbuild": "^0.25.4",
     "tsx": "^4.0.0",
     "typescript": "^5.0.0"
   }
