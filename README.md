@@ -425,7 +425,8 @@ spec:
 
 | Field | Type | Description |
 |---|---|---|
-| `secret` | `object` | **Required**. A reference to a secret in the same namespace as the operator. See details below. |
+| `secret` | `object` | **Required**. A reference to a secret that will be used for registration, as well as being mounted to the tunnel pods unless a `secretProvider` is also specified. |
+| `secretProvider` | `object` | A reference to a `SecretProviderClass` that should be mounted to the tunnel pods to authenticate the tunnel. A Kubernetes Secret (synced by the Secret Store CSI Driver) is still necessary for the operator to register services. See details below. |
 
 **`secret` Fields**
 
@@ -433,6 +434,13 @@ spec:
 |---|---|---|
 | `name` | `string` | **Required**. The name of the referenced secret. It must be in the same namespace as the operator. |
 | `key` | `string` | **Required**. The key to read from the referenced Secret. |
+
+**`secretProvider` Fields**
+
+| Field | Type | Description |
+|---|---|---|
+| `secretProviderClass` | `string` | **Required**. The name of the referenced `SecretProviderClass`. It must be in the same namespace as the operator. |
+| `path` | `string` | **Required**. The path that the token will be available at inside the secret volume. |
 
 ---
 
