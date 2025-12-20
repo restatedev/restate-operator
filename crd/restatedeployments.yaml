@@ -261,7 +261,7 @@ spec:
                         type: object
                     type: object
                   spec:
-                    description: 'Specification of the desired behavior of the pod. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status. The contents of this field are passed through directly from the operator to the created ReplicaSet and are not validated.'
+                    description: 'Specification of the desired behavior of the pod. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status. The contents of this field are passed through directly from the operator to the created ReplicaSet (or Configuration in Knative mode) and are not validated.'
                     nullable: true
                     x-kubernetes-preserve-unknown-fields: true
                 type: object
@@ -274,10 +274,6 @@ spec:
             description: Status of the RestateDeployment This is set and managed automatically by the controller
             nullable: true
             properties:
-              deploymentId:
-                description: Restate deployment ID for the current tag
-                nullable: true
-                type: string
               availableReplicas:
                 description: Total number of updated available pods (ready for at least minReadySeconds)
                 format: int32
@@ -318,6 +314,10 @@ spec:
                   type: object
                 nullable: true
                 type: array
+              deploymentId:
+                description: Restate deployment ID for the current tag
+                nullable: true
+                type: string
               desiredReplicas:
                 description: 'Desired number of replicas - For ReplicaSet mode: reflects spec.replicas - For Knative mode: reflects revision.status.desired_replicas from latest revision'
                 format: int32
