@@ -707,7 +707,7 @@ impl RestateDeployment {
             url = %service_endpoint,
             "Successfully registered Restate deployment"
         );
-        
+
         Ok(resp.id)
     }
 
@@ -814,8 +814,10 @@ impl RestateDeployment {
         let my_uid = self.uid().expect("RestateDeployment to have a uid");
 
         // Check if Knative mode
-        let is_knative = matches!(self.spec.deployment_mode, Some(crate::resources::restatedeployments::DeploymentMode::Knative))
-            || self.spec.knative.is_some();
+        let is_knative = matches!(
+            self.spec.deployment_mode,
+            Some(crate::resources::restatedeployments::DeploymentMode::Knative)
+        ) || self.spec.knative.is_some();
 
         let (active_count, next_removal) = if is_knative {
             // Knative cleanup path - same pattern as ReplicaSet
@@ -1017,45 +1019,63 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
 
     // Create a controller for RestateDeployment
     // Use deployments_reflector with generation predicate to filter out status-only changes
-    let controller = controller::Controller::for_stream(deployments_reflector, deployments_store)
-        .shutdown_on_signal()
-        .owns_stream(replicaset_reflector);
+    let mut controller =
+        controller::Controller::for_stream(deployments_reflector, deployments_store)
+            .shutdown_on_signal()
+            .owns_stream(replicaset_reflector);
 
-    let configurations: Api<Configuration> = Api::all(client.clone());
-    let config_watcher = metadata_watcher(configurations, cfg.clone())
-        .touched_objects()
-        .default_backoff();
-
-    let routes: Api<Route> = Api::all(client.clone());
-    let route_watcher = metadata_watcher(routes, cfg.clone())
-        .touched_objects()
-        .default_backoff();
-
-    let revisions: Api<Revision> = Api::all(client.clone());
     let (revision_store, revision_writer) = reflector::store();
-    let revision_reflector = reflector(revision_writer, watcher(revisions, cfg.clone()))
-        .touched_objects()
-        .default_backoff();
+    let configurations: Api<Configuration> = Api::all(client.clone());
+
+    // Check if Knative is installed by attempting to list Configurations
+    let knative_installed = configurations
+        .list(&ListParams::default().limit(1))
+        .await
+        .is_ok();
+
+    if knative_installed {
+        info!("Knative detected; enabling Knative support");
+    } else {
+        info!("Knative not detected; disabling Knative support");
+    }
+
+    if knative_installed {
+        let config_watcher = metadata_watcher(configurations, cfg.clone())
+            .touched_objects()
+            .default_backoff();
+
+        let routes: Api<Route> = Api::all(client.clone());
+        let route_watcher = metadata_watcher(routes, cfg.clone())
+            .touched_objects()
+            .default_backoff();
+
+        let revisions: Api<Revision> = Api::all(client.clone());
+        let revision_reflector = reflector(revision_writer, watcher(revisions, cfg.clone()))
+            .touched_objects()
+            .default_backoff();
+
+        controller = controller
+            .watches_stream(config_watcher, |meta| {
+                // Extract parent RestateDeployment name from annotation
+                let name = meta.annotations().get("restate.dev/deployment")?;
+                let namespace = meta.namespace()?;
+                Some(ObjectRef::new(name).within(&namespace))
+            })
+            .watches_stream(route_watcher, |meta| {
+                // Extract parent RestateDeployment name from annotation
+                let name = meta.annotations().get("restate.dev/deployment")?;
+                let namespace = meta.namespace()?;
+                Some(ObjectRef::new(name).within(&namespace))
+            })
+            .watches_stream(revision_reflector, |obj| {
+                // Extract parent RestateDeployment name from annotation
+                let name = obj.annotations().get("restate.dev/deployment")?;
+                let namespace = obj.namespace()?;
+                Some(ObjectRef::new(name).within(&namespace))
+            });
+    }
 
     controller
-        .watches_stream(config_watcher, |meta| {
-            // Extract parent RestateDeployment name from annotation
-            let name = meta.annotations().get("restate.dev/deployment")?;
-            let namespace = meta.namespace()?;
-            Some(ObjectRef::new(name).within(&namespace))
-        })
-        .watches_stream(route_watcher, |meta| {
-            // Extract parent RestateDeployment name from annotation
-            let name = meta.annotations().get("restate.dev/deployment")?;
-            let namespace = meta.namespace()?;
-            Some(ObjectRef::new(name).within(&namespace))
-        })
-        .watches_stream(revision_reflector, |obj| {
-            // Extract parent RestateDeployment name from annotation
-            let name = obj.annotations().get("restate.dev/deployment")?;
-            let namespace = obj.namespace()?;
-            Some(ObjectRef::new(name).within(&namespace))
-        })
         // just so that these get polled; we have no way to figure out which rsd may use the updated rce or secret
         .watches_stream(rce_reflector, |_| std::iter::empty())
         .watches_stream(secret_reflector, |_| std::iter::empty())
