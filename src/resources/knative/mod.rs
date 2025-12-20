@@ -5,10 +5,10 @@
 //! in `src/resources/knative/` directory.
 
 pub mod configuration;
-pub mod route;
 pub mod revision;
+pub mod route;
 
 // Re-export the types from the sub-modules for easier access.
 pub use configuration::*;
-pub use route::*;
 pub use revision::*;
+pub use route::*;

@@ -10,10 +10,14 @@ use tracing::*;
 use url::Url;
 
 use crate::controllers::restatedeployment::controller::{
- Context, RESTATE_DEPLOYMENT_ID_ANNOTATION,
+    Context, RESTATE_DEPLOYMENT_ID_ANNOTATION,
 };
 use crate::controllers::restatedeployment::reconcilers::replicaset::generate_pod_template_hash;
-use crate::resources::knative::{Configuration, Revision, Route, ConfigurationTemplate, ConfigurationTemplateMetadata, ConfigurationTemplateSpec, RouteTraffic, ConfigurationTemplateSpecContainers, ConfigurationSpec, RouteSpec};
+use crate::resources::knative::{
+    Configuration, ConfigurationSpec, ConfigurationTemplate, ConfigurationTemplateMetadata,
+    ConfigurationTemplateSpec, ConfigurationTemplateSpecContainers, Revision, Route, RouteSpec,
+    RouteTraffic,
+};
 use crate::resources::restatedeployments::{KnativeDeploymentStatus, RestateDeployment};
 use crate::{Error, Result};
 
@@ -256,10 +260,14 @@ fn build_configuration_spec(
     };
 
     let configuration_template_spec = ConfigurationTemplateSpec {
-        containers: containers_array.into_iter().map(|c| {
-            serde_json::from_value(c)
-                .map_err(|e| Error::InvalidRestateConfig(format!("Failed to parse container spec: {}", e)))
-        }).collect::<Result<Vec<ConfigurationTemplateSpecContainers>>>()?,
+        containers: containers_array
+            .into_iter()
+            .map(|c| {
+                serde_json::from_value(c).map_err(|e| {
+                    Error::InvalidRestateConfig(format!("Failed to parse container spec: {}", e))
+                })
+            })
+            .collect::<Result<Vec<ConfigurationTemplateSpecContainers>>>()?,
         ..Default::default()
     };
 
@@ -443,8 +451,14 @@ fn build_route_spec(
         owner_references: Some(vec![owner_reference]),
         annotations: Some(route_annotations),
         labels: Some(BTreeMap::from([
-            ("app.kubernetes.io/managed-by".to_string(), "restate-operator".to_string()),
-            ("networking.knative.dev/visibility".to_string(), "cluster-local".to_string()),
+            (
+                "app.kubernetes.io/managed-by".to_string(),
+                "restate-operator".to_string(),
+            ),
+            (
+                "networking.knative.dev/visibility".to_string(),
+                "cluster-local".to_string(),
+            ),
         ])),
         ..Default::default()
     };
@@ -558,11 +572,7 @@ async fn register_or_lookup_deployment(
     let url = Url::parse(url_str)?;
 
     let deployment_id = rsd
-        .register_service_with_restate(
-            ctx,
-            &url,
-            rsd.spec.restate.use_http11.as_ref().cloned(),
-        )
+        .register_service_with_restate(ctx, &url, rsd.spec.restate.use_http11.as_ref().cloned())
         .await?;
 
     Ok(deployment_id)
