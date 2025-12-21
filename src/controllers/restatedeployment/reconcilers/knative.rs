@@ -90,7 +90,7 @@ pub async fn reconcile_knative(
     debug!(deployment_id = %deployment_id, "Deployment registered/looked up");
 
     // Step 6: Annotate Configuration with deployment metadata
-    annotate_configuration(ctx, namespace, &config, &deployment_id, &current_tag).await?;
+    annotate_configuration(ctx, namespace, &config, &deployment_id).await?;
 
     // Step 7: Update RestateDeployment status in-place
     update_status(
@@ -237,6 +237,7 @@ fn build_configuration_spec(
 
     let mut config_annotations = BTreeMap::new();
     config_annotations.insert(RESTATE_DEPLOYMENT_ANNOTATION.to_string(), rsd.name_any());
+    config_annotations.insert(RESTATE_TAG_ANNOTATION.to_string(), _tag.to_string());
 
     let configuration_metadata = ObjectMeta {
         name: Some(name.to_string()),
@@ -584,8 +585,17 @@ async fn annotate_configuration(
     namespace: &str,
     config: &Configuration,
     deployment_id: &str,
-    tag: &str,
 ) -> Result<()> {
+    // Check if the configuration already has the correct annotations
+    if let Some(annotations) = &config.metadata.annotations {
+        let current_id = annotations.get(RESTATE_DEPLOYMENT_ID_ANNOTATION);
+
+        if current_id == Some(&deployment_id.to_string()) {
+            debug!("Configuration already annotated with deployment ID, skipping patch");
+            return Ok(());
+        }
+    }
+
     let config_name = config.name_any();
 
     let config_api: Api<Configuration> = Api::namespaced(ctx.client.clone(), namespace);
@@ -603,7 +613,6 @@ async fn annotate_configuration(
                 "metadata": {
                     "annotations": {
                         RESTATE_DEPLOYMENT_ID_ANNOTATION: deployment_id,
-                        RESTATE_TAG_ANNOTATION: tag,
                         RESTATE_REGISTERED_AT_ANNOTATION: chrono::Utc::now().to_rfc3339(),
                     }
                 }

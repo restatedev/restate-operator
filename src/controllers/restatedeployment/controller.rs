@@ -438,7 +438,7 @@ impl RestateDeployment {
         let is_knative = matches!(self.spec.deployment_mode, Some(DeploymentMode::Knative))
             || self.spec.knative.is_some();
 
-        debug!(
+        trace!(
             deployment_mode = if is_knative { "Knative" } else { "ReplicaSet" },
             name = %self.metadata.name.as_deref().unwrap_or("unknown"),
             namespace = %namespace,
