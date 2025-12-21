@@ -1027,11 +1027,17 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     let (revision_store, revision_writer) = reflector::store();
     let configurations: Api<Configuration> = Api::all(client.clone());
 
-    // Check if Knative is installed by attempting to list Configurations
-    let knative_installed = configurations
-        .list(&ListParams::default().limit(1))
+    // Check if Knative is installed by checking if the serving.knative.dev API group exists
+    let knative_installed = client
+        .list_api_groups()
         .await
-        .is_ok();
+        .map(|groups| {
+            groups
+                .groups
+                .iter()
+                .any(|g| g.name == "serving.knative.dev")
+        })
+        .unwrap_or(false);
 
     if knative_installed {
         info!("Knative detected; enabling Knative support");
