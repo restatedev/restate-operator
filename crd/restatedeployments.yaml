@@ -264,7 +264,12 @@ spec:
                         type: object
                     type: object
                   spec:
-                    description: 'Specification of the desired behavior of the pod. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status. The contents of this field are passed through directly from the operator to the created ReplicaSet (or Configuration in Knative mode) and are not validated.'
+                    description: |-
+                      Specification of the desired behavior of the pod. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status.
+
+                      The contents of this field are passed through directly from the operator to the created workload:
+                      - **ReplicaSet mode**: Passed to the ReplicaSet's pod template spec.
+                      - **Knative mode**: Passed to the Configuration's revision template spec. This supports standard PodSpec fields (containers, serviceAccountName, volumes, etc.) as well as Knative-specific fields (timeoutSeconds, containerConcurrency, etc.).
                     nullable: true
                     x-kubernetes-preserve-unknown-fields: true
                 type: object

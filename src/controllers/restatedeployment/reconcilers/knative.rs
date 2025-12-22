@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{Api, DeleteParams, Patch, PatchParams, PropagationPolicy};
 use kube::runtime::reflector::ObjectRef;
@@ -15,9 +16,12 @@ use crate::controllers::restatedeployment::controller::{
 use crate::controllers::restatedeployment::reconcilers::replicaset::generate_pod_template_hash;
 use crate::resources::knative::{
     Configuration, ConfigurationSpec, ConfigurationTemplate, ConfigurationTemplateMetadata,
-    ConfigurationTemplateSpec, ConfigurationTemplateSpecContainers, Revision, Route, RouteSpec,
+    ConfigurationTemplateSpec, ConfigurationTemplateSpecContainers,
+    ConfigurationTemplateSpecContainersPorts, ConfigurationTemplateSpecContainersReadinessProbe,
+    ConfigurationTemplateSpecContainersReadinessProbeTcpSocket, Revision, Route, RouteSpec,
     RouteTraffic,
 };
+
 use crate::resources::restatedeployments::{KnativeDeploymentStatus, RestateDeployment};
 use crate::{Error, Result};
 
@@ -217,20 +221,21 @@ fn build_configuration_spec(
     // Step 3: Always set parent deployment tracking (operator-managed)
     annotations.insert(RESTATE_DEPLOYMENT_ANNOTATION.to_string(), rsd.name_any());
 
-    // Get container spec from template
-    let containers = rsd
-        .spec
-        .template
-        .spec
-        .as_ref()
-        .and_then(|spec| spec.get("containers"))
-        .ok_or_else(|| Error::InvalidRestateConfig("Missing containers in template".into()))?;
+    // Deserialize the PodTemplateSpec.spec into ConfigurationTemplateSpec
+    // This allows users to set any field in the Knative Revision template (e.g. timeoutSeconds, serviceAccountName)
+    let mut configuration_template_spec: ConfigurationTemplateSpec =
+        if let Some(spec) = &rsd.spec.template.spec {
+            serde_json::from_value(spec.clone()).map_err(|e| {
+                Error::InvalidRestateConfig(format!("Failed to parse pod template spec: {}", e))
+            })?
+        } else {
+            ConfigurationTemplateSpec::default()
+        };
 
     // Ensure Restate port and validate for Knative compatibility
-    let mut containers_array: Vec<serde_json::Value> = serde_json::from_value(containers.clone())?;
-    validate_knative_containers(&containers_array)?;
-    ensure_restate_port(&mut containers_array)?;
-    ensure_readiness_probe(&mut containers_array)?;
+    validate_knative_containers(&configuration_template_spec.containers)?;
+    ensure_restate_port(&mut configuration_template_spec.containers)?;
+    ensure_readiness_probe(&mut configuration_template_spec.containers)?;
 
     // Create owner reference
     let owner_reference = rsd.controller_owner_ref(&()).unwrap();
@@ -260,18 +265,6 @@ fn build_configuration_spec(
         ..Default::default()
     };
 
-    let configuration_template_spec = ConfigurationTemplateSpec {
-        containers: containers_array
-            .into_iter()
-            .map(|c| {
-                serde_json::from_value(c).map_err(|e| {
-                    Error::InvalidRestateConfig(format!("Failed to parse container spec: {}", e))
-                })
-            })
-            .collect::<Result<Vec<ConfigurationTemplateSpecContainers>>>()?,
-        ..Default::default()
-    };
-
     let configuration_spec = ConfigurationSpec {
         template: Some(ConfigurationTemplate {
             metadata: Some(configuration_template_metadata),
@@ -288,23 +281,21 @@ fn build_configuration_spec(
 
 /// Validate containers for Knative compatibility
 /// Knative has strict requirements that differ from standard Kubernetes
-fn validate_knative_containers(containers: &[serde_json::Value]) -> Result<()> {
+fn validate_knative_containers(containers: &[ConfigurationTemplateSpecContainers]) -> Result<()> {
     for (idx, container) in containers.iter().enumerate() {
         // Validate port names
         // Knative only allows port names: empty, "h2c", or "http1"
-        if let Some(ports) = container.get("ports").and_then(|p| p.as_array()) {
+        if let Some(ports) = &container.ports {
             for port in ports {
-                if let Some(port_name) = port.get("name").and_then(|n| n.as_str()) {
+                if let Some(port_name) = &port.name {
                     if port_name != "h2c" && port_name != "http1" {
-                        return Err(Error::InvalidRestateConfig(
-                            format!(
-                                "Container {} has invalid port name '{}'. Knative only allows port names: 'h2c' or 'http1'. \
+                        return Err(Error::InvalidRestateConfig(format!(
+                            "Container {} has invalid port name '{}'. Knative only allows port names: 'h2c' or 'http1'. \
                                 Please update the port name in spec.template.spec.containers[{}].ports",
-                                container.get("name").and_then(|n| n.as_str()).unwrap_or("unknown"),
-                                port_name,
-                                idx
-                            )
-                        ));
+                            container.name.as_deref().unwrap_or("unknown"),
+                            port_name,
+                            idx
+                        )));
                     }
                 }
             }
@@ -316,37 +307,26 @@ fn validate_knative_containers(containers: &[serde_json::Value]) -> Result<()> {
 
 /// Ensure containers have Restate port 9080 with h2c protocol
 /// If port 9080 doesn't exist, add it. Otherwise, leave ports as-is.
-fn ensure_restate_port(containers: &mut [serde_json::Value]) -> Result<()> {
+fn ensure_restate_port(containers: &mut Vec<ConfigurationTemplateSpecContainers>) -> Result<()> {
     for container in containers.iter_mut() {
-        let ports = container.get_mut("ports").and_then(|p| p.as_array_mut());
-
-        if let Some(ports_array) = ports {
-            // Check if port 9080 already exists
-            let has_restate_port = ports_array.iter().any(|port| {
-                port.get("containerPort")
-                    .and_then(|p| p.as_i64())
-                    .map(|p| p == 9080)
-                    .unwrap_or(false)
-            });
-
-            if !has_restate_port {
-                // Add Restate port with h2c protocol
-                ports_array.push(json!({
-                    "name": "h2c",
-                    "containerPort": 9080,
-                    "protocol": "TCP"
-                }));
-            }
+        let has_restate_port = if let Some(ports) = &container.ports {
+            ports.iter().any(|p| p.container_port == 9080)
         } else {
-            // No ports defined, create array with Restate port
-            container.as_object_mut().unwrap().insert(
-                "ports".to_string(),
-                json!([{
-                    "name": "h2c",
-                    "containerPort": 9080,
-                    "protocol": "TCP"
-                }]),
-            );
+            false
+        };
+
+        if !has_restate_port {
+            let restate_port = ConfigurationTemplateSpecContainersPorts {
+                name: Some("h2c".to_string()),
+                container_port: 9080,
+                protocol: Some("TCP".to_string()),
+            };
+
+            if let Some(ports) = &mut container.ports {
+                ports.push(restate_port);
+            } else {
+                container.ports = Some(vec![restate_port]);
+            }
         }
     }
 
@@ -357,10 +337,10 @@ fn ensure_restate_port(containers: &mut [serde_json::Value]) -> Result<()> {
 /// If no readiness probe exists, inject a TCP probe on port 9080 (Restate ingress port)
 /// with quick timing parameters suitable for fast-starting Restate SDK services.
 /// Preserves user-specified probes without modification.
-fn ensure_readiness_probe(containers: &mut [serde_json::Value]) -> Result<()> {
+fn ensure_readiness_probe(containers: &mut Vec<ConfigurationTemplateSpecContainers>) -> Result<()> {
     for container in containers.iter_mut() {
         // Check if readiness probe already exists
-        if container.get("readinessProbe").is_some() {
+        if container.readiness_probe.is_some() {
             // User has explicitly configured a probe, preserve it
             continue;
         }
@@ -369,19 +349,18 @@ fn ensure_readiness_probe(containers: &mut [serde_json::Value]) -> Result<()> {
         // These timing parameters are optimized for fast-starting Restate SDK services:
         // - initialDelaySeconds: 2 - Lightweight services start quickly
         // - periodSeconds: 5 - Quick feedback during startup
-        container.as_object_mut().unwrap().insert(
-            "readinessProbe".to_string(),
-            json!({
-                "tcpSocket": {
-                    "port": 9080
-                },
-                "initialDelaySeconds": 2,
-                "periodSeconds": 5,
-                "timeoutSeconds": 1,
-                "successThreshold": 1,
-                "failureThreshold": 3
+        container.readiness_probe = Some(ConfigurationTemplateSpecContainersReadinessProbe {
+            tcp_socket: Some(ConfigurationTemplateSpecContainersReadinessProbeTcpSocket {
+                port: Some(IntOrString::Int(9080)),
+                ..Default::default()
             }),
-        );
+            initial_delay_seconds: Some(2),
+            period_seconds: Some(5),
+            timeout_seconds: Some(1),
+            success_threshold: Some(1),
+            failure_threshold: Some(3),
+            ..Default::default()
+        });
     }
 
     Ok(())
