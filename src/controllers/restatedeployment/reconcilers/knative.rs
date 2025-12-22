@@ -62,7 +62,7 @@ pub async fn reconcile_knative(
         .and_then(|s| s.latest_created_revision_name.as_ref())
         .ok_or_else(|| Error::ConfigurationNotReady {
             message: format!(
-                "Configuration {} does not have latestCreatedRevisionName in status",
+                "Configuration {} has no revision(s) yet",
                 config.name_any()
             ),
             reason: "RevisionNotCreated".into(),
