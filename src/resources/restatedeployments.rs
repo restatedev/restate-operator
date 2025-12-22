@@ -108,12 +108,12 @@ pub struct KnativeDeploymentSpec {
     version = "v1beta1",
     namespaced,
     scale = r#"{"specReplicasPath": ".spec.replicas", "statusReplicasPath": ".status.replicas", "labelSelectorPath": ".status.labelSelector"}"#,
-    printcolumn = r#"{"name":"Deployment ID", "type":"string", "jsonPath":".status.deploymentId"}"#,
     printcolumn = r#"{"name":"Desired", "type":"integer", "jsonPath":".status.desiredReplicas"}"#,
     printcolumn = r#"{"name":"Up-To-Date", "type":"integer", "jsonPath":".status.replicas"}"#,
     printcolumn = r#"{"name":"Ready", "type":"integer", "jsonPath":".status.readyReplicas"}"#,
     printcolumn = r#"{"name":"Available", "type":"integer", "jsonPath":".status.availableReplicas"}"#,
     printcolumn = r#"{"name":"Age", "type":"date", "jsonPath":".metadata.creationTimestamp"}"#,
+    printcolumn = r#"{"name":"Deployment ID", "type":"string", "jsonPath":".status.deploymentId", "priority": 1}"#,
     printcolumn = r#"{"name":"Containers", "type":"string", "jsonPath":".spec.template.spec.containers[*].name", "priority": 1}"#,
     printcolumn = r#"{"name":"Images", "type":"string", "jsonPath":".spec.template.spec.containers[*].image", "priority": 1}"#,
     printcolumn = r#"{"name":"Selector", "type":"string", "jsonPath":".status.labelSelector", "priority": 1}"#
