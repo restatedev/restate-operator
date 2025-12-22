@@ -1,6 +1,6 @@
 use schemars::JsonSchema;
 fn main() {
-    let mut gen = schemars::gen::SchemaSettings::openapi3()
+    let mut generator = schemars::r#gen::SchemaSettings::openapi3()
         .with(|s| {
             s.inline_subschemas = true;
             s.meta_schema = None;
@@ -11,7 +11,7 @@ fn main() {
         "{}",
         serde_json::to_string_pretty(
             &restate_operator::resources::restatedeployments::RestateDeployment::json_schema(
-                &mut gen
+                &mut generator
             )
         )
         .unwrap()

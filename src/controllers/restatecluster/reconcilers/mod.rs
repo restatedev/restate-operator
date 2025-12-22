@@ -4,6 +4,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
 
 pub mod compute;
 pub mod network_policies;
+pub mod provisioning;
 mod quantity_parser;
 pub mod signing_key;
 

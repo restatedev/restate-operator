@@ -2,11 +2,11 @@ use std::fmt::Display;
 
 use k8s_openapi::{api::core::v1::Secret, apimachinery::pkg::apis::meta::v1::LabelSelector};
 use kube::{
-    runtime::reflector::{ObjectRef, Store},
     CELSchema, CustomResource,
+    runtime::reflector::{ObjectRef, Store},
 };
-use schemars::schema::Schema;
 use schemars::JsonSchema;
+use schemars::schema::Schema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use url::Url;
@@ -70,7 +70,7 @@ fn default_revision_history_limit() -> i32 {
     10
 }
 
-fn label_selector_schema(_g: &mut schemars::gen::SchemaGenerator) -> Schema {
+fn label_selector_schema(_g: &mut schemars::r#gen::SchemaGenerator) -> Schema {
     serde_json::from_value(serde_json::json!({
       "properties": {
         "matchExpressions": {
@@ -128,7 +128,7 @@ pub struct PodTemplateSpec {
     pub spec: Option<serde_json::Value>,
 }
 
-fn pod_spec_schema(_g: &mut schemars::gen::SchemaGenerator) -> Schema {
+fn pod_spec_schema(_g: &mut schemars::r#gen::SchemaGenerator) -> Schema {
     serde_json::from_value(serde_json::json!({
             "x-kubernetes-preserve-unknown-fields": true,
     }))
@@ -200,8 +200,9 @@ impl JsonSchema for RestateAdminEndpoint {
         "RestateAdminEndpoint".into()
     }
 
-    fn json_schema(gen: &mut schemars::r#gen::SchemaGenerator) -> Schema {
-        let mut service_schema = serde_json::to_value(ServiceReference::json_schema(gen)).unwrap();
+    fn json_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> Schema {
+        let mut service_schema =
+            serde_json::to_value(ServiceReference::json_schema(generator)).unwrap();
         if let Some(object) = service_schema.as_object_mut() {
             object.insert("description".into(), serde_json::Value::String("A reference to a Service pointing against which to register the deployment. Exactly one of `cluster`, `cloud`, `service` or `url` must be specified".into()));
         }

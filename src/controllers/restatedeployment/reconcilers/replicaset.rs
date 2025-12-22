@@ -13,7 +13,7 @@ use serde_json::json;
 use tracing::*;
 
 use crate::controllers::restatedeployment::controller::{
-    Context, APP_MANAGED_BY_LABEL, OWNED_BY_LABEL, RESTATE_DEPLOYMENT_ID_ANNOTATION,
+    APP_MANAGED_BY_LABEL, Context, OWNED_BY_LABEL, RESTATE_DEPLOYMENT_ID_ANNOTATION,
 };
 use crate::resources::restatedeployments::RestateDeployment;
 use crate::{Error, Result};
@@ -323,7 +323,9 @@ pub async fn cleanup_old_replicasets(
                 if deployment_exists {
                     let rs_deployment_id = rs_deployment_id.unwrap();
 
-                    debug!("Force-deleting Restate deployment {rs_deployment_id} as its associated with old ReplicaSet {rs_name} in namespace {namespace}");
+                    debug!(
+                        "Force-deleting Restate deployment {rs_deployment_id} as its associated with old ReplicaSet {rs_name} in namespace {namespace}"
+                    );
                     let resp = ctx
                         .request(
                             Method::DELETE,

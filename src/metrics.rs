@@ -1,6 +1,6 @@
 use crate::Error;
 use kube::ResourceExt;
-use prometheus::{histogram_opts, opts, HistogramVec, IntCounter, IntCounterVec, Registry};
+use prometheus::{HistogramVec, IntCounter, IntCounterVec, Registry, histogram_opts, opts};
 use tokio::time::Instant;
 
 #[derive(Clone)]

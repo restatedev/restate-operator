@@ -11,14 +11,14 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::DeleteParams;
 use kube::{
-    api::{Patch, PatchParams},
     Api,
+    api::{Patch, PatchParams},
 };
 use tracing::debug;
 
+use crate::Error;
 use crate::controllers::restatecluster::controller::Context;
 use crate::resources::restateclusters::RestateClusterSecurity;
-use crate::Error;
 
 use super::{label_selector, object_meta};
 

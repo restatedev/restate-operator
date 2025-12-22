@@ -5,8 +5,8 @@ use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 
-use kube::api::{Api, Patch, PatchParams};
 use kube::Resource;
+use kube::api::{Api, Patch, PatchParams};
 use tracing::*;
 
 use crate::Result;
