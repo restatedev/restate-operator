@@ -100,18 +100,18 @@ const greeter = restate.service({
 
 // Startup banner
 console.log(`
-┌─────────────────────────────────────────────────────┐
-│         Restate Example Service                     │
-├─────────────────────────────────────────────────────┤
-│  Version:   ${VERSION.padEnd(40)}│
-│  Pod:       ${POD_NAME.padEnd(40)}│
-│  Antidote:  ${(ANTIDOTE || "(not set)").padEnd(40)}│
-│  Port:      9080                                    │
-├─────────────────────────────────────────────────────┤
-│  Endpoints:                                         │
-│    POST /Greeter/greet      - Quick greeting        │
-│    POST /Greeter/slowGreet  - Delayed greeting      │
-└─────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────────┐
+│         Restate Example Service                                           │
+├───────────────────────────────────────────────────────────────────────────┤
+│  Version:   ${VERSION.padEnd(62)}│
+│  Pod:       ${POD_NAME.padEnd(62)}│
+│  Antidote:  ${(ANTIDOTE || "(not set)").padEnd(62)}│
+│  Port:      9080                                                          │
+├───────────────────────────────────────────────────────────────────────────┤
+│  Endpoints:                                                               │
+│    POST /Greeter/greet      - Quick greeting                              │
+│    POST /Greeter/slowGreet  - Delayed greeting                            │
+└───────────────────────────────────────────────────────────────────────────┘
 `);
 
 restate.serve({
