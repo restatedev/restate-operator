@@ -55,6 +55,24 @@ pub async fn reconcile_knative(
     let route = reconcile_route(ctx, rsd, namespace, &current_tag, &config).await?;
     debug!(route = %route.name_any(), "Route reconciled");
 
+    // Eagerly update status with known Knative resource names
+    // This ensures that even if we fail waiting for the revision, the status reflects the new configuration
+    status.knative = Some(KnativeDeploymentStatus {
+        configuration_name: Some(config.name_any()),
+        route_name: Some(route.name_any()),
+        url: route.status.as_ref().and_then(|s| s.url.clone()),
+        latest_revision: None,
+    });
+
+    // Clear stale deployment info as we are transitioning
+    status.deployment_id = None;
+    status.replicas = 0;
+    status.desired_replicas = None;
+    status.ready_replicas = None;
+    status.available_replicas = None;
+    status.unavailable_replicas = None;
+    status.label_selector = None;
+
     // Step 4: Get the latest created revision (observe rollout eagerly)
     let latest_revision = config
         .status
