@@ -13,6 +13,9 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
+    - jsonPath: .status.deploymentId
+      name: Deployment ID
+      type: string
     - jsonPath: .status.desiredReplicas
       name: Desired
       type: integer

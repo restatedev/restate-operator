@@ -108,6 +108,7 @@ pub struct KnativeDeploymentSpec {
     version = "v1beta1",
     namespaced,
     scale = r#"{"specReplicasPath": ".spec.replicas", "statusReplicasPath": ".status.replicas", "labelSelectorPath": ".status.labelSelector"}"#,
+    printcolumn = r#"{"name":"Deployment ID", "type":"string", "jsonPath":".status.deploymentId"}"#,
     printcolumn = r#"{"name":"Desired", "type":"integer", "jsonPath":".status.desiredReplicas"}"#,
     printcolumn = r#"{"name":"Up-To-Date", "type":"integer", "jsonPath":".status.replicas"}"#,
     printcolumn = r#"{"name":"Ready", "type":"integer", "jsonPath":".status.readyReplicas"}"#,
