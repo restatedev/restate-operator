@@ -14,11 +14,11 @@ use kube::{
     Api,
     api::{Patch, PatchParams},
 };
-use tracing::debug;
+use tracing::{debug, trace};
 
 use crate::Error;
 use crate::controllers::restatecluster::controller::Context;
-use crate::resources::restateclusters::RestateClusterSecurity;
+use crate::resources::restateclusters::{Cluster, RestateClusterSecurity};
 
 use super::{label_selector, object_meta};
 
@@ -157,7 +157,8 @@ fn allow_aws_pod_identity(base_metadata: &ObjectMeta) -> NetworkPolicy {
 
 const ALLOW_INGRESS_POLICY_NAME: &str = "allow-ingress-access";
 const ALLOW_ADMIN_POLICY_NAME: &str = "allow-admin-access";
-const ALLOW_METRICS_POLICY_NAME: &str = "allow-metrics-access";
+// Note: This is called "metrics" for backwards compatibility, but it controls the node port (5122)
+const ALLOW_NODE_POLICY_NAME: &str = "allow-metrics-access";
 
 fn allow_access(
     port_name: &str,
@@ -261,6 +262,7 @@ pub async fn reconcile_network_policies(
     namespace: &str,
     base_metadata: &ObjectMeta,
     security: Option<&RestateClusterSecurity>,
+    cluster: Option<&Cluster>,
 ) -> Result<(), Error> {
     let disable_network_policies = security
         .and_then(|s| s.disable_network_policies)
@@ -283,7 +285,7 @@ pub async fn reconcile_network_policies(
         delete_network_policy(namespace, &np_api, ALLOW_EGRESS_POLICY_NAME).await?;
         delete_network_policy(namespace, &np_api, ALLOW_INGRESS_POLICY_NAME).await?;
         delete_network_policy(namespace, &np_api, ALLOW_ADMIN_POLICY_NAME).await?;
-        delete_network_policy(namespace, &np_api, ALLOW_METRICS_POLICY_NAME).await?;
+        delete_network_policy(namespace, &np_api, ALLOW_NODE_POLICY_NAME).await?;
 
         return Ok(());
     }
@@ -317,33 +319,39 @@ pub async fn reconcile_network_policies(
     )
     .await?;
 
-    let admin_peers: Option<Vec<NetworkPolicyPeer>> = match (
-        allow_operator_access_to_admin,
+    let operator_peer = match (
         ctx.operator_label_name.as_ref(),
         ctx.operator_label_value.as_ref(),
     ) {
-        (true, Some(operator_label_name), Some(operator_label_value)) => Some(add_peer(
-            network_peers.and_then(|peers| peers.admin.as_deref()),
-            NetworkPolicyPeer {
-                ip_block: None,
-                namespace_selector: Some(LabelSelector {
-                    match_expressions: None,
-                    match_labels: Some(BTreeMap::from([(
-                        "kubernetes.io/metadata.name".into(),
-                        ctx.operator_namespace.clone(),
-                    )])),
-                }),
-                pod_selector: Some(LabelSelector {
-                    match_expressions: None,
-                    match_labels: Some(BTreeMap::from([(
-                        operator_label_name.clone(),
-                        operator_label_value.clone(),
-                    )])),
-                }),
-            },
-        )),
-        _ => network_peers.and_then(|peers| peers.admin.clone()),
+        (Some(operator_label_name), Some(operator_label_value)) => Some(NetworkPolicyPeer {
+            ip_block: None,
+            namespace_selector: Some(LabelSelector {
+                match_expressions: None,
+                match_labels: Some(BTreeMap::from([(
+                    "kubernetes.io/metadata.name".into(),
+                    ctx.operator_namespace.clone(),
+                )])),
+            }),
+            pod_selector: Some(LabelSelector {
+                match_expressions: None,
+                match_labels: Some(BTreeMap::from([(
+                    operator_label_name.clone(),
+                    operator_label_value.clone(),
+                )])),
+            }),
+        }),
+        _ => None,
     };
+
+    let admin_peers: Option<Vec<NetworkPolicyPeer>> =
+        if allow_operator_access_to_admin && operator_peer.is_some() {
+            Some(add_peer(
+                network_peers.and_then(|peers| peers.admin.as_deref()),
+                operator_peer.clone().unwrap(),
+            ))
+        } else {
+            network_peers.and_then(|peers| peers.admin.clone())
+        };
 
     apply_network_policy(
         namespace,
@@ -352,22 +360,40 @@ pub async fn reconcile_network_policies(
     )
     .await?;
 
-    let node_peers = add_peer(
-        network_peers.and_then(|peers| peers.metrics.as_deref()),
-        NetworkPolicyPeer {
-            ip_block: None,
-            namespace_selector: Some(LabelSelector {
-                match_expressions: None,
-                match_labels: Some(BTreeMap::from([(
-                    "kubernetes.io/metadata.name".into(),
-                    namespace.into(),
-                )])),
-            }),
-            // select the labels of the cluster
-            pod_selector: Some(label_selector(base_metadata)),
-        },
-    );
+    // Allow operator access to Restate nodes if auto_provision is enabled as the operator will reach
+    // out to the Restate nodes via grpc on port 5122.
+    let allow_operator_access_to_node = cluster
+        .map(|cluster| cluster.auto_provision)
+        .unwrap_or(false);
 
+    // Start with the cluster's own pods as peers (for inter-node communication)
+    let cluster_self_peer = NetworkPolicyPeer {
+        ip_block: None,
+        namespace_selector: Some(LabelSelector {
+            match_expressions: None,
+            match_labels: Some(BTreeMap::from([(
+                "kubernetes.io/metadata.name".into(),
+                namespace.into(),
+            )])),
+        }),
+        // select the labels of the cluster
+        pod_selector: Some(label_selector(base_metadata)),
+    };
+
+    let node_peers = {
+        let mut peers = add_peer(
+            network_peers.and_then(|peers| peers.node_peers()),
+            cluster_self_peer,
+        );
+        // Add operator access if enabled and operator labels are configured
+        if allow_operator_access_to_node && let Some(op_peer) = operator_peer {
+            trace!("Giving operator access to Restate nodes.");
+            peers.push(op_peer);
+        }
+        peers
+    };
+
+    // Note: policy name is "metrics" for backwards compatibility, but it controls the node port (5122)
     apply_network_policy(
         namespace,
         &np_api,

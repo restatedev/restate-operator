@@ -202,7 +202,14 @@ impl RestateCluster {
             .await?;
         }
 
-        reconcile_network_policies(&ctx, name, &base_metadata, self.spec.security.as_ref()).await?;
+        reconcile_network_policies(
+            &ctx,
+            name,
+            &base_metadata,
+            self.spec.security.as_ref(),
+            self.spec.cluster.as_ref(),
+        )
+        .await?;
 
         let signing_key = reconcile_signing_key(
             &ctx,
@@ -215,7 +222,15 @@ impl RestateCluster {
         )
         .await?;
 
-        reconcile_compute(&ctx, name, &base_metadata, &self.spec, signing_key).await?;
+        reconcile_compute(
+            &ctx,
+            name,
+            &base_metadata,
+            &self.spec,
+            self.status.as_ref(),
+            signing_key,
+        )
+        .await?;
 
         Ok(())
     }
@@ -290,11 +305,14 @@ impl RestateCluster {
         }
 
         // always overwrite status object with what we saw
+        // Preserve the provisioned status from the existing status
+        let provisioned = self.status.as_ref().and_then(|s| s.provisioned);
         let new_status = Patch::Apply(json!({
             "apiVersion": "restate.dev/v1",
             "kind": "RestateCluster",
             "status": RestateClusterStatus {
                 conditions: Some(vec![ready]),
+                provisioned,
             }
         }));
         let ps = PatchParams::apply("restate-operator").force();

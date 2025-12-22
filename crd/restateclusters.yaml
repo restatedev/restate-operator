@@ -40,6 +40,18 @@ spec:
           spec:
             description: Represents the configuration of a Restate Cluster
             properties:
+              cluster:
+                description: Cluster-wide configuration options
+                nullable: true
+                properties:
+                  autoProvision:
+                    default: false
+                    description: |-
+                      Whether the operator should automatically provision the cluster.
+                      When enabled, the operator will call the Restate gRPC ProvisionCluster API after pods are running.
+                      Defaults to false for backwards compatibility.
+                    type: boolean
+                type: object
               clusterName:
                 description: clusterName sets the RESTATE_CLUSTER_NAME environment variable. Defaults to the object name.
                 nullable: true
@@ -1222,6 +1234,98 @@ spec:
                         type: array
                         x-kubernetes-list-type: atomic
                       metrics:
+                        description: 'Deprecated: use `node` instead. If both are set, `node` takes precedence.'
+                        items:
+                          description: NetworkPolicyPeer describes a peer to allow traffic to/from. Only certain combinations of fields are allowed
+                          properties:
+                            ipBlock:
+                              description: ipBlock defines policy on a particular IPBlock. If this field is set then neither of the other fields can be.
+                              properties:
+                                cidr:
+                                  description: cidr is a string representing the IPBlock Valid examples are "192.168.1.0/24" or "2001:db8::/64"
+                                  type: string
+                                except:
+                                  description: except is a slice of CIDRs that should not be included within an IPBlock Valid examples are "192.168.1.0/24" or "2001:db8::/64" Except values will be rejected if they are outside the cidr range
+                                  items:
+                                    type: string
+                                  type: array
+                              required:
+                              - cidr
+                              type: object
+                            namespaceSelector:
+                              description: |-
+                                namespaceSelector selects namespaces using cluster-scoped labels. This field follows standard label selector semantics; if present but empty, it selects all namespaces.
+
+                                If podSelector is also set, then the NetworkPolicyPeer as a whole selects the pods matching podSelector in the namespaces selected by namespaceSelector. Otherwise it selects all pods in the namespaces selected by namespaceSelector.
+                              properties:
+                                matchExpressions:
+                                  description: matchExpressions is a list of label selector requirements. The requirements are ANDed.
+                                  items:
+                                    description: A label selector requirement is a selector that contains values, a key, and an operator that relates the key and values.
+                                    properties:
+                                      key:
+                                        description: key is the label key that the selector applies to.
+                                        type: string
+                                      operator:
+                                        description: operator represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists and DoesNotExist.
+                                        type: string
+                                      values:
+                                        description: values is an array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. This array is replaced during a strategic merge patch.
+                                        items:
+                                          type: string
+                                        type: array
+                                    required:
+                                    - key
+                                    - operator
+                                    type: object
+                                  type: array
+                                matchLabels:
+                                  additionalProperties:
+                                    type: string
+                                  description: matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed.
+                                  type: object
+                              type: object
+                            podSelector:
+                              description: |-
+                                podSelector is a label selector which selects pods. This field follows standard label selector semantics; if present but empty, it selects all pods.
+
+                                If namespaceSelector is also set, then the NetworkPolicyPeer as a whole selects the pods matching podSelector in the Namespaces selected by NamespaceSelector. Otherwise it selects the pods matching podSelector in the policy's own namespace.
+                              properties:
+                                matchExpressions:
+                                  description: matchExpressions is a list of label selector requirements. The requirements are ANDed.
+                                  items:
+                                    description: A label selector requirement is a selector that contains values, a key, and an operator that relates the key and values.
+                                    properties:
+                                      key:
+                                        description: key is the label key that the selector applies to.
+                                        type: string
+                                      operator:
+                                        description: operator represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists and DoesNotExist.
+                                        type: string
+                                      values:
+                                        description: values is an array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. This array is replaced during a strategic merge patch.
+                                        items:
+                                          type: string
+                                        type: array
+                                    required:
+                                    - key
+                                    - operator
+                                    type: object
+                                  type: array
+                                matchLabels:
+                                  additionalProperties:
+                                    type: string
+                                  description: matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed.
+                                  type: object
+                              type: object
+                          type: object
+                        nullable: true
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      node:
+                        description: |-
+                          Network peers to allow inbound access to the node port (5122).
+                          This is used for inter-cluster communication and operator access for provisioning.
                         items:
                           description: NetworkPolicyPeer describes a peer to allow traffic to/from. Only certain combinations of fields are allowed
                           properties:
@@ -1428,6 +1532,12 @@ spec:
                   type: object
                 nullable: true
                 type: array
+              provisioned:
+                description: |-
+                  Whether the cluster has been provisioned by the operator.
+                  This is set to true after successful provisioning to avoid repeated provisioning attempts.
+                nullable: true
+                type: boolean
             type: object
         required:
         - metadata

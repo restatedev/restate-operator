@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::convert::Into;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetSpec, StatefulSetStatus};
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
@@ -22,19 +23,23 @@ use kube::{
     Api, ResourceExt,
     api::{Patch, PatchParams},
 };
+use serde_json::json;
 use sha2::Digest;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::Error;
 use crate::controllers::restatecluster::controller::Context;
 use crate::resources::podidentityassociations::{
     PodIdentityAssociation, PodIdentityAssociationSpec,
 };
-use crate::resources::restateclusters::{RestateClusterSpec, RestateClusterStorage};
+use crate::resources::restateclusters::{
+    RestateCluster, RestateClusterSpec, RestateClusterStatus, RestateClusterStorage,
+};
 use crate::resources::securitygrouppolicies::{
     SecurityGroupPolicy, SecurityGroupPolicySecurityGroups, SecurityGroupPolicySpec,
 };
 
+use super::provisioning;
 use super::quantity_parser::QuantityParser;
 use super::{label_selector, mandatory_labels, object_meta};
 
@@ -481,24 +486,26 @@ fn restate_pvc_resources(storage: &RestateClusterStorage) -> VolumeResourceRequi
 
 pub async fn reconcile_compute(
     ctx: &Context,
-    namespace: &str,
+    // name of the RestateCluster is also the namespace
+    name: &str,
     base_metadata: &ObjectMeta,
     spec: &RestateClusterSpec,
+    status: Option<&RestateClusterStatus>,
     signing_key: Option<(Volume, PathBuf)>,
 ) -> Result<(), Error> {
-    let ss_api: Api<StatefulSet> = Api::namespaced(ctx.client.clone(), namespace);
-    let cm_api: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), namespace);
-    let pvc_api: Api<PersistentVolumeClaim> = Api::namespaced(ctx.client.clone(), namespace);
-    let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), namespace);
-    let svcacc_api: Api<ServiceAccount> = Api::namespaced(ctx.client.clone(), namespace);
-    let pia_api: Api<PodIdentityAssociation> = Api::namespaced(ctx.client.clone(), namespace);
-    let job_api: Api<Job> = Api::namespaced(ctx.client.clone(), namespace);
-    let pod_api: Api<Pod> = Api::namespaced(ctx.client.clone(), namespace);
-    let sgp_api: Api<SecurityGroupPolicy> = Api::namespaced(ctx.client.clone(), namespace);
-    let pdb_api: Api<PodDisruptionBudget> = Api::namespaced(ctx.client.clone(), namespace);
+    let ss_api: Api<StatefulSet> = Api::namespaced(ctx.client.clone(), name);
+    let cm_api: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), name);
+    let pvc_api: Api<PersistentVolumeClaim> = Api::namespaced(ctx.client.clone(), name);
+    let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), name);
+    let svcacc_api: Api<ServiceAccount> = Api::namespaced(ctx.client.clone(), name);
+    let pia_api: Api<PodIdentityAssociation> = Api::namespaced(ctx.client.clone(), name);
+    let job_api: Api<Job> = Api::namespaced(ctx.client.clone(), name);
+    let pod_api: Api<Pod> = Api::namespaced(ctx.client.clone(), name);
+    let sgp_api: Api<SecurityGroupPolicy> = Api::namespaced(ctx.client.clone(), name);
+    let pdb_api: Api<PodDisruptionBudget> = Api::namespaced(ctx.client.clone(), name);
 
     apply_service_account(
-        namespace,
+        name,
         &svcacc_api,
         restate_service_account(
             base_metadata,
@@ -511,7 +518,7 @@ pub async fn reconcile_compute(
 
     let cm = restate_configmap(base_metadata, spec.config.as_deref());
     let cm_name: String = cm.metadata.name.as_ref().unwrap().into();
-    apply_configmap(namespace, &cm_api, cm).await?;
+    apply_configmap(name, &cm_api, cm).await?;
 
     let mut pod_annotations: Option<BTreeMap<String, String>> = None;
 
@@ -526,10 +533,10 @@ pub async fn reconcile_compute(
             Some(aws_pod_identity_association_role_arn),
         ) => {
             let pia = apply_pod_identity_association(
-                namespace,
+                name,
                 &pia_api,
                 restate_pod_identity_association(
-                    namespace,
+                    name,
                     base_metadata,
                     aws_pod_identity_association_cluster,
                     aws_pod_identity_association_role_arn,
@@ -542,7 +549,7 @@ pub async fn reconcile_compute(
             }
 
             check_pia(
-                namespace,
+                name,
                 base_metadata,
                 spec.compute.tolerations.as_ref(),
                 &job_api,
@@ -562,8 +569,8 @@ pub async fn reconcile_compute(
             );
         }
         (Some(_), None) => {
-            delete_pod_identity_association(namespace, &pia_api, "restate").await?;
-            delete_job(namespace, &job_api, "restate-pia-canary").await?;
+            delete_pod_identity_association(name, &pia_api, "restate").await?;
+            delete_job(name, &job_api, "restate-pia-canary").await?;
         }
         (None, Some(aws_pod_identity_association_role_arn)) => {
             warn!(
@@ -582,7 +589,7 @@ pub async fn reconcile_compute(
             if ctx.security_group_policy_installed && !aws_pod_security_groups.is_empty() =>
         {
             apply_security_group_policy(
-                namespace,
+                name,
                 &sgp_api,
                 restate_security_group_policy(base_metadata, aws_pod_security_groups),
             )
@@ -596,7 +603,7 @@ pub async fn reconcile_compute(
             );
         }
         None | Some(_) if ctx.security_group_policy_installed => {
-            delete_security_group_policy(namespace, &sgp_api, "restate").await?;
+            delete_security_group_policy(name, &sgp_api, "restate").await?;
         }
         Some(aws_pod_security_groups) if !aws_pod_security_groups.is_empty() => {
             warn!(
@@ -613,20 +620,16 @@ pub async fn reconcile_compute(
             .as_ref()
             .and_then(|s| s.service_annotations.as_ref()),
     );
-    apply_service(namespace, &svc_api, restate_service).await?;
+    apply_service(name, &svc_api, restate_service).await?;
 
     let restate_cluster_service = restate_cluster_service(base_metadata);
-    apply_service(namespace, &svc_api, restate_cluster_service).await?;
+    apply_service(name, &svc_api, restate_cluster_service).await?;
 
-    apply_pod_disruption_budget(
-        namespace,
-        &pdb_api,
-        restate_pod_disruption_budget(base_metadata),
-    )
-    .await?;
+    apply_pod_disruption_budget(name, &pdb_api, restate_pod_disruption_budget(base_metadata))
+        .await?;
 
     change_statefulset_storage(
-        namespace,
+        name,
         base_metadata,
         &ss_api,
         &ctx.ss_store,
@@ -637,11 +640,58 @@ pub async fn reconcile_compute(
     .await?;
 
     let ss = apply_stateful_set(
-        namespace,
+        name,
         &ss_api,
         restate_statefulset(base_metadata, spec, pod_annotations, signing_key, cm_name),
     )
     .await?;
+
+    // Handle cluster provisioning if enabled
+    // This must happen BEFORE validate_stateful_set_status because pods only become Ready
+    // after the cluster is provisioned
+    let provisioning_enabled = spec
+        .cluster
+        .as_ref()
+        .map(|c| c.auto_provision)
+        .unwrap_or(false);
+
+    if provisioning_enabled {
+        // Check if we've already cached that provisioning succeeded
+        let already_provisioned = status.and_then(|s| s.provisioned).unwrap_or(false);
+
+        if already_provisioned {
+            trace!("Cluster already provisioned, skipping provisioning");
+        } else {
+            // Validate that config or env var has auto-provision = false
+            provisioning::validate_config_for_provisioning(
+                spec.config.as_deref(),
+                spec.compute.env.as_deref(),
+            )?;
+
+            // Check if restate-0 pod is Running (not Ready - it becomes Ready after provisioning)
+            if !provisioning::is_pod_running(&pod_api, "restate-0").await? {
+                return Err(Error::NotReady {
+                    reason: "ProvisioningPodNotRunning".into(),
+                    message: "Waiting for restate-0 pod to be Running before provisioning".into(),
+                    requeue_after: Some(Duration::from_secs(5)),
+                });
+            }
+
+            // Run gRPC provisioning - returns Ok for both new provisioning AND AlreadyExists
+            provisioning::run_provisioning(name).await?;
+
+            // IMMEDIATELY patch status.provisioned = true to minimize re-provisioning window
+            // This is critical - we don't wait for reconcile_status() at the end
+            let rc_api: Api<RestateCluster> = Api::all(ctx.client.clone());
+            let patch = json!({
+                "status": { "provisioned": true }
+            });
+            rc_api
+                .patch_status(name, &PatchParams::default(), &Patch::Merge(&patch))
+                .await?;
+            info!("Cluster provisioned successfully, status updated");
+        }
+    }
 
     validate_stateful_set_status(ss.status, spec.compute.replicas.unwrap_or(1))?;
 

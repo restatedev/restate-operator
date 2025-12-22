@@ -131,7 +131,7 @@ More examples are available just below the spec that follows.
 |---|---|---|
 | `disableNetworkPolicies` | `boolean` | If `true`, the operator will not create any network policies. Defaults to `false`. |
 | `allowOperatorAccessToAdmin` | `boolean` | If `true`, adds a rule to allow the operator to access the admin API. Needed for `RestateDeployment`. Defaults to `true`. |
-| `networkPeers` | `object` | Defines network peers to allow inbound access to `admin`, `ingress`, and `metrics` ports. |
+| `networkPeers` | `object` | Defines network peers to allow inbound access to `admin`, `ingress`, and `node` ports. |
 | `networkEgressRules` | `array` | Custom egress rules for outbound traffic from the cluster. |
 | `serviceAccountAnnotations` | `object` | Annotations to add to the `ServiceAccount`. |
 | `serviceAnnotations`| `object` | Annotations to add to the `Service`. |

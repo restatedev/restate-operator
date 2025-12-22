@@ -34,6 +34,9 @@ class Spec {
   /// clusterName sets the RESTATE_CLUSTER_NAME environment variable. Defaults to the object name.
   clusterName: String?
 
+  /// Cluster-wide configuration options
+  cluster: Cluster?
+
   /// Compute configuration
   compute: Compute
 
@@ -45,6 +48,14 @@ class Spec {
 
   /// Storage configuration
   storage: Storage
+}
+
+/// Cluster-wide configuration options
+class Cluster {
+  /// Whether the operator should automatically provision the cluster.
+  /// When enabled, the operator will call the Restate gRPC ProvisionCluster API after pods are running.
+  /// Defaults to false for backwards compatibility.
+  autoProvision: Boolean?
 }
 
 /// Compute configuration
@@ -150,6 +161,11 @@ class NetworkPeers {
 
   ingress: Listing<NetworkPolicy.NetworkPolicyPeer>?
 
+  /// Network peers to allow inbound access to the node port (5122).
+  /// This is used for inter-cluster communication and operator access for provisioning.
+  node: Listing<NetworkPolicy.NetworkPolicyPeer>?
+
+  /// Deprecated: use `node` instead. If both are set, `node` takes precedence.
   metrics: Listing<NetworkPolicy.NetworkPolicyPeer>?
 }
 
@@ -204,6 +220,10 @@ class Storage {
 /// https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
 class Status {
   conditions: Listing<Condition>?
+
+  /// Whether the cluster has been provisioned by the operator.
+  /// This is set to true after successful provisioning to avoid repeated provisioning attempts.
+  provisioned: Boolean?
 }
 
 class Condition {

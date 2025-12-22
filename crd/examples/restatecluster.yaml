@@ -3,7 +3,11 @@ kind: RestateCluster
 metadata:
   name: restate-test
 spec:
+  cluster:
+    autoProvision: true
   compute:
-    image: restatedev/restate:1.5.3
+    image: restatedev/restate:1.5.6
   storage:
     storageRequestBytes: 2147483648
+  config: |
+    auto-provision = false

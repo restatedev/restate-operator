@@ -3,6 +3,8 @@ kind: RestateCluster
 metadata:
   name: restate-multi-zone
 spec:
+  cluster:
+    autoProvision: true
   compute:
     image: restatedev/restate:1.5.3
     env:
@@ -25,3 +27,5 @@ spec:
             app.kubernetes.io/instance: restate-multi-zone
   storage:
     storageRequestBytes: 2147483648
+  config: |
+    auto-provision = false

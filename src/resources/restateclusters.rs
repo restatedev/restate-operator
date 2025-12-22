@@ -33,11 +33,25 @@ pub static RESTATE_CLUSTER_FINALIZER: &str = "clusters.restate.dev";
 pub struct RestateClusterSpec {
     /// clusterName sets the RESTATE_CLUSTER_NAME environment variable. Defaults to the object name.
     pub cluster_name: Option<String>,
+    /// Cluster-wide configuration options
+    // Added with v2.1.0
+    pub cluster: Option<Cluster>,
     pub storage: RestateClusterStorage,
     pub compute: RestateClusterCompute,
     pub security: Option<RestateClusterSecurity>,
     /// TOML-encoded Restate config file
     pub config: Option<String>,
+}
+
+/// Cluster-wide configuration options
+#[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Cluster {
+    /// Whether the operator should automatically provision the cluster.
+    /// When enabled, the operator will call the Restate gRPC ProvisionCluster API after pods are running.
+    /// Defaults to false for backwards compatibility.
+    #[serde(default)]
+    pub auto_provision: bool,
 }
 
 // Hoisted from the derived implementation so that we can restrict names to be valid namespace names
@@ -48,6 +62,7 @@ impl schemars::JsonSchema for RestateCluster {
     fn schema_id() -> Cow<'static, str> {
         "restate_operator::controller::RestateCluster".into()
     }
+
     fn json_schema(generator: &mut schemars::SchemaGenerator) -> Schema {
         let spec_schema = generator.subschema_for::<RestateClusterSpec>();
         let status_schema = generator.subschema_for::<Option<RestateClusterStatus>>();
@@ -196,8 +211,21 @@ pub struct RestateClusterNetworkPeers {
     pub ingress: Option<Vec<NetworkPolicyPeer>>,
     #[schemars(default, schema_with = "network_peers_schema")]
     pub admin: Option<Vec<NetworkPolicyPeer>>,
+    /// Network peers to allow inbound access to the node port (5122).
+    /// This is used for inter-cluster communication and operator access for provisioning.
+    // Added with v2.1.0
+    #[schemars(default, schema_with = "network_peers_schema")]
+    pub node: Option<Vec<NetworkPolicyPeer>>,
+    /// Deprecated: use `node` instead. If both are set, `node` takes precedence.
     #[schemars(default, schema_with = "network_peers_schema")]
     pub metrics: Option<Vec<NetworkPolicyPeer>>,
+}
+
+impl RestateClusterNetworkPeers {
+    /// Returns the node peers, falling back to metrics for backwards compatibility.
+    pub fn node_peers(&self) -> Option<&[NetworkPolicyPeer]> {
+        self.node.as_deref().or(self.metrics.as_deref())
+    }
 }
 
 fn network_peers_schema(g: &mut schemars::SchemaGenerator) -> Schema {
@@ -298,6 +326,10 @@ pub struct SecretProviderSigningKeySource {
 #[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
 pub struct RestateClusterStatus {
     pub conditions: Option<Vec<RestateClusterCondition>>,
+    /// Whether the cluster has been provisioned by the operator.
+    /// This is set to true after successful provisioning to avoid repeated provisioning attempts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provisioned: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema, PartialEq, Eq)]
