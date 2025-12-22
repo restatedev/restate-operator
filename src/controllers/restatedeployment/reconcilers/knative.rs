@@ -97,13 +97,7 @@ pub async fn reconcile_knative(
     annotate_configuration(ctx, namespace, &config, &deployment_id).await?;
 
     // Step 7: Update RestateDeployment status in-place
-    update_status(
-        status,
-        &config,
-        &route,
-        &revision,
-        &deployment_id,
-    );
+    update_status(status, &config, &route, &revision, &deployment_id);
 
     // Step 8: Cleanup old Configurations (mirrors ReplicaSet cleanup pattern)
     let deployments = rsd.list_deployments(ctx).await?;
