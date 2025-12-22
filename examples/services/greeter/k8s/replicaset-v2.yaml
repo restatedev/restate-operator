@@ -1,0 +1,41 @@
+apiVersion: restate.dev/v1beta1
+kind: RestateDeployment
+metadata:
+  name: greeter-replicaset
+spec:
+  replicas: 1
+  restate:
+    register:
+      cluster: restate
+  selector:
+    matchLabels:
+      app: greeter-replicaset
+  template:
+    metadata:
+      labels:
+        app: greeter-replicaset
+    spec:
+      containers:
+        - name: service
+          image: ghcr.io/restatedev/restate-operator/greeter:latest
+          imagePullPolicy: Never
+          ports:
+            - name: restate
+              containerPort: 9080
+          env:
+            - name: SERVICE_VERSION
+              value: "v2"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            # v2 includes the antidote fix
+            - name: ANTIDOTE
+              value: "cure"
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
