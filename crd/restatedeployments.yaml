@@ -339,10 +339,6 @@ spec:
                     description: Name of the active Configuration for the current tag
                     nullable: true
                     type: string
-                  currentTag:
-                    description: Current tag value from spec (or computed template hash)
-                    nullable: true
-                    type: string
                   latestRevision:
                     description: Latest ready revision name for the current Configuration
                     nullable: true

@@ -525,10 +525,6 @@ pub struct RestateDeploymentStatus {
 #[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct KnativeDeploymentStatus {
-    /// Current tag value from spec (or computed template hash)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub current_tag: Option<String>,
-
     /// Name of the active Configuration for the current tag
     #[serde(skip_serializing_if = "Option::is_none")]
     pub configuration_name: Option<String>,

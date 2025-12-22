@@ -99,7 +99,6 @@ pub async fn reconcile_knative(
     // Step 7: Update RestateDeployment status in-place
     update_status(
         status,
-        &current_tag,
         &config,
         &route,
         &revision,
@@ -607,7 +606,6 @@ async fn annotate_configuration(
 /// The controller will apply the complete status in a single patch
 fn update_status(
     status: &mut crate::resources::restatedeployments::RestateDeploymentStatus,
-    current_tag: &str,
     config: &Configuration,
     route: &Route,
     revision: &Revision,
@@ -616,7 +614,6 @@ fn update_status(
     let url = route.status.as_ref().and_then(|s| s.url.clone());
 
     let knative_status = KnativeDeploymentStatus {
-        current_tag: Some(current_tag.to_string()),
         configuration_name: Some(config.name_any()),
         route_name: Some(route.name_any()),
         url,
