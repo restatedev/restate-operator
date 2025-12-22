@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::{Api, DeleteParams, Patch, PatchParams, PropagationPolicy};
 use kube::runtime::reflector::ObjectRef;
 use kube::{Resource, ResourceExt};
