@@ -168,7 +168,7 @@ pub async fn reconcile_knative(
     debug!(revision = %revision.name_any(), "Revision is ready");
 
     // Wait for Route to be ready before registration
-    check_route_ready(&route)?;
+    check_route_ready(&route, &latest_revision)?;
     debug!(route = %route.name_any(), "Route is ready");
 
     // Update status with URL from Route
@@ -532,32 +532,51 @@ fn build_route_spec(
 }
 
 /// Check if Route is ready to serve traffic
-fn check_route_ready(route: &Route) -> Result<()> {
+fn check_route_ready(route: &Route, expected_revision: &str) -> Result<()> {
     // Check if Route has Ready=True condition
     if let Some(conditions) = route.status.as_ref().and_then(|s| s.conditions.as_ref()) {
         if let Some(ready_condition) = conditions.iter().find(|c| c.type_ == "Ready") {
-            if ready_condition.status == "True" {
-                return Ok(());
+            if ready_condition.status != "True" {
+                return Err(Error::RouteNotReady {
+                    message: format!(
+                        "Route {} is not ready: {}",
+                        route.name_any(),
+                        ready_condition.message
+                    ),
+                    reason: ready_condition.reason.clone(),
+                    requeue_after: Some(Duration::from_secs(5)),
+                });
             }
-
-            return Err(Error::RouteNotReady {
-                message: format!(
-                    "Route {} is not ready: {}",
-                    route.name_any(),
-                    ready_condition.message
-                ),
-                reason: ready_condition.reason.clone(),
-                requeue_after: Some(Duration::from_secs(5)),
-            });
         }
     }
 
-    // No conditions found - Route not reconciled yet
-    Err(Error::RouteNotReady {
-        message: format!("Route {} has no status conditions", route.name_any()),
-        reason: "NoConditions".into(),
-        requeue_after: Some(Duration::from_secs(5)),
-    })
+    // Check if the expected revision is in the traffic block
+    let traffic_rolled_out = route
+        .status
+        .as_ref()
+        .and_then(|s| s.traffic.as_ref())
+        .map(|traffic| {
+            traffic.iter().any(|t| {
+                t.revision_name.as_deref() == Some(expected_revision)
+                // We could also check percent here, but existence is a strong enough signal for now
+                // given we only configure 100% traffic to one revision
+            })
+        })
+        .unwrap_or(false);
+
+    if !traffic_rolled_out {
+        return Err(Error::RouteNotReady {
+            message: format!(
+                "Route {} is not routing traffic to revision {}",
+                route.name_any(),
+                expected_revision
+            ),
+            reason: "TrafficNotRolledOut".into(),
+            requeue_after: Some(Duration::from_secs(2)),
+        });
+    }
+
+    Ok(())
 }
 
 /// Check if Revision is ready to serve traffic
