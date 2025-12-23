@@ -13,9 +13,6 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .status.deploymentId
-      name: Deployment ID
-      type: string
     - jsonPath: .status.desiredReplicas
       name: Desired
       type: integer
@@ -31,6 +28,10 @@ spec:
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
+    - jsonPath: .status.deploymentId
+      name: Deployment ID
+      priority: 1
+      type: string
     - jsonPath: .spec.template.spec.containers[*].name
       name: Containers
       priority: 1

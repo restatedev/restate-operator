@@ -43,33 +43,92 @@ pub async fn reconcile_knative(
         "Reconciling Knative deployment"
     );
 
-    // Step 1: Determine current tag
-    let current_tag = determine_tag(rsd)?;
-    trace!(tag = %current_tag, "Determined deployment tag");
+    // Determine new tag for this deployment and hence the Configuration and Route names
+    let tag = determine_tag(rsd)?;
+    trace!(tag = %tag, "Determined deployment tag");
 
-    // Step 2: Reconcile Configuration for current tag
-    let config = reconcile_configuration(ctx, rsd, namespace, &current_tag).await?;
+    // Early status update based on tag change
+    let config_name = format!("{}-{}", rsd.name_any(), &tag);
+    let route_name = format!("{}-{}", rsd.name_any(), &tag);
+
+    if status.knative.is_none() {
+        status.knative = Some(KnativeDeploymentStatus::default());
+    }
+
+    let current_config_name = status
+        .knative
+        .as_ref()
+        .and_then(|s| s.configuration_name.as_ref())
+        .cloned(); // .cloned() creates an Option<String> from Option<&String>
+
+    // If a new tag is detected, immediately update status fields to reflect the change
+    // This prevents showing stale information from the previous generation
+    if current_config_name
+        .as_ref()
+        .map_or(true, |name| name != &config_name)
+    {
+        info!(
+            old_config_name = ?current_config_name.as_ref(),
+            new_config_name = %config_name,
+            "New tag detected, starting a new Restate deployment."
+        );
+        status.knative = Some(KnativeDeploymentStatus {
+            configuration_name: Some(config_name.clone()),
+            route_name: Some(route_name.clone()),
+            latest_revision: None,
+            url: None,
+        });
+        status.deployment_id = None;
+        status.replicas = 0;
+        status.desired_replicas = Some(0);
+        status.ready_replicas = Some(0);
+        status.available_replicas = Some(0);
+        status.unavailable_replicas = Some(0);
+    }
+
+    // Apply Configuration for current tag
+    let config = reconcile_configuration(ctx, rsd, &config_name, namespace, &tag).await?;
     debug!(configuration = %config.name_any(), "Configuration reconciled");
 
-    // Step 3: Reconcile Route for current tag
-    let route = reconcile_route(ctx, rsd, namespace, &current_tag, &config).await?;
+    // Apply Route for current tag
+    let route = reconcile_route(ctx, rsd, &route_name, namespace, &config).await?;
     debug!(route = %route.name_any(), "Route reconciled");
 
-    // Step 4: Get the latest created revision (observe rollout eagerly)
+    // Check for up-to-date status information
+    if config.metadata.generation.unwrap_or(0)
+        != config
+            .status
+            .as_ref()
+            .and_then(|s| s.observed_generation)
+            .unwrap_or(0)
+    {
+        return Err(Error::ConfigurationNotReady {
+            message: format!(
+                "Configuration {} observed generation mismatch",
+                config.name_any()
+            ),
+            reason: "ObservedGenerationMismatch".into(),
+            requeue_after: Some(Duration::from_millis(500)),
+        });
+    }
+
+    // Get the latest created revision (to observe the rollout)
     let latest_revision = config
         .status
         .as_ref()
         .and_then(|s| s.latest_created_revision_name.as_ref())
         .ok_or_else(|| Error::ConfigurationNotReady {
-            message: format!(
-                "Configuration {} has no revision(s) yet",
-                config.name_any()
-            ),
+            message: format!("Configuration {} has no revision(s) yet", config.name_any()),
             reason: "RevisionNotCreated".into(),
             requeue_after: Some(Duration::from_secs(5)),
         })?
         .clone();
     debug!(revision = %latest_revision, "Latest revision created");
+
+    // Update status with latest_revision from Configuration
+    if let Some(knative_status) = status.knative.as_mut() {
+        knative_status.latest_revision = Some(latest_revision.clone());
+    }
 
     // Fetch the full Revision object for replica counts
     let revision = ctx
@@ -81,39 +140,60 @@ pub async fn reconcile_knative(
             requeue_after: Some(Duration::from_secs(1)),
         })?;
 
-    // Step 4.5: Wait for Revision to be ready before registration
+    // Update status with replica counts and other revision details
+    let (desired, actual, ready_replicas, available_replicas, unavailable_replicas) =
+        if let Some(rev_status) = &revision.status {
+            let desired = rev_status.desired_replicas.unwrap_or(0);
+            let actual = rev_status.actual_replicas.unwrap_or(0);
+            (
+                desired,
+                actual,
+                Some(actual),
+                Some(actual),
+                Some((desired - actual).max(0)),
+            )
+        } else {
+            // Revision has no status yet, or scaled to zero
+            (0, 0, Some(0), Some(0), Some(0))
+        };
+
+    status.replicas = actual;
+    status.desired_replicas = Some(desired);
+    status.ready_replicas = ready_replicas;
+    status.available_replicas = available_replicas;
+    status.unavailable_replicas = unavailable_replicas;
+
+    // Wait for Revision to be ready before registration
     check_revision_ready(&revision)?;
     debug!(revision = %revision.name_any(), "Revision is ready");
 
-    // Step 4.6: Wait for Route to be ready before registration
+    // Wait for Route to be ready before registration
     check_route_ready(&route)?;
     debug!(route = %route.name_any(), "Route is ready");
 
-    // Step 5: Register or lookup deployment
+    // Update status with URL from Route
+    if let Some(knative_status) = status.knative.as_mut() {
+        knative_status.url = route.status.as_ref().and_then(|s| s.url.clone());
+    }
+
+    // Register or lookup deployment
     let deployment_id = register_or_lookup_deployment(ctx, rsd, namespace, &config, &route).await?;
     debug!(deployment_id = %deployment_id, "Deployment registered/looked up");
 
-    // Step 6: Annotate Configuration with deployment metadata
+    // Update status with deployment ID
+    status.deployment_id = Some(deployment_id.clone());
+
+    // Annotate Configuration with deployment metadata
     annotate_configuration(ctx, namespace, &config, &deployment_id).await?;
 
-    // Step 7: Update RestateDeployment status in-place
-    update_status(status, &config, &route, &revision, &deployment_id);
-
-    // Step 8: Cleanup old Configurations (mirrors ReplicaSet cleanup pattern)
+    // Cleanup old Configurations (mirrors ReplicaSet cleanup pattern)
     let deployments = rsd.list_deployments(ctx).await?;
     let rsd_uid = rsd
         .uid()
         .ok_or_else(|| Error::InvalidRestateConfig("RestateDeployment must have UID".into()))?;
 
-    let (_, next_removal) = cleanup_old_configurations(
-        namespace,
-        ctx,
-        &rsd_uid,
-        rsd,
-        &deployments,
-        Some(&current_tag),
-    )
-    .await?;
+    let (_, next_removal) =
+        cleanup_old_configurations(namespace, ctx, &rsd_uid, rsd, &deployments, Some(&tag)).await?;
 
     Ok(next_removal)
 }
@@ -136,16 +216,15 @@ fn determine_tag(rsd: &RestateDeployment) -> Result<String> {
 async fn reconcile_configuration(
     ctx: &Context,
     rsd: &RestateDeployment,
+    name: &str,
     namespace: &str,
     tag: &str,
 ) -> Result<Configuration> {
-    let config_name = format!("{}-{}", rsd.name_any(), tag);
-
     // Build Configuration spec
-    let config_spec = build_configuration_spec(rsd, &config_name, namespace, tag)?;
+    let config_spec = build_configuration_spec(rsd, name, namespace, tag)?;
 
     debug!(
-        configuration_name = %config_name,
+        configuration_name = %name,
         namespace = %namespace,
         tag = %tag,
         "Applying Knative Configuration"
@@ -156,7 +235,7 @@ async fn reconcile_configuration(
     let params = PatchParams::apply("restate-operator").force();
 
     let config = config_api
-        .patch(&config_name, &params, &Patch::Apply(&config_spec))
+        .patch(name, &params, &Patch::Apply(&config_spec))
         .await?;
 
     Ok(config)
@@ -363,30 +442,28 @@ fn ensure_readiness_probe(containers: &mut Vec<ConfigurationTemplateSpecContaine
 async fn reconcile_route(
     ctx: &Context,
     rsd: &RestateDeployment,
+    name: &str,
     namespace: &str,
-    tag: &str,
     config: &Configuration,
 ) -> Result<Route> {
-    let route_name = format!("{}-{}", rsd.name_any(), tag);
     let config_name = config.name_any();
 
     debug!(
-        route_name = %route_name,
+        route_name = %name,
         namespace = %namespace,
-        tag = %tag,
         configuration = %config_name,
         "Applying Knative Route"
     );
 
     // Build Route spec
-    let route_obj = build_route_spec(rsd, &route_name, namespace, &config_name, config)?;
+    let route_obj = build_route_spec(rsd, name, namespace, &config_name, config)?;
 
     // Apply Route using server-side apply
     let route_api: Api<Route> = Api::namespaced(ctx.client.clone(), namespace);
     let params = PatchParams::apply("restate-operator").force();
 
     let route = route_api
-        .patch(&route_name, &params, &Patch::Apply(&route_obj))
+        .patch(name, &params, &Patch::Apply(&route_obj))
         .await?;
 
     Ok(route)
@@ -595,55 +672,6 @@ async fn annotate_configuration(
     Ok(())
 }
 
-/// Update RestateDeployment status in-place
-/// This populates the status fields without patching to avoid race conditions
-/// The controller will apply the complete status in a single patch
-fn update_status(
-    status: &mut crate::resources::restatedeployments::RestateDeploymentStatus,
-    config: &Configuration,
-    route: &Route,
-    revision: &Revision,
-    deployment_id: &str,
-) {
-    let url = route.status.as_ref().and_then(|s| s.url.clone());
-
-    let knative_status = KnativeDeploymentStatus {
-        configuration_name: Some(config.name_any()),
-        route_name: Some(route.name_any()),
-        url,
-        latest_revision: Some(revision.name_any()),
-    };
-
-    // Extract replica counts from Revision status
-    // Note: When scaled to zero, Knative may omit these fields
-    let (desired, actual, ready_replicas, available_replicas, unavailable_replicas) =
-        if let Some(rev_status) = &revision.status {
-            let desired = rev_status.desired_replicas.unwrap_or(0);
-            let actual = rev_status.actual_replicas.unwrap_or(0);
-            (
-                desired,
-                actual,
-                Some(actual),
-                Some(actual),
-                Some((desired - actual).max(0)),
-            )
-        } else {
-            // Revision has no status yet
-            (0, 0, Some(0), Some(0), Some(0))
-        };
-
-    // Update status fields in-place
-    status.knative = Some(knative_status);
-    status.deployment_id = Some(deployment_id.to_string());
-    status.replicas = actual;
-    status.desired_replicas = Some(desired);
-    status.ready_replicas = ready_replicas;
-    status.available_replicas = available_replicas;
-    status.unavailable_replicas = unavailable_replicas;
-    // Knative mode doesn't use label selectors (Knative manages pods directly)
-    status.label_selector = None;
-}
-
 const RESTATE_REMOVE_VERSION_AT_ANNOTATION: &str = "restate.dev/remove-version-at";
 
 /// Delete Configurations that are no longer needed
@@ -655,13 +683,13 @@ pub async fn cleanup_old_configurations(
     rsd_uid: &str,
     rsd: &RestateDeployment,
     deployments: &std::collections::HashMap<String, bool>,
-    current_tag: Option<&str>,
+    active_tag: Option<&str>,
 ) -> Result<(i32, Option<chrono::DateTime<chrono::Utc>>)> {
     // List all Configurations in the namespace
     let config_api: Api<Configuration> = Api::namespaced(ctx.client.clone(), namespace);
     let all_configs = config_api.list(&Default::default()).await?;
 
-    // Filter to Configurations owned by this RestateDeployment with tags != current_tag
+    // Filter to Configurations owned by this RestateDeployment with tags != active_tag
     let mut configurations: Vec<Configuration> = all_configs
         .items
         .into_iter()
@@ -671,9 +699,9 @@ pub async fn cleanup_old_configurations(
                 return false;
             };
 
-            // Skip current version if a current_tag is provided and matches
-            if let Some(current) = current_tag {
-                if tag == current {
+            // Skip current version if a active_tag is provided and matches
+            if let Some(active) = active_tag {
+                if tag == active {
                     return false;
                 }
             }
