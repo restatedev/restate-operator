@@ -69,7 +69,7 @@ async fn index(c: Data<State>, _req: HttpRequest) -> impl Responder {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    telemetry::init().await;
+    telemetry::init();
 
     let args: Arguments = Arguments::parse();
 
