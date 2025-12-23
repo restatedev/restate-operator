@@ -285,6 +285,18 @@ impl RestateCluster {
                     "False".into(),
                 )
             }
+            Err(Error::ProvisioningFailed(ref message)) => {
+                // Retry provisioning failures after 5 seconds - transient gRPC failures
+                // should recover quickly once the pod's gRPC server is fully initialized
+                warn!("Cluster provisioning failed, will retry: {message}");
+
+                (
+                    Ok(Action::requeue(Duration::from_secs(5))),
+                    format!("Provisioning failed: {message}"),
+                    "ProvisioningFailed".into(),
+                    "False".into(),
+                )
+            }
             Err(err) => {
                 let message = err.to_string();
                 (
