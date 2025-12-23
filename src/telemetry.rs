@@ -1,5 +1,5 @@
 use opentelemetry::trace::TraceId;
-use tracing_subscriber::{prelude::*, EnvFilter, Registry};
+use tracing_subscriber::{EnvFilter, Registry, prelude::*};
 
 /// Fetch an opentelemetry::trace::TraceId as hex through the full tracing stack
 pub fn get_trace_id() -> Option<TraceId> {
@@ -20,7 +20,7 @@ pub fn get_trace_id() -> Option<TraceId> {
 #[cfg(feature = "telemetry")]
 fn init_tracer_provider() -> opentelemetry_sdk::trace::SdkTracerProvider {
     use opentelemetry_otlp::{SpanExporter, WithExportConfig};
-    use opentelemetry_sdk::{trace::SdkTracerProvider, Resource};
+    use opentelemetry_sdk::{Resource, trace::SdkTracerProvider};
 
     let otlp_endpoint = std::env::var("OPENTELEMETRY_ENDPOINT_URL")
         .expect("Need a otel tracing collector configured via OPENTELEMETRY_ENDPOINT_URL");
