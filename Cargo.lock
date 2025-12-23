@@ -2285,6 +2285,7 @@ dependencies = [
  "kube",
  "opentelemetry",
  "opentelemetry-otlp",
+ "opentelemetry_sdk",
  "prometheus",
  "regex",
  "reqwest",
