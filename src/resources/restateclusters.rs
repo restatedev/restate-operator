@@ -10,8 +10,8 @@ use k8s_openapi::api::networking::v1;
 use k8s_openapi::api::networking::v1::{NetworkPolicyPeer, NetworkPolicyPort};
 
 use kube::{CELSchema, CustomResource};
-use schemars::schema::{Schema, SchemaObject};
 use schemars::JsonSchema;
+use schemars::schema::{Schema, SchemaObject};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -34,11 +34,24 @@ pub static RESTATE_CLUSTER_FINALIZER: &str = "clusters.restate.dev";
 pub struct RestateClusterSpec {
     /// clusterName sets the RESTATE_CLUSTER_NAME environment variable. Defaults to the object name.
     pub cluster_name: Option<String>,
+    /// Configuration for operator-managed cluster provisioning
+    pub cluster_provisioning: Option<ClusterProvisioning>,
     pub storage: RestateClusterStorage,
     pub compute: RestateClusterCompute,
     pub security: Option<RestateClusterSecurity>,
     /// TOML-encoded Restate config file
     pub config: Option<String>,
+}
+
+/// Configuration for operator-managed cluster provisioning
+#[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ClusterProvisioning {
+    /// Whether the operator should automatically provision the cluster.
+    /// When enabled, the operator will call the Restate gRPC ProvisionCluster API after pods are running.
+    /// Defaults to false for backwards compatibility.
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 // Hoisted from the derived implementation so that we can restrict names to be valid namespace names
@@ -49,7 +62,7 @@ impl schemars::JsonSchema for RestateCluster {
     fn schema_id() -> Cow<'static, str> {
         "restate_operator::controller::RestateCluster".into()
     }
-    fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> Schema {
+    fn json_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> Schema {
         {
             let mut schema_object = SchemaObject {
                 instance_type: Some(
@@ -84,14 +97,15 @@ impl schemars::JsonSchema for RestateCluster {
                 );
             object_validation.required.insert("metadata".to_owned());
 
-            object_validation
-                .properties
-                .insert("spec".to_owned(), gen.subschema_for::<RestateClusterSpec>());
+            object_validation.properties.insert(
+                "spec".to_owned(),
+                generator.subschema_for::<RestateClusterSpec>(),
+            );
             object_validation.required.insert("spec".to_owned());
 
             object_validation.properties.insert(
                 "status".to_owned(),
-                gen.subschema_for::<Option<RestateClusterStatus>>(),
+                generator.subschema_for::<Option<RestateClusterStatus>>(),
             );
             Schema::Object(schema_object)
         }
@@ -156,7 +170,7 @@ pub struct RestateClusterCompute {
     pub priority_class_name: Option<String>,
 }
 
-fn env_schema(g: &mut schemars::gen::SchemaGenerator) -> Schema {
+fn env_schema(g: &mut schemars::r#gen::SchemaGenerator) -> Schema {
     serde_json::from_value(json!({
         "items": EnvVar::json_schema(g),
         "nullable": true,
@@ -167,7 +181,7 @@ fn env_schema(g: &mut schemars::gen::SchemaGenerator) -> Schema {
     .unwrap()
 }
 
-fn node_selector_schema(_g: &mut schemars::gen::SchemaGenerator) -> Schema {
+fn node_selector_schema(_g: &mut schemars::r#gen::SchemaGenerator) -> Schema {
     serde_json::from_value(json!({
         "description": "If specified, a node selector for the pod",
         "additionalProperties": {
@@ -221,7 +235,7 @@ pub struct RestateClusterNetworkPeers {
     pub metrics: Option<Vec<NetworkPolicyPeer>>,
 }
 
-fn network_peers_schema(g: &mut schemars::gen::SchemaGenerator) -> Schema {
+fn network_peers_schema(g: &mut schemars::r#gen::SchemaGenerator) -> Schema {
     serde_json::from_value(json!({
         "items": NetworkPolicyPeer::json_schema(g),
         "nullable": true,
@@ -252,7 +266,7 @@ impl From<NetworkPolicyEgressRule> for v1::NetworkPolicyEgressRule {
     }
 }
 
-fn network_ports_schema(_: &mut schemars::gen::SchemaGenerator) -> Schema {
+fn network_ports_schema(_: &mut schemars::r#gen::SchemaGenerator) -> Schema {
     serde_json::from_value(json!({
           "items": {
             "description": "NetworkPolicyPort describes a port to allow traffic on",
@@ -320,6 +334,9 @@ pub struct SecretProviderSigningKeySource {
 #[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
 pub struct RestateClusterStatus {
     pub conditions: Option<Vec<RestateClusterCondition>>,
+    /// Whether the cluster has been provisioned by the operator.
+    /// This is set to true after successful provisioning to avoid repeated provisioning attempts.
+    pub provisioned: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema, PartialEq, Eq)]

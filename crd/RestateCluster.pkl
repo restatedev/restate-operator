@@ -34,6 +34,9 @@ class Spec {
   /// clusterName sets the RESTATE_CLUSTER_NAME environment variable. Defaults to the object name.
   clusterName: String?
 
+  /// Configuration for operator-managed cluster provisioning
+  clusterProvisioning: ClusterProvisioning?
+
   /// Compute configuration
   compute: Compute
 
@@ -45,6 +48,14 @@ class Spec {
 
   /// Storage configuration
   storage: Storage
+}
+
+/// Configuration for operator-managed cluster provisioning
+class ClusterProvisioning {
+  /// Whether the operator should automatically provision the cluster.
+  /// When enabled, the operator will call the Restate gRPC ProvisionCluster API after pods are running.
+  /// Defaults to false for backwards compatibility.
+  enabled: Boolean?
 }
 
 /// Compute configuration
@@ -204,6 +215,10 @@ class Storage {
 /// https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
 class Status {
   conditions: Listing<Condition>?
+
+  /// Whether the cluster has been provisioned by the operator.
+  /// This is set to true after successful provisioning to avoid repeated provisioning attempts.
+  provisioned: Boolean?
 }
 
 class Condition {
