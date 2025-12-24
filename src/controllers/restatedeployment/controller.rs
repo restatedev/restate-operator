@@ -20,7 +20,9 @@ use kube::runtime::events::{Event, EventType, Recorder};
 use kube::runtime::finalizer::{finalizer, Event as Finalizer};
 use kube::runtime::reflector::{ObjectRef, Store};
 use kube::runtime::watcher::Config;
-use kube::runtime::{controller, metadata_watcher, reflector, watcher, WatchStreamExt};
+use kube::runtime::{
+    controller, metadata_watcher, predicates, reflector, watcher, Predicate, WatchStreamExt,
+};
 
 use kube::Resource;
 use reqwest::Method;
@@ -1015,7 +1017,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     )
     .touched_objects()
     .default_backoff()
-    .predicate_filter(generation_predicate);
+    .predicate_filter(predicates::generation.combine(predicates::finalizers));
 
     // Create a controller for RestateDeployment
     // Use deployments_reflector with generation predicate to filter out status-only changes
@@ -1104,8 +1106,4 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         .await;
 }
 
-/// Generation-based predicate to filter out status-only changes
-/// Only triggers reconciliation when metadata.generation changes (spec changes)
-fn generation_predicate<K: Resource>(obj: &K) -> Option<u64> {
-    obj.meta().generation.map(|g| g as u64)
-}
+
