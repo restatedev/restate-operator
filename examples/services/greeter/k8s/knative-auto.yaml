@@ -25,7 +25,7 @@ spec:
       containers:
         - name: greeter
           # Change this image tag to trigger a new versioned deployment
-          image: dev.local/restatedev/restate-operator/greeter:latest
+          image: dev.local/restatedev/restate-operator/greeter:local
           imagePullPolicy: Never
           ports:
             # Knative only allows port names: "h2c" or "http1"

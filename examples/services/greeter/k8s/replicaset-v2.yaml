@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: service
-          image: ghcr.io/restatedev/restate-operator/greeter:latest
+          image: dev.local/restatedev/restate-operator/greeter:local
           imagePullPolicy: Never
           ports:
             - name: restate

@@ -26,6 +26,15 @@ kubectl get restatecluster restate -w
 kubectl -n restate exec -it restate-0 -- restatectl provision
 ```
 
+And you need to build the greeter service image:
+
+```bash
+cd examples/services/greeter
+
+# Build the "dev.local/restatedev/restate-operator/greeter:local" image
+just docker
+```
+
 ## Quick Reference
 
 ```bash
