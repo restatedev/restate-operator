@@ -858,19 +858,17 @@ async fn check_pia(
 }
 
 fn is_pod_identity_association_synced(pia: PodIdentityAssociation) -> bool {
-    if let Some(status) = pia.status {
-        if let Some(conditions) = status.conditions {
-            if let Some(synced) = conditions
-                .iter()
-                .find(|cond| cond.r#type == "ACK.ResourceSynced")
-            {
-                if synced.status == "True" {
-                    return true;
-                }
-            }
-        }
+    if let Some(status) = pia.status
+        && let Some(conditions) = status.conditions
+        && let Some(synced) = conditions
+            .iter()
+            .find(|cond| cond.r#type == "ACK.ResourceSynced")
+        && synced.status == "True"
+    {
+        true
+    } else {
+        false
     }
-    false
 }
 
 async fn delete_pod_identity_association(
