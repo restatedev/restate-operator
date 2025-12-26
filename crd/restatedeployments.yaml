@@ -46,7 +46,10 @@ spec:
         description: Auto-generated derived type for RestateDeploymentSpec via `CustomResource`
         properties:
           spec:
-            description: RestateDeployment is similar to a Kubernetes Deployment but tailored for Restate services. It maintains ReplicaSets and Services for each version to support Restate's versioning requirements, ensuring old versions remain available until all invocations against them are complete.
+            description: |-
+              RestateDeployment is similar to a Kubernetes Deployment but tailored for Restate services.
+              It maintains ReplicaSets and Services for each version to support Restate's versioning requirements,
+              ensuring old versions remain available until all invocations against them are complete.
             properties:
               minReadySeconds:
                 description: Minimum number of seconds for which a newly created pod should be ready.
@@ -110,7 +113,9 @@ spec:
                         type: string
                     type: object
                   servicePath:
-                    description: Optional path to append to the Service url when registering with Restate. If not provided, the service will be registered at the root path "/".
+                    description: |-
+                      Optional path to append to the Service url when registering with Restate.
+                      If not provided, the service will be registered at the root path "/".
                     nullable: true
                     type: string
                   useHttp11:
@@ -191,7 +196,9 @@ spec:
                         type: object
                     type: object
                   spec:
-                    description: 'Specification of the desired behavior of the pod. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status. The contents of this field are passed through directly from the operator to the created ReplicaSet and are not validated.'
+                    description: |-
+                      Specification of the desired behavior of the pod. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status.
+                      The contents of this field are passed through directly from the operator to the created ReplicaSet and are not validated.
                     x-kubernetes-preserve-unknown-fields: true
                 required:
                 - spec
@@ -201,9 +208,10 @@ spec:
             - selector
             - template
             type: object
-            x-kubernetes-validations: []
           status:
-            description: Status of the RestateDeployment This is set and managed automatically by the controller
+            description: |-
+              Status of the RestateDeployment
+              This is set and managed automatically by the controller
             nullable: true
             properties:
               availableReplicas:

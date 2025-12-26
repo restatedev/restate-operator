@@ -1,5 +1,5 @@
 use opentelemetry::trace::TraceId;
-use tracing_subscriber::{prelude::*, EnvFilter, Registry};
+use tracing_subscriber::{EnvFilter, Registry, prelude::*};
 
 /// Fetch an opentelemetry::trace::TraceId as hex through the full tracing stack
 pub fn get_trace_id() -> Option<TraceId> {

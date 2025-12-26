@@ -19,12 +19,13 @@ use kube::api::{DeleteParams, ListParams, Preconditions, PropagationPolicy};
 use kube::core::PartialObjectMeta;
 use kube::runtime::reflector::{ObjectRef, Store};
 use kube::{
-    api::{Patch, PatchParams},
     Api, ResourceExt,
+    api::{Patch, PatchParams},
 };
 use sha2::Digest;
 use tracing::{debug, error, warn};
 
+use crate::Error;
 use crate::controllers::restatecluster::controller::Context;
 use crate::resources::podidentityassociations::{
     PodIdentityAssociation, PodIdentityAssociationSpec,
@@ -33,7 +34,6 @@ use crate::resources::restateclusters::{RestateClusterSpec, RestateClusterStorag
 use crate::resources::securitygrouppolicies::{
     SecurityGroupPolicy, SecurityGroupPolicySecurityGroups, SecurityGroupPolicySpec,
 };
-use crate::Error;
 
 use super::quantity_parser::QuantityParser;
 use super::{label_selector, mandatory_labels, object_meta};
@@ -241,6 +241,7 @@ fn env(cluster_name: &str, custom: Option<&[EnvVar]>) -> Vec<EnvVar> {
                 }),
                 resource_field_ref: None,
                 secret_key_ref: None,
+                file_key_ref: None,
             }),
         },
         EnvVar {
@@ -254,6 +255,7 @@ fn env(cluster_name: &str, custom: Option<&[EnvVar]>) -> Vec<EnvVar> {
                 }),
                 resource_field_ref: None,
                 secret_key_ref: None,
+                file_key_ref: None,
             }),
         },
         EnvVar {
@@ -267,6 +269,7 @@ fn env(cluster_name: &str, custom: Option<&[EnvVar]>) -> Vec<EnvVar> {
                 }),
                 resource_field_ref: None,
                 secret_key_ref: None,
+                file_key_ref: None,
             }),
         },
     ];
@@ -366,7 +369,7 @@ fn restate_statefulset(
         spec: Some(StatefulSetSpec {
             replicas: spec.compute.replicas,
             selector: label_selector(base_metadata),
-            service_name: "restate-cluster".into(),
+            service_name: Some("restate-cluster".into()),
             template: PodTemplateSpec {
                 metadata: Some(ObjectMeta {
                     labels,
@@ -563,7 +566,9 @@ pub async fn reconcile_compute(
             delete_job(namespace, &job_api, "restate-pia-canary").await?;
         }
         (None, Some(aws_pod_identity_association_role_arn)) => {
-            warn!("Ignoring AWS pod identity association role ARN {aws_pod_identity_association_role_arn} as the operator is not configured with --aws-pod-identity-association-cluster");
+            warn!(
+                "Ignoring AWS pod identity association role ARN {aws_pod_identity_association_role_arn} as the operator is not configured with --aws-pod-identity-association-cluster"
+            );
         }
         (None, None) => {}
     };
@@ -594,7 +599,10 @@ pub async fn reconcile_compute(
             delete_security_group_policy(namespace, &sgp_api, "restate").await?;
         }
         Some(aws_pod_security_groups) if !aws_pod_security_groups.is_empty() => {
-            warn!("Ignoring AWS pod security groups {} as the SecurityGroupPolicy CRD is not installed", aws_pod_security_groups.join(","));
+            warn!(
+                "Ignoring AWS pod security groups {} as the SecurityGroupPolicy CRD is not installed",
+                aws_pod_security_groups.join(",")
+            );
         }
         None | Some(_) => {}
     }
@@ -1028,7 +1036,7 @@ async fn change_statefulset_storage(
             if bytes == storage.storage_request_bytes
                 && existing_vac == storage.volume_attributes_class_name.as_deref() =>
         {
-            return Ok(())
+            return Ok(());
         }
         _ => {}
     }
@@ -1093,13 +1101,25 @@ fn validate_stateful_set_status(
         ..
     } = status;
     if replicas != expected_replicas {
-        return Err(Error::NotReady { reason: "StatefulSetScaling".into(), message: format!("StatefulSet has {replicas} replicas instead of the expected {expected_replicas}; it may be scaling up or down"), requeue_after: None });
+        return Err(Error::NotReady {
+            reason: "StatefulSetScaling".into(),
+            message: format!(
+                "StatefulSet has {replicas} replicas instead of the expected {expected_replicas}; it may be scaling up or down"
+            ),
+            requeue_after: None,
+        });
     };
 
     let ready_replicas = ready_replicas.unwrap_or(0);
 
     if ready_replicas != expected_replicas {
-        return Err(Error::NotReady { reason: "StatefulSetPodNotReady".into(), message: format!("StatefulSet has {ready_replicas} ready replicas instead of the expected {expected_replicas}; a pod may not be ready"), requeue_after: None });
+        return Err(Error::NotReady {
+            reason: "StatefulSetPodNotReady".into(),
+            message: format!(
+                "StatefulSet has {ready_replicas} ready replicas instead of the expected {expected_replicas}; a pod may not be ready"
+            ),
+            requeue_after: None,
+        });
     }
 
     Ok(())

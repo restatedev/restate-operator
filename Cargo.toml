@@ -58,15 +58,15 @@ chrono = { version = "0.4.42", features = ["serde"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 fnv = "1.0.7"
 futures = "0.3.31"
-k8s-openapi = { version = "0.24.0", features = ["latest", "schemars"] }
-kube = { version = "0.99.0", features = ["runtime", "client", "derive", "unstable-runtime", ] }
+k8s-openapi = { version = "0.26.1", features = ["latest", "schemars"] }
+kube = { version = "2.0.1", features = ["runtime", "client", "derive", "unstable-runtime", ] }
 opentelemetry = { version = "0.31.0", features = ["trace"] }
 opentelemetry_sdk = "0.31.0"
 opentelemetry-otlp = { version = "0.31.0", features = ["tokio", "grpc-tonic"], optional = true }
 prometheus = "0.14.0"
 regex = "1.12.2"
 reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls", ] }
-schemars = { version = "0.8.12", features = ["chrono"] }
+schemars = { version = "1.2.0", features = ["chrono04"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde-hashkey = "0.4.5"
 serde_json = "1.0.147"

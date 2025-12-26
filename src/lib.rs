@@ -54,10 +54,14 @@ pub enum Error {
     #[error("Encountered a ReplicaSet hash collision, will retry with a new template hash")]
     HashCollision,
 
-    #[error("This RestateDeployment is backing active versions in Restate. If you want to delete the RestateDeployment, either register new endpoints for the relevant services or delete the Restate versions.")]
+    #[error(
+        "This RestateDeployment is backing active versions in Restate. If you want to delete the RestateDeployment, either register new endpoints for the relevant services or delete the Restate versions."
+    )]
     DeploymentInUse,
 
-    #[error("This RestateDeployment is backing recently-active versions in Restate. It will be removed after the drain delay period.")]
+    #[error(
+        "This RestateDeployment is backing recently-active versions in Restate. It will be removed after the drain delay period."
+    )]
     DeploymentDraining { requeue_after: Option<Duration> },
 
     #[error(transparent)]
