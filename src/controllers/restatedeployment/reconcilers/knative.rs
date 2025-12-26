@@ -104,7 +104,7 @@ pub async fn reconcile_knative(
     {
         return Err(Error::ConfigurationNotReady {
             message: format!(
-                "Configuration {} observed generation mismatch",
+                "Configuration {} has out-of-date status information",
                 config.name_any()
             ),
             reason: "ObservedGenerationMismatch".into(),
@@ -118,7 +118,10 @@ pub async fn reconcile_knative(
         .as_ref()
         .and_then(|s| s.latest_created_revision_name.as_ref())
         .ok_or_else(|| Error::ConfigurationNotReady {
-            message: format!("Configuration {} has no revision(s) yet", config.name_any()),
+            message: format!(
+                "Configuration {} is waiting for initial deployment",
+                config.name_any()
+            ),
             reason: "RevisionNotCreated".into(),
             requeue_after: Some(Duration::from_secs(5)),
         })?
@@ -135,7 +138,7 @@ pub async fn reconcile_knative(
         .revision_store
         .get(&ObjectRef::new(&latest_revision).within(namespace))
         .ok_or_else(|| Error::ConfigurationNotReady {
-            message: format!("Revision {} not found in store", latest_revision),
+            message: format!("Revision {} is not yet found", latest_revision),
             reason: "RevisionNotFound".into(),
             requeue_after: Some(Duration::from_secs(1)),
         })?;
@@ -602,7 +605,10 @@ fn check_revision_ready(revision: &Revision) -> Result<()> {
 
     // No conditions found - Revision not reconciled yet
     Err(Error::ConfigurationNotReady {
-        message: format!("Revision {} has no status conditions", revision.name_any()),
+        message: format!(
+            "Revision {} has out-of-date status information",
+            revision.name_any()
+        ),
         reason: "NoConditions".into(),
         requeue_after: Some(Duration::from_secs(5)),
     })
@@ -633,7 +639,7 @@ async fn register_or_lookup_deployment(
         .as_ref()
         .and_then(|s| s.url.as_ref())
         .ok_or_else(|| Error::RouteNotReady {
-            message: format!("Route {} does not have URL in status", route.name_any()),
+            message: format!("Route {} is waiting for URL assignment", route.name_any()),
             reason: "RouteURLNotReady".into(),
             requeue_after: Some(Duration::from_secs(5)),
         })?;

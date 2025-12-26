@@ -502,7 +502,7 @@ impl RestateDeployment {
                     (
                         Ok(Action::requeue(requeue_after)),
                         message,
-                        reason,
+                        "RouteNotReady".into(),
                         "False".into(),
                     )
                 }
@@ -522,7 +522,7 @@ impl RestateDeployment {
                     (
                         Ok(Action::requeue(requeue_after)),
                         message,
-                        reason,
+                        "ConfigurationNotReady".into(),
                         "False".into(),
                     )
                 }
