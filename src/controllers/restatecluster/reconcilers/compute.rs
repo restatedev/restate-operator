@@ -247,6 +247,7 @@ fn env(cluster_name: &str, custom: Option<&[EnvVar]>) -> Vec<EnvVar> {
                 }),
                 resource_field_ref: None,
                 secret_key_ref: None,
+                file_key_ref: None,
             }),
         },
         EnvVar {
@@ -260,6 +261,7 @@ fn env(cluster_name: &str, custom: Option<&[EnvVar]>) -> Vec<EnvVar> {
                 }),
                 resource_field_ref: None,
                 secret_key_ref: None,
+                file_key_ref: None,
             }),
         },
         EnvVar {
@@ -273,6 +275,7 @@ fn env(cluster_name: &str, custom: Option<&[EnvVar]>) -> Vec<EnvVar> {
                 }),
                 resource_field_ref: None,
                 secret_key_ref: None,
+                file_key_ref: None,
             }),
         },
     ];
@@ -372,7 +375,7 @@ fn restate_statefulset(
         spec: Some(StatefulSetSpec {
             replicas: spec.compute.replicas,
             selector: label_selector(base_metadata),
-            service_name: "restate-cluster".into(),
+            service_name: Some("restate-cluster".into()),
             template: PodTemplateSpec {
                 metadata: Some(ObjectMeta {
                     labels,

@@ -28,7 +28,7 @@ fn deny_all(base_metadata: &ObjectMeta) -> NetworkPolicy {
     NetworkPolicy {
         metadata: object_meta(base_metadata, DENY_ALL_POLICY_NAME),
         spec: Some(NetworkPolicySpec {
-            pod_selector: label_selector(base_metadata),
+            pod_selector: Some(label_selector(base_metadata)),
             policy_types: Some(vec!["Egress".into(), "Ingress".into()]),
             ..Default::default()
         }),
@@ -41,7 +41,7 @@ fn allow_dns(base_metadata: &ObjectMeta) -> NetworkPolicy {
     NetworkPolicy {
         metadata: object_meta(base_metadata, ALLOW_DNS_POLICY_NAME),
         spec: Some(NetworkPolicySpec {
-            pod_selector: label_selector(base_metadata),
+            pod_selector: Some(label_selector(base_metadata)),
             policy_types: Some(vec!["Egress".into()]),
             egress: Some(vec![NetworkPolicyEgressRule {
                 to: Some(vec![NetworkPolicyPeer {
@@ -87,7 +87,7 @@ fn allow_public(base_metadata: &ObjectMeta) -> NetworkPolicy {
     NetworkPolicy {
         metadata: object_meta(base_metadata, ALLOW_PUBLIC_POLICY_NAME),
         spec: Some(NetworkPolicySpec {
-            pod_selector: label_selector(base_metadata),
+            pod_selector: Some(label_selector(base_metadata)),
             policy_types: Some(vec!["Egress".into()]),
             egress: Some(vec![NetworkPolicyEgressRule {
                 to: Some(vec![
@@ -134,7 +134,7 @@ fn allow_aws_pod_identity(base_metadata: &ObjectMeta) -> NetworkPolicy {
     NetworkPolicy {
         metadata: object_meta(base_metadata, AWS_POD_IDENTITY_POLICY_NAME),
         spec: Some(NetworkPolicySpec {
-            pod_selector: label_selector(base_metadata),
+            pod_selector: Some(label_selector(base_metadata)),
             policy_types: Some(vec!["Egress".into()]),
             egress: Some(vec![NetworkPolicyEgressRule {
                 to: Some(vec![NetworkPolicyPeer {
@@ -168,7 +168,7 @@ fn allow_access(
     NetworkPolicy {
         metadata: object_meta(base_metadata, format!("allow-{port_name}-access")),
         spec: Some(NetworkPolicySpec {
-            pod_selector: label_selector(base_metadata),
+            pod_selector: Some(label_selector(base_metadata)),
             policy_types: Some(vec!["Ingress".into()]),
             ingress: peers.map(|peers| {
                 vec![NetworkPolicyIngressRule {
@@ -248,7 +248,7 @@ fn allow_egress(
     NetworkPolicy {
         metadata: object_meta(base_metadata, ALLOW_EGRESS_POLICY_NAME),
         spec: Some(NetworkPolicySpec {
-            pod_selector: label_selector(base_metadata),
+            pod_selector: Some(label_selector(base_metadata)),
             policy_types: Some(vec!["Egress".into()]),
             egress: Some(egress),
             ..Default::default()

@@ -1,11 +1,11 @@
 use schemars::JsonSchema;
 fn main() {
-    let mut generator = schemars::r#gen::SchemaSettings::openapi3()
+    let mut generator = schemars::generate::SchemaSettings::openapi3()
         .with(|s| {
             s.inline_subschemas = true;
             s.meta_schema = None;
         })
-        .with_visitor(kube::core::schema::StructuralSchemaRewriter)
+        .with_transform(kube::core::schema::StructuralSchemaRewriter)
         .into_generator();
     print!(
         "{}",
