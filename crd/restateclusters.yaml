@@ -44,6 +44,15 @@ spec:
                 description: clusterName sets the RESTATE_CLUSTER_NAME environment variable. Defaults to the object name.
                 nullable: true
                 type: string
+              clusterProvisioning:
+                description: Configuration for operator-managed cluster provisioning
+                nullable: true
+                properties:
+                  enabled:
+                    default: false
+                    description: Whether the operator should automatically provision the cluster. When enabled, the operator will call the Restate gRPC ProvisionCluster API after pods are running. Defaults to false for backwards compatibility.
+                    type: boolean
+                type: object
               compute:
                 description: Compute configuration
                 properties:
@@ -1391,6 +1400,10 @@ spec:
                   type: object
                 nullable: true
                 type: array
+              provisioned:
+                description: Whether the cluster has been provisioned by the operator. This is set to true after successful provisioning to avoid repeated provisioning attempts.
+                nullable: true
+                type: boolean
             type: object
         required:
         - metadata

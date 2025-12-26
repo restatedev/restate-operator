@@ -13,21 +13,21 @@ use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::api::policy::v1::PodDisruptionBudget;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{APIGroup, ObjectMeta};
 
-use kube::core::object::HasStatus;
 use kube::core::PartialObjectMeta;
+use kube::core::object::HasStatus;
 use kube::runtime::events::Recorder;
 use kube::runtime::reflector::{ObjectRef, Store};
-use kube::runtime::{metadata_watcher, reflector, watcher, Predicate, WatchStreamExt};
+use kube::runtime::{Predicate, WatchStreamExt, metadata_watcher, reflector, watcher};
 use kube::{
+    Resource,
     api::{Api, ListParams, Patch, PatchParams, ResourceExt},
     client::Client,
     runtime::{
         controller::{Action, Controller},
         events::{Event, EventType},
-        finalizer::{finalizer, Event as Finalizer},
+        finalizer::{Event as Finalizer, finalizer},
         watcher::Config,
     },
-    Resource,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -37,11 +37,11 @@ use tracing::*;
 use crate::controllers::{Diagnostics, State};
 use crate::resources::podidentityassociations::PodIdentityAssociation;
 use crate::resources::restateclusters::{
-    RestateCluster, RestateClusterCondition, RestateClusterStatus, RESTATE_CLUSTER_FINALIZER,
+    RESTATE_CLUSTER_FINALIZER, RestateCluster, RestateClusterCondition, RestateClusterStatus,
 };
 use crate::resources::secretproviderclasses::SecretProviderClass;
 use crate::resources::securitygrouppolicies::SecurityGroupPolicy;
-use crate::{telemetry, Error, Metrics, Result};
+use crate::{Error, Metrics, Result, telemetry};
 
 use super::reconcilers::compute::reconcile_compute;
 use super::reconcilers::network_policies::reconcile_network_policies;
@@ -215,7 +215,15 @@ impl RestateCluster {
         )
         .await?;
 
-        reconcile_compute(&ctx, name, &base_metadata, &self.spec, signing_key).await?;
+        reconcile_compute(
+            &ctx,
+            name,
+            &base_metadata,
+            &self.spec,
+            self.status.as_ref(),
+            signing_key,
+        )
+        .await?;
 
         Ok(())
     }
@@ -251,6 +259,18 @@ impl RestateCluster {
                     Ok(Action::requeue(requeue_after)),
                     message,
                     reason,
+                    "False".into(),
+                )
+            }
+            Err(Error::ProvisioningFailed(ref message)) => {
+                // Retry provisioning failures after 5 seconds - transient gRPC failures
+                // should recover quickly once the pod's gRPC server is fully initialized
+                warn!("Cluster provisioning failed, will retry: {message}");
+
+                (
+                    Ok(Action::requeue(Duration::from_secs(5))),
+                    format!("Provisioning failed: {message}"),
+                    "ProvisioningFailed".into(),
                     "False".into(),
                 )
             }
@@ -290,11 +310,14 @@ impl RestateCluster {
         }
 
         // always overwrite status object with what we saw
+        // Preserve the provisioned status from the existing status
+        let provisioned = self.status.as_ref().and_then(|s| s.provisioned);
         let new_status = Patch::Apply(json!({
             "apiVersion": "restate.dev/v1",
             "kind": "RestateCluster",
             "status": RestateClusterStatus {
                 conditions: Some(vec![ready]),
+                provisioned,
             }
         }));
         let ps = PatchParams::apply("restate-operator").force();
@@ -373,7 +396,9 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     let spc_api = Api::<SecretProviderClass>::all(client.clone());
 
     if state.aws_pod_identity_association_cluster.is_some() && !pod_identity_association_installed {
-        error!("PodIdentityAssociation is not available on apiserver, but a pod identity association cluster was provided. Is the CRD installed?");
+        error!(
+            "PodIdentityAssociation is not available on apiserver, but a pod identity association cluster was provided. Is the CRD installed?"
+        );
         std::process::exit(1);
     }
 

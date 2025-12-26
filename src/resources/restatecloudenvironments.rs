@@ -4,12 +4,12 @@ use k8s_openapi::api::core::v1::{
     Affinity, EnvVar, PodDNSConfig, ResourceRequirements, Secret, Toleration,
 };
 use kube::{
-    runtime::reflector::{ObjectRef, Store},
     CELSchema, CustomResource,
+    runtime::reflector::{ObjectRef, Store},
 };
 use schemars::{
-    schema::{Schema, SchemaObject},
     JsonSchema,
+    schema::{Schema, SchemaObject},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -48,7 +48,7 @@ impl schemars::JsonSchema for RestateCloudEnvironment {
     fn schema_id() -> Cow<'static, str> {
         "restate_operator::resources::restatecloudenvironments::RestateCloudEnvironment".into()
     }
-    fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> Schema {
+    fn json_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> Schema {
         {
             let mut schema_object = SchemaObject {
                 instance_type: Some(
@@ -85,7 +85,7 @@ impl schemars::JsonSchema for RestateCloudEnvironment {
 
             object_validation.properties.insert(
                 "spec".to_owned(),
-                gen.subschema_for::<RestateCloudEnvironmentSpec>(),
+                generator.subschema_for::<RestateCloudEnvironmentSpec>(),
             );
             object_validation.required.insert("spec".to_owned());
 
@@ -221,7 +221,7 @@ pub struct TunnelSpec {
     pub affinity: Option<Affinity>,
 }
 
-fn env_schema(g: &mut schemars::gen::SchemaGenerator) -> Schema {
+fn env_schema(g: &mut schemars::r#gen::SchemaGenerator) -> Schema {
     serde_json::from_value(json!({
         "items": EnvVar::json_schema(g),
         "nullable": true,
@@ -232,7 +232,7 @@ fn env_schema(g: &mut schemars::gen::SchemaGenerator) -> Schema {
     .unwrap()
 }
 
-fn node_selector_schema(_g: &mut schemars::gen::SchemaGenerator) -> Schema {
+fn node_selector_schema(_g: &mut schemars::r#gen::SchemaGenerator) -> Schema {
     serde_json::from_value(json!({
         "description": "If specified, a node selector for the pod",
         "additionalProperties": {
