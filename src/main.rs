@@ -1,5 +1,5 @@
 use actix_web::{
-    get, middleware, web::Data, App, HttpRequest, HttpResponse, HttpServer, Responder,
+    App, HttpRequest, HttpResponse, HttpServer, Responder, get, middleware, web::Data,
 };
 use clap::Parser;
 use kube::Client;
@@ -69,7 +69,7 @@ async fn index(c: Data<State>, _req: HttpRequest) -> impl Responder {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    telemetry::init().await;
+    telemetry::init();
 
     let args: Arguments = Arguments::parse();
 

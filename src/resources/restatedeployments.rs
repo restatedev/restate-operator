@@ -2,13 +2,12 @@ use std::fmt::Display;
 
 use k8s_openapi::{api::core::v1::Secret, apimachinery::pkg::apis::meta::v1::LabelSelector};
 use kube::{
+    CustomResource, KubeSchema,
     runtime::reflector::{ObjectRef, Store},
-    CELSchema, CustomResource,
 };
-use schemars::schema::Schema;
 use schemars::JsonSchema;
+use schemars::Schema;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use url::Url;
 
 use crate::{
@@ -20,7 +19,7 @@ pub static RESTATE_DEPLOYMENT_FINALIZER: &str = "deployments.restate.dev";
 /// RestateDeployment is similar to a Kubernetes Deployment but tailored for Restate services.
 /// It maintains ReplicaSets and Services for each version to support Restate's versioning requirements,
 /// ensuring old versions remain available until all invocations against them are complete.
-#[derive(CustomResource, Deserialize, Serialize, Clone, Debug, CELSchema)]
+#[derive(CustomResource, Deserialize, Serialize, Clone, Debug, KubeSchema)]
 #[kube(
     kind = "RestateDeployment",
     group = "restate.dev",
@@ -70,51 +69,51 @@ fn default_revision_history_limit() -> i32 {
     10
 }
 
-fn label_selector_schema(_g: &mut schemars::gen::SchemaGenerator) -> Schema {
-    serde_json::from_value(serde_json::json!({
-      "properties": {
-        "matchExpressions": {
-          "description": "matchExpressions is a list of label selector requirements. The requirements are ANDed.",
-          "items": {
-            "description": "A label selector requirement is a selector that contains values, a key, and an operator that\nrelates the key and values.",
-            "properties": {
-              "key": {
-                "description": "key is the label key that the selector applies to.",
-                "type": "string"
-              },
-              "operator": {
-                "description": "operator represents a key's relationship to a set of values.\nValid operators are In, NotIn, Exists and DoesNotExist.",
-                "type": "string"
-              },
-              "values": {
-                "description": "values is an array of string values. If the operator is In or NotIn,\nthe values array must be non-empty. If the operator is Exists or DoesNotExist,\nthe values array must be empty. This array is replaced during a strategic\nmerge patch.",
+fn label_selector_schema(_g: &mut schemars::SchemaGenerator) -> Schema {
+    schemars::json_schema!({
+        "properties": {
+            "matchExpressions": {
+                "description": "matchExpressions is a list of label selector requirements. The requirements are ANDed.",
                 "items": {
-                  "type": "string"
+                    "description": "A label selector requirement is a selector that contains values, a key, and an operator that\nrelates the key and values.",
+                    "properties": {
+                        "key": {
+                            "description": "key is the label key that the selector applies to.",
+                            "type": "string"
+                        },
+                        "operator": {
+                            "description": "operator represents a key's relationship to a set of values.\nValid operators are In, NotIn, Exists and DoesNotExist.",
+                            "type": "string"
+                        },
+                        "values": {
+                            "description": "values is an array of string values. If the operator is In or NotIn,\nthe values array must be non-empty. If the operator is Exists or DoesNotExist,\nthe values array must be empty. This array is replaced during a strategic\nmerge patch.",
+                            "items": {
+                                "type": "string"
+                            },
+                            "type": "array",
+                            "x-kubernetes-list-type": "atomic"
+                        }
+                    },
+                    "required": [
+                        "key",
+                        "operator"
+                    ],
+                    "type": "object"
                 },
                 "type": "array",
                 "x-kubernetes-list-type": "atomic"
-              }
             },
-            "required": [
-              "key",
-              "operator"
-            ],
-            "type": "object"
-          },
-          "type": "array",
-          "x-kubernetes-list-type": "atomic"
+            "matchLabels": {
+                "additionalProperties": {
+                    "type": "string"
+                },
+                "description": "matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels\nmap is equivalent to an element of matchExpressions, whose key field is \"key\", the\noperator is \"In\", and the values array contains only \"value\". The requirements are ANDed.",
+                "type": "object"
+            }
         },
-        "matchLabels": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "description": "matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels\nmap is equivalent to an element of matchExpressions, whose key field is \"key\", the\noperator is \"In\", and the values array contains only \"value\". The requirements are ANDed.",
-          "type": "object"
-        }
-      },
-      "type": "object",
-      "x-kubernetes-map-type": "atomic"
-    })).unwrap()
+        "type": "object",
+        "x-kubernetes-map-type": "atomic"
+    })
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
@@ -128,11 +127,10 @@ pub struct PodTemplateSpec {
     pub spec: Option<serde_json::Value>,
 }
 
-fn pod_spec_schema(_g: &mut schemars::gen::SchemaGenerator) -> Schema {
-    serde_json::from_value(serde_json::json!({
-            "x-kubernetes-preserve-unknown-fields": true,
-    }))
-    .unwrap()
+fn pod_spec_schema(_g: &mut schemars::SchemaGenerator) -> Schema {
+    schemars::json_schema!({
+        "x-kubernetes-preserve-unknown-fields": true
+    })
 }
 
 /// PodTemplateMetadata is a subset of ObjectMeta that is valid for pod templates
@@ -196,42 +194,39 @@ impl Display for RestateAdminEndpoint {
 
 // Custom JsonSchema implementation so that we can make one of cluster, service, url required.
 impl JsonSchema for RestateAdminEndpoint {
-    fn schema_name() -> String {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
         "RestateAdminEndpoint".into()
     }
 
-    fn json_schema(gen: &mut schemars::r#gen::SchemaGenerator) -> Schema {
-        let mut service_schema = serde_json::to_value(ServiceReference::json_schema(gen)).unwrap();
-        if let Some(object) = service_schema.as_object_mut() {
-            object.insert("description".into(), serde_json::Value::String("A reference to a Service pointing against which to register the deployment. Exactly one of `cluster`, `cloud`, `service` or `url` must be specified".into()));
-        }
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> Schema {
+        let mut service_schema = generator.subschema_for::<ServiceReference>();
+        service_schema.insert("description".into(), serde_json::Value::String("A reference to a Service pointing against which to register the deployment. Exactly one of `cluster`, `cloud`, `service` or `url` must be specified".into()));
 
-        serde_json::from_value(json!({
-                "description": "The location of the Restate Admin API to register this deployment against",
-                "properties": {
-                  "cluster": {
+        schemars::json_schema!({
+            "description": "The location of the Restate Admin API to register this deployment against",
+            "properties": {
+                "cluster": {
                     "description": "The name of a RestateCluster against which to register the deployment. Exactly one of `cluster`, `cloud`, `service` or `url` must be specified",
                     "type": "string"
-                  },
-                  "cloud": {
+                },
+                "cloud": {
                     "description": "The name of a RestateCloudEnvironment against which to register the deployment. Exactly one of `cluster`, `cloud`, `service` or `url` must be specified",
                     "type": "string"
-                  },
-                  "service": service_schema,
-                  "url": {
+                },
+                "service": service_schema,
+                "url": {
                     "description": "A url of the restate admin endpoint against which to register the deployment Exactly one of `cluster`, `cloud`, `service` or `url` must be specified",
                     "type": "string"
-                  }
-                },
-                "oneOf": [
-                    {"required": ["cluster"]},
-                    {"required": ["cloud"]},
-                    {"required": ["service"]},
-                    {"required": ["url"]}
-                ],
-                "type": "object"
-            }))
-            .unwrap()
+                }
+            },
+            "oneOf": [
+                {"required": ["cluster"]},
+                {"required": ["cloud"]},
+                {"required": ["service"]},
+                {"required": ["url"]}
+            ],
+            "type": "object"
+        })
     }
 }
 
