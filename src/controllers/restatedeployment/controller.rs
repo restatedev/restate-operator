@@ -202,16 +202,18 @@ impl RestateDeployment {
         let deployment_name = self.name_any();
         let versioned_name = format!("{deployment_name}-{hash}");
 
-        let replicaset_selector = match &self.spec.selector {
+        let replicaset_selector = match self
+            .spec
+            .selector
+            .as_ref()
+            .and_then(|s| s.match_labels.as_ref())
+        {
             None => BTreeMap::from([(POD_TEMPLATE_HASH_LABEL.to_owned(), hash.clone())]),
-            Some(selector) => match &selector.match_labels {
-                None => BTreeMap::from([(POD_TEMPLATE_HASH_LABEL.to_owned(), hash.clone())]),
-                Some(match_labels) => {
-                    let mut match_labels = match_labels.clone();
-                    match_labels.insert(POD_TEMPLATE_HASH_LABEL.to_owned(), hash.clone());
-                    match_labels
-                }
-            },
+            Some(match_labels) => {
+                let mut match_labels = match_labels.clone();
+                match_labels.insert(POD_TEMPLATE_HASH_LABEL.to_owned(), hash.clone());
+                match_labels
+            }
         };
 
         let mut annotations = self.annotations().clone();
