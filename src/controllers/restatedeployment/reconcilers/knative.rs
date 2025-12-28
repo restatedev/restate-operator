@@ -260,12 +260,7 @@ fn build_configuration_spec(
     // Build revision template annotations
     let mut annotations = BTreeMap::new();
 
-    // Step 1: Start with user-provided revision annotations
-    if let Some(user_annotations) = &knative_spec.revision_annotations {
-        annotations.extend(user_annotations.clone());
-    }
-
-    // Step 2: Apply operator-managed autoscaling annotations (overriding user values)
+    // Step 1: Apply operator defaults for autoscaling annotations
     if let Some(min) = knative_spec.min_scale {
         annotations.insert(
             "autoscaling.knative.dev/min-scale".to_string(),
@@ -293,7 +288,12 @@ fn build_configuration_spec(
         );
     }
 
-    // Step 3: Always set parent deployment tracking (operator-managed)
+    // Step 2: Apply user-provided revision annotations (these override operator defaults)
+    if let Some(user_annotations) = &knative_spec.revision_annotations {
+        annotations.extend(user_annotations.clone());
+    }
+
+    // Step 3: Always set parent deployment tracking (operator-managed, cannot be overridden)
     annotations.insert(RESTATE_DEPLOYMENT_ANNOTATION.to_string(), rsd.name_any());
 
     // Deserialize the PodTemplateSpec.spec into ConfigurationTemplateSpec
