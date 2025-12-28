@@ -526,6 +526,23 @@ impl RestateDeployment {
                         "False".into(),
                     )
                 }
+                Err(Error::AdminCallFailed(ref err)) => {
+                    let message = format!("Failed to make Restate admin API call: {}", err);
+                    let requeue_after = Duration::from_secs(30);
+                    debug!(
+                        name = %self.metadata.name.as_deref().unwrap_or("unknown"),
+                        namespace = %namespace,
+                        error = %err,
+                        requeue_after_secs = %requeue_after.as_secs(),
+                        "Admin API call failed, requeueing"
+                    );
+                    (
+                        Ok(Action::requeue(requeue_after)),
+                        message,
+                        "AdminCallFailed".into(),
+                        "False".into(),
+                    )
+                }
                 Err(err) => {
                     let message = err.to_string();
                     (
@@ -605,6 +622,23 @@ impl RestateDeployment {
                     "HashCollision".into(),
                     "False".into(),
                 )
+                }
+                Err(Error::AdminCallFailed(ref err)) => {
+                    let message = format!("Failed to make Restate admin API call: {}", err);
+                    let requeue_after = Duration::from_secs(30);
+                    debug!(
+                        name = %self.metadata.name.as_deref().unwrap_or("unknown"),
+                        namespace = %namespace,
+                        error = %err,
+                        requeue_after_secs = %requeue_after.as_secs(),
+                        "Admin API call failed, requeueing"
+                    );
+                    (
+                        Ok(Action::requeue(requeue_after)),
+                        message,
+                        "AdminCallFailed".into(),
+                        "False".into(),
+                    )
                 }
                 Err(err) => {
                     let message = err.to_string();
@@ -1105,5 +1139,3 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         .for_each(|_| futures::future::ready(()))
         .await;
 }
-
-
