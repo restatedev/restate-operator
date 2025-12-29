@@ -710,38 +710,52 @@ pub async fn cleanup_old_configurations(
     deployments: &std::collections::HashMap<String, bool>,
     active_tag: Option<&str>,
 ) -> Result<(i32, Option<chrono::DateTime<chrono::Utc>>)> {
-    // List all Configurations in the namespace
-    let config_api: Api<Configuration> = Api::namespaced(ctx.client.clone(), namespace);
-    let all_configs = config_api.list(&Default::default()).await?;
+    // Use reflector cache instead of API list() call
+    let configurations_cell = std::cell::Cell::new(Vec::new());
 
     // Filter to Configurations owned by this RestateDeployment with tags != active_tag
-    let mut configurations: Vec<Configuration> = all_configs
-        .items
-        .into_iter()
-        .filter(|config| {
-            // Skip if no tag annotation
-            let Some(tag) = get_configuration_tag(config) else {
+    let _ = ctx.configuration_store.find(|config| {
+        // Filter by namespace
+        let config_namespace = match config.metadata.namespace.as_deref() {
+            Some("") | None => "default",
+            Some(ns) => ns,
+        };
+        if config_namespace != namespace {
+            return false;
+        }
+
+        // Skip if no tag annotation
+        let Some(tag) = get_configuration_tag(config) else {
+            return false;
+        };
+
+        // Skip current version if active_tag is provided and matches
+        if let Some(active) = active_tag {
+            if tag == active {
                 return false;
-            };
-
-            // Skip current version if a active_tag is provided and matches
-            if let Some(active) = active_tag {
-                if tag == active {
-                    return false;
-                }
             }
+        }
 
-            // Skip if already being deleted
-            if config.metadata.deletion_timestamp.is_some() {
-                return false;
-            }
+        // Skip if already being deleted
+        if config.metadata.deletion_timestamp.is_some() {
+            return false;
+        }
 
-            // Must be owned by this RestateDeployment
-            config.owner_references().iter().any(|reference| {
-                reference.uid == rsd_uid && reference.kind == RestateDeployment::kind(&())
-            })
-        })
-        .collect();
+        // Must be owned by this RestateDeployment
+        if !config.owner_references().iter().any(|reference| {
+            reference.uid == rsd_uid && reference.kind == RestateDeployment::kind(&())
+        }) {
+            return false;
+        }
+
+        // for some reason find only takes a Fn, not FnMut.
+        let mut configurations = configurations_cell.take();
+        configurations.push(config.clone());
+        configurations_cell.set(configurations);
+        false
+    });
+
+    let mut configurations = configurations_cell.into_inner();
 
     // Sort configurations by creation time (newest first)
     configurations.sort_by(|a, b| {

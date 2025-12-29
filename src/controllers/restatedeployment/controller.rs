@@ -66,6 +66,8 @@ pub(super) struct Context {
     pub secret_store: Store<Secret>,
     /// Store for Knative Revisions
     pub revision_store: Store<Revision>,
+    /// Store for Knative Configurations
+    pub configuration_store: Store<Configuration>,
     /// The namespace in which this operator runs
     pub operator_namespace: String,
     /// Diagnostics read by the web server
@@ -83,6 +85,7 @@ impl Context {
         rce_store: Store<RestateCloudEnvironment>,
         secret_store: Store<Secret>,
         revision_store: Store<Revision>,
+        configuration_store: Store<Configuration>,
         metrics: Metrics,
         state: State,
     ) -> Arc<Context> {
@@ -93,6 +96,7 @@ impl Context {
             rce_store,
             secret_store,
             revision_store,
+            configuration_store,
             operator_namespace: state.operator_namespace,
             metrics,
             diagnostics: state.diagnostics.clone(),
@@ -1063,6 +1067,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
             .owns_stream(replicaset_reflector);
 
     let (revision_store, revision_writer) = reflector::store();
+    let (configuration_store, configuration_writer) = reflector::store();
     let configurations: Api<Configuration> = Api::all(client.clone());
 
     // Check if Knative is installed by checking if the serving.knative.dev API group exists
@@ -1084,9 +1089,10 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     }
 
     if knative_installed {
-        let config_watcher = metadata_watcher(configurations, cfg.clone())
-            .touched_objects()
-            .default_backoff();
+        let config_reflector =
+            reflector(configuration_writer, watcher(configurations, cfg.clone()))
+                .touched_objects()
+                .default_backoff();
 
         let routes: Api<Route> = Api::all(client.clone());
         let route_watcher = metadata_watcher(routes, cfg.clone())
@@ -1099,10 +1105,10 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
             .default_backoff();
 
         controller = controller
-            .watches_stream(config_watcher, |meta| {
+            .watches_stream(config_reflector, |obj| {
                 // Extract parent RestateDeployment name from annotation
-                let name = meta.annotations().get("restate.dev/deployment")?;
-                let namespace = meta.namespace()?;
+                let name = obj.annotations().get("restate.dev/deployment")?;
+                let namespace = obj.namespace()?;
                 Some(ObjectRef::new(name).within(&namespace))
             })
             .watches_stream(route_watcher, |meta| {
@@ -1133,6 +1139,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
                 rce_store,
                 secret_store,
                 revision_store,
+                configuration_store,
                 metrics,
                 state,
             ),
