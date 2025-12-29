@@ -330,12 +330,20 @@ fn build_configuration_spec(
         ..Default::default()
     };
 
+    // Build template labels for pods
+    let mut template_labels = BTreeMap::from([(
+        "app.kubernetes.io/managed-by".to_string(),
+        "restate-operator".to_string(),
+    )]);
+
+    // Add allow label so that the RestateCluster NetworkPolicy allows traffic to these pods
+    if let Some(cluster) = rsd.spec.restate.register.cluster.as_deref() {
+        template_labels.insert(format!("allow.restate.dev/{cluster}"), "true".to_string());
+    }
+
     let configuration_template_metadata = ConfigurationTemplateMetadata {
         annotations: Some(annotations),
-        labels: Some(BTreeMap::from([(
-            "app.kubernetes.io/managed-by".to_string(),
-            "restate-operator".to_string(),
-        )])),
+        labels: Some(template_labels),
         ..Default::default()
     };
 
