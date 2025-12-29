@@ -190,16 +190,8 @@ Knative will automatically create a new revision (e.g., `greeter-knative-v1-0000
 npm install
 SERVICE_VERSION=v1 npm run dev
 
-# Docker - Build and tag for Knative local development
-docker build -t ghcr.io/restatedev/restate-operator/greeter:latest .
-
-# Tag with dev.local prefix for Knative compatibility
-# Knative requires dev.local prefix to skip digest resolution for local images
-docker tag ghcr.io/restatedev/restate-operator/greeter:latest \
-  dev.local/restatedev/restate-operator/greeter:latest
-
-# For production, push to registry
-docker push ghcr.io/restatedev/restate-operator/greeter:latest
+# Docker - Build and tag for local development (works with both ReplicaSet and Knative modes)
+just docker
 ```
 
 ### Local Image Support for Knative
@@ -218,12 +210,8 @@ When using Knative deployment mode with locally built images:
 
 **Example workflow:**
 ```bash
-# Build image
-docker build -t ghcr.io/restatedev/restate-operator/greeter:latest .
-
-# Tag for Knative
-docker tag ghcr.io/restatedev/restate-operator/greeter:latest \
-  dev.local/restatedev/restate-operator/greeter:latest
+# Build image (builds dev.local/restatedev/restate-operator/greeter:local)
+just docker
 
 # Deploy (manifests already use dev.local prefix)
 kubectl apply -f k8s/knative-v1.yaml
