@@ -142,9 +142,10 @@ pub async fn reconcile_knative(
         })?;
 
     // Update status with replica counts and other revision details
+    // Note: Knative's Revision.status.desiredReplicas may be unset during initial rollout and assumed to be 1.
     let (desired, actual, ready_replicas, available_replicas, unavailable_replicas) =
         if let Some(rev_status) = &revision.status {
-            let desired = rev_status.desired_replicas.unwrap_or(0);
+            let desired = rev_status.desired_replicas.unwrap_or(1);
             let actual = rev_status.actual_replicas.unwrap_or(0);
             (
                 desired,
@@ -154,8 +155,8 @@ pub async fn reconcile_knative(
                 Some((desired - actual).max(0)),
             )
         } else {
-            // Revision has no status yet, or scaled to zero
-            (0, 0, Some(0), Some(0), Some(0))
+            // Revision has no status yet - default to 1 desired since it will scale up
+            (1, 0, Some(0), Some(0), Some(1))
         };
 
     status.replicas = actual;
