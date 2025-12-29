@@ -1105,12 +1105,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
             .default_backoff();
 
         controller = controller
-            .watches_stream(config_reflector, |obj| {
-                // Extract parent RestateDeployment name from annotation
-                let name = obj.annotations().get("restate.dev/deployment")?;
-                let namespace = obj.namespace()?;
-                Some(ObjectRef::new(name).within(&namespace))
-            })
+            .owns_stream(config_reflector)
             .watches_stream(route_watcher, |meta| {
                 // Extract parent RestateDeployment name from annotation
                 let name = meta.annotations().get("restate.dev/deployment")?;
