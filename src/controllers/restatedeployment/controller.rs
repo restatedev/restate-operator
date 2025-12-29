@@ -79,6 +79,7 @@ pub(super) struct Context {
 }
 
 impl Context {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         client: Client,
         replicasets_store: Store<ReplicaSet>,

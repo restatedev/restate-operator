@@ -63,9 +63,7 @@ pub async fn reconcile_knative(
 
     // If a new tag is detected, immediately update status fields to reflect the change
     // This prevents showing stale information from the previous generation
-    if current_config_name
-        .as_ref()
-        .map_or(true, |name| name != &config_name)
+    if current_config_name.as_ref() != Some(&config_name)
     {
         info!(
             old_config_name = ?current_config_name.as_ref(),
@@ -382,7 +380,7 @@ fn validate_knative_containers(containers: &[ConfigurationTemplateSpecContainers
 
 /// Ensure containers have Restate port 9080 with h2c protocol
 /// If port 9080 doesn't exist, add it. Otherwise, leave ports as-is.
-fn ensure_restate_port(containers: &mut Vec<ConfigurationTemplateSpecContainers>) -> Result<()> {
+fn ensure_restate_port(containers: &mut [ConfigurationTemplateSpecContainers]) -> Result<()> {
     for container in containers.iter_mut() {
         let has_restate_port = if let Some(ports) = &container.ports {
             ports.iter().any(|p| p.container_port == 9080)
@@ -412,7 +410,7 @@ fn ensure_restate_port(containers: &mut Vec<ConfigurationTemplateSpecContainers>
 /// If no readiness probe exists, inject a TCP probe on port 9080 (Restate ingress port)
 /// with quick timing parameters suitable for fast-starting Restate SDK services.
 /// Preserves user-specified probes without modification.
-fn ensure_readiness_probe(containers: &mut Vec<ConfigurationTemplateSpecContainers>) -> Result<()> {
+fn ensure_readiness_probe(containers: &mut [ConfigurationTemplateSpecContainers]) -> Result<()> {
     for container in containers.iter_mut() {
         // Check if readiness probe already exists
         if container.readiness_probe.is_some() {
