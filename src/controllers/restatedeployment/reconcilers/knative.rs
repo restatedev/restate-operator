@@ -27,6 +27,7 @@ use crate::{Error, Result};
 const RESTATE_TAG_ANNOTATION: &str = "restate.dev/tag";
 const RESTATE_REGISTERED_AT_ANNOTATION: &str = "restate.dev/registered-at";
 const RESTATE_DEPLOYMENT_ANNOTATION: &str = "restate.dev/deployment";
+const KNATIVE_INITIAL_SCALE_ANNOTATION: &str = "autoscaling.knative.dev/initial-scale";
 
 /// Main Knative reconciliation function
 /// Updates status in-place and returns the next_removal time for requeue logic
@@ -141,10 +142,12 @@ pub async fn reconcile_knative(
         })?;
 
     // Update status with replica counts and other revision details
-    // Note: Knative's Revision.status.desiredReplicas may be unset during initial rollout and assumed to be 1.
+    // Note: Knative's Revision.status.desiredReplicas may be unset during initial rollout.
+    // Use the initial-scale annotation as the default, or 1 if not set.
+    let initial_scale = get_initial_scale(&config);
     let (desired, actual, ready_replicas, available_replicas, unavailable_replicas) =
         if let Some(rev_status) = &revision.status {
-            let desired = rev_status.desired_replicas.unwrap_or(1);
+            let desired = rev_status.desired_replicas.unwrap_or(initial_scale);
             let actual = rev_status.actual_replicas.unwrap_or(0);
             (
                 desired,
@@ -154,8 +157,8 @@ pub async fn reconcile_knative(
                 Some((desired - actual).max(0)),
             )
         } else {
-            // Revision has no status yet - default to 1 desired since it will scale up
-            (1, 0, Some(0), Some(0), Some(1))
+            // Revision has no status yet - default to initial_scale since it will scale up
+            (initial_scale, 0, Some(0), Some(0), Some(initial_scale))
         };
 
     status.replicas = actual;
@@ -976,6 +979,20 @@ fn get_configuration_tag(config: &Configuration) -> Option<String> {
         .as_ref()
         .and_then(|a| a.get(RESTATE_TAG_ANNOTATION))
         .cloned()
+}
+
+/// Get initial-scale from Configuration template annotations
+/// Returns the value of `autoscaling.knative.dev/initial-scale` annotation, or 1 if not set
+fn get_initial_scale(config: &Configuration) -> i32 {
+    config
+        .spec
+        .template
+        .as_ref()
+        .and_then(|t| t.metadata.as_ref())
+        .and_then(|m| m.annotations.as_ref())
+        .and_then(|a| a.get(KNATIVE_INITIAL_SCALE_ANNOTATION))
+        .and_then(|s| s.parse::<i32>().ok())
+        .unwrap_or(1)
 }
 
 /// Delete Configuration using Foreground cascading deletion
