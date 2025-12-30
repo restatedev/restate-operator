@@ -2,10 +2,9 @@ use std::time::Duration;
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
-use kube::api::{Api, DeleteParams, Patch, PatchParams, PropagationPolicy};
+use kube::api::{Api, DeleteParams, PartialObjectMetaExt, Patch, PatchParams, PropagationPolicy};
 use kube::runtime::reflector::ObjectRef;
 use kube::{Resource, ResourceExt};
-use serde_json::json;
 use tracing::*;
 use url::Url;
 
@@ -692,16 +691,25 @@ async fn annotate_configuration(
         .patch_metadata(
             &config_name,
             &params,
-            &Patch::Apply(json!({
-                "apiVersion": "serving.knative.dev/v1",
-                "kind": "Configuration",
-                "metadata": {
-                    "annotations": {
-                        RESTATE_DEPLOYMENT_ID_ANNOTATION: deployment_id,
-                        RESTATE_REGISTERED_AT_ANNOTATION: chrono::Utc::now().to_rfc3339(),
-                    }
+            &Patch::Apply(
+                ObjectMeta {
+                    annotations: Some(
+                        [
+                            (
+                                RESTATE_DEPLOYMENT_ID_ANNOTATION.to_string(),
+                                deployment_id.to_string(),
+                            ),
+                            (
+                                RESTATE_REGISTERED_AT_ANNOTATION.to_string(),
+                                chrono::Utc::now().to_rfc3339(),
+                            ),
+                        ]
+                        .into(),
+                    ),
+                    ..Default::default()
                 }
-            })),
+                .into_request_partial::<Configuration>(),
+            ),
         )
         .await?;
 
@@ -829,15 +837,13 @@ pub async fn cleanup_old_configurations(
                 .patch_metadata(
                     &config_name,
                     &params,
-                    &Patch::Apply(json!({
-                        "apiVersion": Configuration::api_version(&()),
-                        "kind": Configuration::kind(&()),
-                        "metadata": {
-                            "annotations": {
-                                RESTATE_REMOVE_VERSION_AT_ANNOTATION: null,
-                            }
+                    &Patch::Apply(
+                        ObjectMeta {
+                            annotations: Some(Default::default()),
+                            ..Default::default()
                         }
-                    })),
+                        .into_request_partial::<Configuration>(),
+                    ),
                 )
                 .await?;
 
@@ -946,15 +952,19 @@ pub async fn cleanup_old_configurations(
                     .patch_metadata(
                         &config_name,
                         &params,
-                        &Patch::Apply(json!({
-                            "apiVersion": Configuration::api_version(&()),
-                            "kind": Configuration::kind(&()),
-                            "metadata": {
-                                "annotations": {
-                                    RESTATE_REMOVE_VERSION_AT_ANNOTATION: remove_at.to_rfc3339(),
-                                }
+                        &Patch::Apply(
+                            ObjectMeta {
+                                annotations: Some(
+                                    [(
+                                        RESTATE_REMOVE_VERSION_AT_ANNOTATION.to_string(),
+                                        remove_at.to_rfc3339(),
+                                    )]
+                                    .into(),
+                                ),
+                                ..Default::default()
                             }
-                        })),
+                            .into_request_partial::<Configuration>(),
+                        ),
                     )
                     .await?;
 
