@@ -3,6 +3,11 @@ kind: RestateDeployment
 metadata:
   name: greeter-knative
   namespace: default
+  # These annotations propagate to Configuration AND Route (like Knative Service)
+  annotations:
+    serving.knative.dev/rollout-duration: "0s"
+  labels:
+    app: greeter-knative
 spec:
   # Use Knative Serving for deployment
   deploymentMode: knative
@@ -26,6 +31,9 @@ spec:
       labels:
         app: greeter-knative
         version: v1
+      # These annotations go on the Revision template (pod-level)
+      annotations:
+        autoscaling.knative.dev/initial-scale: "1"
     spec:
       containers:
         - name: greeter

@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::fmt::Display;
 
 use k8s_openapi::{api::core::v1::Secret, apimachinery::pkg::apis::meta::v1::LabelSelector};
@@ -72,30 +71,6 @@ pub struct KnativeDeploymentSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 0))]
     pub target: Option<i32>,
-
-    /// Custom annotations to apply to the Knative Revision template.
-    /// These will be merged with operator-managed autoscaling annotations.
-    /// Operator-managed annotations take precedence in case of conflicts.
-    ///
-    /// Common use cases:
-    /// - `autoscaling.knative.dev/target-utilization-percentage`: "70"
-    /// - `autoscaling.knative.dev/scale-down-delay`: "15m"
-    /// - `autoscaling.knative.dev/scale-to-zero-pod-retention-period`: "10m"
-    ///
-    /// See: https://knative.dev/docs/serving/autoscaling/
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub revision_annotations: Option<BTreeMap<String, String>>,
-
-    /// Custom annotations to apply to the Knative Route resource.
-    /// These will be merged with operator-managed Route annotations.
-    /// Operator-managed annotations take precedence in case of conflicts.
-    ///
-    /// Common use cases:
-    /// - `serving.knative.dev/rollout-duration`: "380s"
-    ///
-    /// See: https://knative.dev/docs/serving/rolling-out-latest-revision/
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub route_annotations: Option<BTreeMap<String, String>>,
 }
 
 /// RestateDeployment is similar to a Kubernetes Deployment but tailored for Restate services.

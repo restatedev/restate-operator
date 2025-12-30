@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -248,52 +247,13 @@ fn build_configuration_spec(
     rsd: &RestateDeployment,
     name: &str,
     namespace: &str,
-    _tag: &str,
+    tag: &str,
 ) -> Result<Configuration> {
     let knative_spec = rsd
         .spec
         .knative
         .as_ref()
         .ok_or_else(|| Error::InvalidRestateConfig("Missing knative spec".into()))?;
-
-    // Build revision template annotations
-    let mut annotations = BTreeMap::new();
-
-    // Step 1: Apply operator defaults for autoscaling annotations
-    if let Some(min) = knative_spec.min_scale {
-        annotations.insert(
-            "autoscaling.knative.dev/min-scale".to_string(),
-            min.to_string(),
-        );
-    } else {
-        // Default to scale-to-zero
-        annotations.insert(
-            "autoscaling.knative.dev/min-scale".to_string(),
-            "0".to_string(),
-        );
-    }
-
-    if let Some(max) = knative_spec.max_scale {
-        annotations.insert(
-            "autoscaling.knative.dev/max-scale".to_string(),
-            max.to_string(),
-        );
-    }
-
-    if let Some(target) = knative_spec.target {
-        annotations.insert(
-            "autoscaling.knative.dev/target".to_string(),
-            target.to_string(),
-        );
-    }
-
-    // Step 2: Apply user-provided revision annotations (these override operator defaults)
-    if let Some(user_annotations) = &knative_spec.revision_annotations {
-        annotations.extend(user_annotations.clone());
-    }
-
-    // Step 3: Always set parent deployment tracking (operator-managed, cannot be overridden)
-    annotations.insert(RESTATE_DEPLOYMENT_ANNOTATION.to_string(), rsd.name_any());
 
     // Deserialize the PodTemplateSpec.spec into ConfigurationTemplateSpec
     // This allows users to set any field in the Knative Revision template (e.g. timeoutSeconds, serviceAccountName)
@@ -314,35 +274,79 @@ fn build_configuration_spec(
     // Create owner reference
     let owner_reference = rsd.controller_owner_ref(&()).unwrap();
 
-    let mut config_annotations = BTreeMap::new();
+    // === Configuration resource metadata ===
+    // Propagate RestateDeployment annotations/labels to Configuration (like Knative Service does)
+    // Using copy-except pattern like Knative: exclude last-applied-configuration and rollout-duration
+    let mut config_annotations = rsd.annotations().clone();
+    config_annotations.remove("kubectl.kubernetes.io/last-applied-configuration");
+    config_annotations.remove("serving.knative.dev/rollout-duration"); // Route-only annotation
+    // Add operator-managed annotations
     config_annotations.insert(RESTATE_DEPLOYMENT_ANNOTATION.to_string(), rsd.name_any());
-    config_annotations.insert(RESTATE_TAG_ANNOTATION.to_string(), _tag.to_string());
+    config_annotations.insert(RESTATE_TAG_ANNOTATION.to_string(), tag.to_string());
+
+    let mut config_labels = rsd.labels().clone();
+    config_labels.insert(
+        "app.kubernetes.io/managed-by".to_string(),
+        "restate-operator".to_string(),
+    );
 
     let configuration_metadata = ObjectMeta {
         name: Some(name.to_string()),
         namespace: Some(namespace.to_string()),
         owner_references: Some(vec![owner_reference]),
         annotations: Some(config_annotations),
-        labels: Some(BTreeMap::from([(
-            "app.kubernetes.io/managed-by".to_string(),
-            "restate-operator".to_string(),
-        )])),
+        labels: Some(config_labels),
         ..Default::default()
     };
 
-    // Build template labels for pods
-    let mut template_labels = BTreeMap::from([(
+    // === Revision template metadata (pod-level) ===
+    // Clone user's template metadata (like ReplicaSet mode does)
+    let user_template_metadata = rsd.spec.template.metadata.clone().unwrap_or_default();
+
+    // Build template labels: start with user labels, add operator-managed labels
+    let mut template_labels = user_template_metadata.labels.clone().unwrap_or_default();
+    template_labels.insert(
         "app.kubernetes.io/managed-by".to_string(),
         "restate-operator".to_string(),
-    )]);
-
+    );
     // Add allow label so that the RestateCluster NetworkPolicy allows traffic to these pods
     if let Some(cluster) = rsd.spec.restate.register.cluster.as_deref() {
         template_labels.insert(format!("allow.restate.dev/{cluster}"), "true".to_string());
     }
 
+    // Build template annotations: start with user annotations
+    let mut template_annotations = user_template_metadata.annotations.clone().unwrap_or_default();
+
+    // Apply operator defaults for autoscaling (user can override by setting these in template.metadata.annotations)
+    // Use entry().or_insert() so user annotations take precedence
+    if let Some(min) = knative_spec.min_scale {
+        template_annotations
+            .entry("autoscaling.knative.dev/min-scale".to_string())
+            .or_insert(min.to_string());
+    } else {
+        // Default to scale-to-zero if user hasn't set it
+        template_annotations
+            .entry("autoscaling.knative.dev/min-scale".to_string())
+            .or_insert("0".to_string());
+    }
+
+    if let Some(max) = knative_spec.max_scale {
+        template_annotations
+            .entry("autoscaling.knative.dev/max-scale".to_string())
+            .or_insert(max.to_string());
+    }
+
+    if let Some(target) = knative_spec.target {
+        template_annotations
+            .entry("autoscaling.knative.dev/target".to_string())
+            .or_insert(target.to_string());
+    }
+
+    // Operator-managed tracking annotation (must be set)
+    template_annotations.insert(RESTATE_DEPLOYMENT_ANNOTATION.to_string(), rsd.name_any());
+
     let configuration_template_metadata = ConfigurationTemplateMetadata {
-        annotations: Some(annotations),
+        annotations: Some(template_annotations),
         labels: Some(template_labels),
         ..Default::default()
     };
@@ -492,34 +496,29 @@ fn build_route_spec(
     // If Configuration is deleted, Route will be garbage collected
     let owner_reference = config.controller_owner_ref(&()).unwrap();
 
-    // Build Route annotations
-    let mut route_annotations = BTreeMap::new();
-
-    // Start with user-provided route annotations
-    if let Some(knative_spec) = &rsd.spec.knative {
-        if let Some(user_annotations) = &knative_spec.route_annotations {
-            route_annotations.extend(user_annotations.clone());
-        }
-    }
-
-    // Operator-managed route annotations can override if needed
+    // Propagate RestateDeployment annotations to Route (like Knative Service does)
+    let mut route_annotations = rsd.annotations().clone();
+    route_annotations.remove("kubectl.kubernetes.io/last-applied-configuration");
+    // Add operator-managed annotations
     route_annotations.insert(RESTATE_DEPLOYMENT_ANNOTATION.to_string(), rsd.name_any());
+
+    // Propagate RestateDeployment labels to Route
+    let mut route_labels = rsd.labels().clone();
+    route_labels.insert(
+        "app.kubernetes.io/managed-by".to_string(),
+        "restate-operator".to_string(),
+    );
+    route_labels.insert(
+        "networking.knative.dev/visibility".to_string(),
+        "cluster-local".to_string(),
+    );
 
     let route_metadata = ObjectMeta {
         name: Some(name.to_string()),
         namespace: Some(namespace.to_string()),
         owner_references: Some(vec![owner_reference]),
         annotations: Some(route_annotations),
-        labels: Some(BTreeMap::from([
-            (
-                "app.kubernetes.io/managed-by".to_string(),
-                "restate-operator".to_string(),
-            ),
-            (
-                "networking.knative.dev/visibility".to_string(),
-                "cluster-local".to_string(),
-            ),
-        ])),
+        labels: Some(route_labels),
         ..Default::default()
     };
 

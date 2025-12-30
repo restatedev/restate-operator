@@ -78,28 +78,6 @@ spec:
                     minimum: 0.0
                     nullable: true
                     type: integer
-                  revisionAnnotations:
-                    additionalProperties:
-                      type: string
-                    description: |-
-                      Custom annotations to apply to the Knative Revision template. These will be merged with operator-managed autoscaling annotations. Operator-managed annotations take precedence in case of conflicts.
-
-                      Common use cases: - `autoscaling.knative.dev/target-utilization-percentage`: "70" - `autoscaling.knative.dev/scale-down-delay`: "15m" - `autoscaling.knative.dev/scale-to-zero-pod-retention-period`: "10m"
-
-                      See: https://knative.dev/docs/serving/autoscaling/
-                    nullable: true
-                    type: object
-                  routeAnnotations:
-                    additionalProperties:
-                      type: string
-                    description: |-
-                      Custom annotations to apply to the Knative Route resource. These will be merged with operator-managed Route annotations. Operator-managed annotations take precedence in case of conflicts.
-
-                      Common use cases: - `serving.knative.dev/rollout-duration`: "380s"
-
-                      See: https://knative.dev/docs/serving/rolling-out-latest-revision/
-                    nullable: true
-                    type: object
                   tag:
                     description: |-
                       Deployment tag - determines Restate deployment identity.

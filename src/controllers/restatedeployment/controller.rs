@@ -1049,7 +1049,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     .touched_objects()
     .default_backoff();
 
-    // RestateDeployment reflector - watch generation changes only (ignore status-only updates)
+    // RestateDeployment reflector - watch spec, labels, and annotations changes (ignore status-only updates)
     let deployments_for_reflector: Api<RestateDeployment> = Api::all(client.clone());
     let (deployments_store, deployments_writer) = reflector::store();
     let deployments_reflector = reflector(
@@ -1058,7 +1058,11 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     )
     .touched_objects()
     .default_backoff()
-    .predicate_filter(predicates::generation.combine(predicates::finalizers));
+    .predicate_filter(
+        predicates::generation
+            .combine(predicates::labels)
+            .combine(predicates::annotations),
+    );
 
     // Create a controller for RestateDeployment
     // Use deployments_reflector with generation predicate to filter out status-only changes
