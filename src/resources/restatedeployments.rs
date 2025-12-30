@@ -192,7 +192,7 @@ fn label_selector_schema(_gen: &mut schemars::gen::SchemaGenerator) -> Schema {
     })).unwrap()
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 pub struct PodTemplateSpec {
     /// Standard object's metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
     pub metadata: Option<PodTemplateMetadata>,
@@ -202,54 +202,17 @@ pub struct PodTemplateSpec {
     /// The contents of this field are passed through directly from the operator to the created workload:
     /// - **ReplicaSet mode**: Passed to the ReplicaSet's pod template spec.
     /// - **Knative mode**: Passed to the Configuration's revision template spec. This supports standard PodSpec fields (containers, serviceAccountName, volumes, etc.) as well as Knative-specific fields (timeoutSeconds, containerConcurrency, etc.).
+    #[schemars(schema_with = "pod_spec_schema")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spec: Option<serde_json::Value>,
 }
 
-// Custom JsonSchema implementation to properly mark spec as optional
-impl JsonSchema for PodTemplateSpec {
-    fn schema_name() -> String {
-        "PodTemplateSpec".to_string()
-    }
-
-    fn json_schema(_gen: &mut schemars::gen::SchemaGenerator) -> Schema {
-        serde_json::from_value(serde_json::json!({
-            "description": "Template describes the pods that will be created.",
-            "type": "object",
-            "properties": {
-                "metadata": {
-                    "description": "Standard object's metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata",
-                    "nullable": true,
-                    "type": "object",
-                    "properties": {
-                        "annotations": {
-                            "description": "Annotations is an unstructured key value map stored with a resource that may be set by external tools to store and retrieve arbitrary metadata. They are not queryable and should be preserved when modifying objects. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations",
-                            "nullable": true,
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
-                        },
-                        "labels": {
-                            "description": "Map of string keys and values that can be used to organize and categorize (scope and select) objects. May match selectors of replication controllers and services. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels",
-                            "nullable": true,
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
-                        }
-                    }
-                },
-                "spec": {
-                    "description": "Specification of the desired behavior of the pod. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status.\n\nThe contents of this field are passed through directly from the operator to the created workload:\n- **ReplicaSet mode**: Passed to the ReplicaSet's pod template spec.\n- **Knative mode**: Passed to the Configuration's revision template spec. This supports standard PodSpec fields (containers, serviceAccountName, volumes, etc.) as well as Knative-specific fields (timeoutSeconds, containerConcurrency, etc.).",
-                    "x-kubernetes-preserve-unknown-fields": true,
-                    "nullable": true
-                }
-            }
-            // Note: No "required" array here, making both fields optional
-        }))
-        .unwrap()
-    }
+fn pod_spec_schema(_gen: &mut schemars::gen::SchemaGenerator) -> Schema {
+    serde_json::from_value(serde_json::json!({
+        "description": "Specification of the desired behavior of the pod. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status.\n\nThe contents of this field are passed through directly from the operator to the created workload:\n- **ReplicaSet mode**: Passed to the ReplicaSet's pod template spec.\n- **Knative mode**: Passed to the Configuration's revision template spec. This supports standard PodSpec fields (containers, serviceAccountName, volumes, etc.) as well as Knative-specific fields (timeoutSeconds, containerConcurrency, etc.).",
+        "x-kubernetes-preserve-unknown-fields": true,
+    }))
+    .unwrap()
 }
 
 /// PodTemplateMetadata is a subset of ObjectMeta that is valid for pod templates

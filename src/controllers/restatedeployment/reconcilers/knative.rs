@@ -63,8 +63,7 @@ pub async fn reconcile_knative(
 
     // If a new tag is detected, immediately update status fields to reflect the change
     // This prevents showing stale information from the previous generation
-    if current_config_name.as_ref() != Some(&config_name)
-    {
+    if current_config_name.as_ref() != Some(&config_name) {
         info!(
             old_config_name = ?current_config_name.as_ref(),
             new_config_name = %config_name,
@@ -283,7 +282,7 @@ fn build_configuration_spec(
     let mut config_annotations = rsd.annotations().clone();
     config_annotations.remove("kubectl.kubernetes.io/last-applied-configuration");
     config_annotations.remove("serving.knative.dev/rollout-duration"); // Route-only annotation
-    // Add operator-managed annotations
+                                                                       // Add operator-managed annotations
     config_annotations.insert(RESTATE_DEPLOYMENT_ANNOTATION.to_string(), rsd.name_any());
     config_annotations.insert(RESTATE_TAG_ANNOTATION.to_string(), tag.to_string());
 
@@ -318,7 +317,10 @@ fn build_configuration_spec(
     }
 
     // Build template annotations: start with user annotations
-    let mut template_annotations = user_template_metadata.annotations.clone().unwrap_or_default();
+    let mut template_annotations = user_template_metadata
+        .annotations
+        .clone()
+        .unwrap_or_default();
 
     // Apply operator defaults for autoscaling (user can override by setting these in template.metadata.annotations)
     // Use entry().or_insert() so user annotations take precedence
