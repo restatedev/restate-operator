@@ -1,0 +1,21 @@
+---
+apiVersion: restate.dev/v1
+kind: RestateCluster
+metadata:
+  name: restate
+spec:
+  compute:
+    # Use latest stable Restate version
+    image: restatedev/restate:1.5
+
+  storage:
+    # 2 GiB storage (sufficient for testing)
+    storageRequestBytes: 2147483648
+
+  # Optional: Customize configuration (TOML format)
+  # config: |
+  #   [worker]
+  #   # Worker-specific settings
+  #
+  #   [admin]
+  #   # Admin API settings

@@ -1,0 +1,63 @@
+apiVersion: restate.dev/v1beta1
+kind: RestateDeployment
+metadata:
+  name: greeter-knative
+  namespace: default
+  # These annotations propagate to Configuration AND Route (like Knative Service)
+  annotations:
+    serving.knative.dev/rollout-duration: "0s"
+  labels:
+    app: greeter-knative
+spec:
+  # Use Knative Serving for deployment
+  deploymentMode: knative
+
+  # Keep 1 most recent inactive Configuration
+  revisionHistoryLimit: 1
+
+  # Knative-specific configuration
+  knative:
+    # Explicit tag enables in-place updates
+    tag: "v1"
+
+    # Scale-to-zero configuration
+    minScale: 0      # Allow scaling to zero replicas (save resources)
+    maxScale: 10     # Maximum 10 replicas under load
+    target: 50       # Target 50 concurrent requests per replica
+
+  # Pod template (same as ReplicaSet deployments)
+  template:
+    metadata:
+      labels:
+        app: greeter-knative
+        version: v1
+      # These annotations go on the Revision template (pod-level)
+      annotations:
+        autoscaling.knative.dev/initial-scale: "1"
+    spec:
+      containers:
+        - name: greeter
+          image: dev.local/restatedev/restate-operator/greeter:local
+          imagePullPolicy: Never
+          ports:
+            # Knative only allows port names: "h2c" or "http1"
+            - name: h2c
+              containerPort: 9080
+              protocol: TCP
+          env:
+            - name: SERVICE_VERSION
+              value: "v1"
+            # - name: ANTIDOTE
+            #   value: "cure"
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
+
+  # Restate cluster registration
+  restate:
+    register:
+      cluster: restate  # References the RestateCluster in examples/restate/

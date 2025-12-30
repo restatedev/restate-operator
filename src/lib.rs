@@ -60,6 +60,20 @@ pub enum Error {
     #[error("This RestateDeployment is backing recently-active versions in Restate. It will be removed after the drain delay period.")]
     DeploymentDraining { requeue_after: Option<Duration> },
 
+    #[error("Knative Configuration is not ready: {message}")]
+    ConfigurationNotReady {
+        message: String,
+        reason: String,
+        requeue_after: Option<Duration>,
+    },
+
+    #[error("Knative Route is not ready: {message}")]
+    RouteNotReady {
+        message: String,
+        reason: String,
+        requeue_after: Option<Duration>,
+    },
+
     #[error(transparent)]
     InvalidUrl(#[from] url::ParseError),
 }
@@ -84,6 +98,8 @@ impl Error {
             Error::HashCollision => "HashCollision",
             Error::DeploymentInUse => "DeploymentInUse",
             Error::DeploymentDraining { .. } => "DeploymentDraining",
+            Error::ConfigurationNotReady { .. } => "ConfigurationNotReady",
+            Error::RouteNotReady { .. } => "RouteNotReady",
             Error::InvalidUrl { .. } => "InvalidUrl",
         }
     }
