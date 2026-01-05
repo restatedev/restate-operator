@@ -240,6 +240,9 @@ impl RestateCluster {
 
         let name = self.name_any();
 
+        // Track whether we should set provisioned = true in status
+        let mut set_provisioned = false;
+
         let (result, message, reason, status) = match self.reconcile(ctx, &name).await {
             Ok(()) => {
                 // If no events were received, check back every 5 minutes
@@ -247,9 +250,22 @@ impl RestateCluster {
 
                 (
                     Ok(action),
-                    "Restate Cluster provisioned successfully".into(),
-                    "Provisioned".into(),
+                    "Restate Cluster reconciled successfully".into(),
+                    "Reconciled".into(),
                     "True".into(),
+                )
+            }
+            Err(Error::Provisioned) => {
+                // Cluster was successfully provisioned, mark it in status and requeue immediately
+                set_provisioned = true;
+                info!("Cluster provisioned successfully, updating status");
+
+                (
+                    // Requeue immediately to continue reconciliation
+                    Ok(Action::requeue(Duration::ZERO)),
+                    "Cluster provisioned, continuing reconciliation".into(),
+                    "Provisioned".into(),
+                    "False".into(),
                 )
             }
             Err(Error::NotReady {
@@ -304,9 +320,12 @@ impl RestateCluster {
             ready.last_transition_time = Some(now)
         }
 
-        // always overwrite status object with what we saw
-        // Preserve the provisioned status from the existing status
-        let provisioned = self.status.as_ref().and_then(|s| s.provisioned);
+        // Preserve the provisioned status from the existing status, or set it if we just provisioned
+        let provisioned = if set_provisioned {
+            Some(true)
+        } else {
+            self.status.as_ref().and_then(|s| s.provisioned)
+        };
         let new_status = Patch::Apply(json!({
             "apiVersion": "restate.dev/v1",
             "kind": "RestateCluster",

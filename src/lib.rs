@@ -37,6 +37,9 @@ pub enum Error {
     #[error("Cluster provisioning failed: {0}")]
     ProvisioningFailed(String),
 
+    #[error("Cluster was successfully provisioned")]
+    Provisioned,
+
     #[error("The RestateCloudEnvironment {0} does not exist")]
     RestateCloudEnvironmentNotFound(String),
 
@@ -93,6 +96,7 @@ impl Error {
             Error::DeploymentDraining { .. } => "DeploymentDraining",
             Error::InvalidUrl { .. } => "InvalidUrl",
             Error::ProvisioningFailed(_) => "ProvisioningFailed",
+            Error::Provisioned => "Provisioned",
         }
     }
 }

@@ -23,9 +23,8 @@ use kube::{
     Api, ResourceExt,
     api::{Patch, PatchParams},
 };
-use serde_json::json;
 use sha2::Digest;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, trace, warn};
 
 use crate::Error;
 use crate::controllers::restatecluster::controller::Context;
@@ -33,7 +32,7 @@ use crate::resources::podidentityassociations::{
     PodIdentityAssociation, PodIdentityAssociationSpec,
 };
 use crate::resources::restateclusters::{
-    RestateCluster, RestateClusterSpec, RestateClusterStatus, RestateClusterStorage,
+    RestateClusterSpec, RestateClusterStatus, RestateClusterStorage,
 };
 use crate::resources::securitygrouppolicies::{
     SecurityGroupPolicy, SecurityGroupPolicySecurityGroups, SecurityGroupPolicySpec,
@@ -680,16 +679,9 @@ pub async fn reconcile_compute(
             // Run gRPC provisioning - returns Ok for both new provisioning AND AlreadyExists
             provisioning::run_provisioning(name).await?;
 
-            // IMMEDIATELY patch status.provisioned = true to minimize re-provisioning window
-            // This is critical - we don't wait for reconcile_status() at the end
-            let rc_api: Api<RestateCluster> = Api::all(ctx.client.clone());
-            let patch = json!({
-                "status": { "provisioned": true }
-            });
-            rc_api
-                .patch_status(name, &PatchParams::default(), &Patch::Merge(&patch))
-                .await?;
-            info!("Cluster provisioned successfully, status updated");
+            // Return Provisioned error to signal that status.provisioned should be set to true
+            // and reconciliation should be requeued immediately
+            return Err(Error::Provisioned);
         }
     }
 
