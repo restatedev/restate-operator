@@ -4,6 +4,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{Api, DeleteParams, PartialObjectMetaExt, Patch, PatchParams, PropagationPolicy};
 use kube::runtime::reflector::ObjectRef;
 use kube::{Resource, ResourceExt};
+use serde_json::json;
 use tracing::*;
 use url::Url;
 
@@ -12,9 +13,8 @@ use crate::controllers::restatedeployment::controller::{
 };
 use crate::controllers::restatedeployment::reconcilers::replicaset::generate_pod_template_hash;
 use crate::resources::knative::{
-    Configuration, ConfigurationSpec, ConfigurationTemplate, ConfigurationTemplateMetadata,
-    ConfigurationTemplateSpec, ConfigurationTemplateSpecContainers, Revision, Route, RouteSpec,
-    RouteTraffic,
+    Configuration, ConfigurationTemplateMetadata, ConfigurationTemplateSpec,
+    ConfigurationTemplateSpecContainers, Revision, Route, RouteSpec, RouteTraffic,
 };
 
 use crate::resources::restatedeployments::{KnativeDeploymentStatus, RestateDeployment};
@@ -246,7 +246,7 @@ fn build_configuration_spec(
     name: &str,
     namespace: &str,
     tag: &str,
-) -> Result<Configuration> {
+) -> Result<serde_json::Value> {
     let knative_spec = rsd
         .spec
         .knative
@@ -350,18 +350,21 @@ fn build_configuration_spec(
         ..Default::default()
     };
 
-    let configuration_spec = ConfigurationSpec {
-        template: Some(ConfigurationTemplate {
-            metadata: Some(configuration_template_metadata),
-            spec: Some(configuration_template_spec),
-        }),
-    };
+    // Construct the Configuration JSON, embedding the original user spec
+    // This ensures any unknown fields in rsd.spec.template.spec are preserved
+    let user_spec = rsd.spec.template.spec.clone().unwrap_or(json!({}));
 
-    Ok(Configuration {
-        metadata: configuration_metadata,
-        spec: configuration_spec,
-        status: None,
-    })
+    Ok(json!({
+        "apiVersion": "serving.knative.dev/v1",
+        "kind": "Configuration",
+        "metadata": configuration_metadata,
+        "spec": {
+            "template": {
+                "metadata": configuration_template_metadata,
+                "spec": user_spec
+            }
+        }
+    }))
 }
 
 /// Validate containers for Knative compatibility
@@ -369,7 +372,7 @@ fn build_configuration_spec(
 fn validate_knative_containers(containers: &[ConfigurationTemplateSpecContainers]) -> Result<()> {
     let containers_with_ports: Vec<_> = containers
         .iter()
-        .filter(|c| c.ports.as_ref().map_or(false, |p| !p.is_empty()))
+        .filter(|c| c.ports.as_ref().is_some_and(|p| !p.is_empty()))
         .collect();
 
     if containers_with_ports.len() > 1 {
@@ -381,9 +384,9 @@ fn validate_knative_containers(containers: &[ConfigurationTemplateSpecContainers
     if let Some(container) = containers_with_ports.first() {
         // Check if at least one port has a protocol hint prefix
         let has_valid_port = container.ports.as_ref().unwrap().iter().any(|port| {
-            port.name
-                .as_deref()
-                .map_or(false, |name| name.starts_with("h2c") || name.starts_with("http1"))
+            port.name.as_deref().is_some_and(|name| {
+                name.starts_with("h2c") || name.starts_with("http1")
+            })
         });
 
         if !has_valid_port {
