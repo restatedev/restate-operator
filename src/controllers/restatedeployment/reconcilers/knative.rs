@@ -255,7 +255,7 @@ fn build_configuration_spec(
 
     // Deserialize the PodTemplateSpec.spec into ConfigurationTemplateSpec
     // This allows users to set any field in the Knative Revision template (e.g. timeoutSeconds, serviceAccountName)
-    let mut configuration_template_spec: ConfigurationTemplateSpec =
+    let configuration_template_spec: ConfigurationTemplateSpec =
         if let Some(spec) = &rsd.spec.template.spec {
             serde_json::from_value(spec.clone()).map_err(|e| {
                 Error::InvalidRestateConfig(format!("Failed to parse pod template spec: {}", e))

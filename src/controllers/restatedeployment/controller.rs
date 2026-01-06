@@ -1048,7 +1048,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     .touched_objects()
     .default_backoff();
 
-    // RestateDeployment reflector - watch spec, labels, and annotations changes (ignore status-only updates)
+    // RestateDeployment reflector - watch metadata and spec (ignore status-only updates)
     let deployments_for_reflector: Api<RestateDeployment> = Api::all(client.clone());
     let (deployments_store, deployments_writer) = reflector::store();
     let deployments_reflector = reflector(
@@ -1060,7 +1060,8 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     .predicate_filter(
         predicates::generation
             .combine(predicates::labels)
-            .combine(predicates::annotations),
+            .combine(predicates::annotations)
+            .combine(predicates::finalizers),
     );
 
     // Create a controller for RestateDeployment
