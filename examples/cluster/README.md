@@ -258,25 +258,11 @@ kubectl describe pod -n restate restate-0
 
 If `restatectl provision` fails:
 ```bash
-# Check if cluster is already provisioned
-kubectl -n restate logs restate-0 | grep -i provision
+# Check cluster status
+kubectl -n restate exec -it restate-0 -- restatectl status
 
 # Try force provision (warning: resets cluster)
 kubectl -n restate exec -it restate-0 -- restatectl provision --force
-```
-
-### Network Connectivity Issues
-
-If services can't register with Restate:
-```bash
-# Check network policies
-kubectl get networkpolicies -n restate
-
-# Verify service labels
-kubectl get pod <pod-name> -o yaml | grep -A 5 labels
-
-# Test connectivity from service pod
-kubectl exec -it <pod-name> -- curl http://restate.restate.svc.cluster.local:9070/health
 ```
 
 ## Cleanup

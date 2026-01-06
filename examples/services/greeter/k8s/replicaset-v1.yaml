@@ -20,7 +20,7 @@ spec:
           image: dev.local/restatedev/restate-operator/greeter:local
           imagePullPolicy: Never
           ports:
-            - name: restate
+            - name: h2c
               containerPort: 9080
           env:
             - name: SERVICE_VERSION

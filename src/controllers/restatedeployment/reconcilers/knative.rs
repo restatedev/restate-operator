@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::{Api, DeleteParams, PartialObjectMetaExt, Patch, PatchParams, PropagationPolicy};
 use kube::runtime::reflector::ObjectRef;
 use kube::{Resource, ResourceExt};
@@ -14,9 +13,7 @@ use crate::controllers::restatedeployment::controller::{
 use crate::controllers::restatedeployment::reconcilers::replicaset::generate_pod_template_hash;
 use crate::resources::knative::{
     Configuration, ConfigurationSpec, ConfigurationTemplate, ConfigurationTemplateMetadata,
-    ConfigurationTemplateSpec, ConfigurationTemplateSpecContainers,
-    ConfigurationTemplateSpecContainersPorts, ConfigurationTemplateSpecContainersReadinessProbe,
-    ConfigurationTemplateSpecContainersReadinessProbeTcpSocket, Revision, Route, RouteSpec,
+    ConfigurationTemplateSpec, ConfigurationTemplateSpecContainers, Revision, Route, RouteSpec,
     RouteTraffic,
 };
 
@@ -36,7 +33,7 @@ pub async fn reconcile_knative(
     namespace: &str,
     status: &mut crate::resources::restatedeployments::RestateDeploymentStatus,
 ) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
-    debug!(
+    trace!(
         namespace = %namespace,
         name = %rsd.name_any(),
         "Reconciling Knative deployment"
@@ -58,7 +55,7 @@ pub async fn reconcile_knative(
         .knative
         .as_ref()
         .and_then(|s| s.configuration_name.as_ref())
-        .cloned(); // .cloned() creates an Option<String> from Option<&String>
+        .cloned();
 
     // If a new tag is detected, immediately update status fields to reflect the change
     // This prevents showing stale information from the previous generation
@@ -84,11 +81,11 @@ pub async fn reconcile_knative(
 
     // Apply Configuration for current tag
     let config = reconcile_configuration(ctx, rsd, &config_name, namespace, &tag).await?;
-    debug!(configuration = %config.name_any(), "Configuration reconciled");
+    trace!(configuration = %config.name_any(), "Configuration reconciled");
 
     // Apply Route for current tag
     let route = reconcile_route(ctx, rsd, &route_name, namespace, &config).await?;
-    debug!(route = %route.name_any(), "Route reconciled");
+    trace!(route = %route.name_any(), "Route reconciled");
 
     // Check for up-to-date status information
     if config.metadata.generation.unwrap_or(0)
@@ -122,7 +119,7 @@ pub async fn reconcile_knative(
             requeue_after: Some(Duration::from_secs(5)),
         })?
         .clone();
-    debug!(revision = %latest_revision, "Latest revision created");
+    trace!(revision = %latest_revision, "Latest revision created");
 
     // Update status with latest_revision from Configuration
     if let Some(knative_status) = status.knative.as_mut() {
@@ -167,11 +164,11 @@ pub async fn reconcile_knative(
 
     // Wait for Revision to be ready before registration
     check_revision_ready(&revision)?;
-    debug!(revision = %revision.name_any(), "Revision is ready");
+    trace!(revision = %revision.name_any(), "Revision is ready");
 
     // Wait for Route to be ready before registration
     check_route_ready(&route, &latest_revision)?;
-    debug!(route = %route.name_any(), "Route is ready");
+    trace!(route = %route.name_any(), "Route is ready");
 
     // Update status with URL from Route
     if let Some(knative_status) = status.knative.as_mut() {
@@ -180,7 +177,7 @@ pub async fn reconcile_knative(
 
     // Register or lookup deployment
     let deployment_id = register_or_lookup_deployment(ctx, rsd, namespace, &config, &route).await?;
-    debug!(deployment_id = %deployment_id, "Deployment registered/looked up");
+    trace!(deployment_id = %deployment_id, "Deployment registered/looked up");
 
     // Update status with deployment ID
     status.deployment_id = Some(deployment_id.clone());
@@ -267,10 +264,8 @@ fn build_configuration_spec(
             ConfigurationTemplateSpec::default()
         };
 
-    // Ensure Restate port and validate for Knative compatibility
+    // Validate for Knative compatibility - requires explicit port definition
     validate_knative_containers(&configuration_template_spec.containers)?;
-    ensure_restate_port(&mut configuration_template_spec.containers)?;
-    ensure_readiness_probe(&mut configuration_template_spec.containers)?;
 
     // Create owner reference
     let owner_reference = rsd.controller_owner_ref(&()).unwrap();
@@ -372,85 +367,38 @@ fn build_configuration_spec(
 /// Validate containers for Knative compatibility
 /// Knative has strict requirements that differ from standard Kubernetes
 fn validate_knative_containers(containers: &[ConfigurationTemplateSpecContainers]) -> Result<()> {
-    for (idx, container) in containers.iter().enumerate() {
-        // Validate port names
-        // Knative only allows port names: empty, "h2c", or "http1"
-        if let Some(ports) = &container.ports {
-            for port in ports {
-                if let Some(port_name) = &port.name {
-                    if port_name != "h2c" && port_name != "http1" {
-                        return Err(Error::InvalidRestateConfig(format!(
-                            "Container {} has invalid port name '{}'. Knative only allows port names: 'h2c' or 'http1'. \
-                                Please update the port name in spec.template.spec.containers[{}].ports",
-                            container.name.as_deref().unwrap_or("unknown"),
-                            port_name,
-                            idx
-                        )));
-                    }
-                }
-            }
-        }
+    let containers_with_ports: Vec<_> = containers
+        .iter()
+        .filter(|c| c.ports.as_ref().map_or(false, |p| !p.is_empty()))
+        .collect();
+
+    if containers_with_ports.len() > 1 {
+        return Err(Error::InvalidRestateConfig(
+            "Only one container is allowed to define ports when using Knative.".to_string(),
+        ));
     }
 
-    Ok(())
-}
-
-/// Ensure containers have Restate port 9080 with h2c protocol
-/// If port 9080 doesn't exist, add it. Otherwise, leave ports as-is.
-fn ensure_restate_port(containers: &mut [ConfigurationTemplateSpecContainers]) -> Result<()> {
-    for container in containers.iter_mut() {
-        let has_restate_port = if let Some(ports) = &container.ports {
-            ports.iter().any(|p| p.container_port == 9080)
-        } else {
-            false
-        };
-
-        if !has_restate_port {
-            let restate_port = ConfigurationTemplateSpecContainersPorts {
-                name: Some("h2c".to_string()),
-                container_port: 9080,
-                protocol: Some("TCP".to_string()),
-            };
-
-            if let Some(ports) = &mut container.ports {
-                ports.push(restate_port);
-            } else {
-                container.ports = Some(vec![restate_port]);
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Ensure containers have a readiness probe configured
-/// If no readiness probe exists, inject a TCP probe on port 9080 (Restate ingress port)
-/// with quick timing parameters suitable for fast-starting Restate SDK services.
-/// Preserves user-specified probes without modification.
-fn ensure_readiness_probe(containers: &mut [ConfigurationTemplateSpecContainers]) -> Result<()> {
-    for container in containers.iter_mut() {
-        // Check if readiness probe already exists
-        if container.readiness_probe.is_some() {
-            // User has explicitly configured a probe, preserve it
-            continue;
-        }
-
-        // Inject default TCP probe on port 9080 (the Restate ingress port)
-        // These timing parameters are optimized for fast-starting Restate SDK services:
-        // - initialDelaySeconds: 2 - Lightweight services start quickly
-        // - periodSeconds: 5 - Quick feedback during startup
-        container.readiness_probe = Some(ConfigurationTemplateSpecContainersReadinessProbe {
-            tcp_socket: Some(ConfigurationTemplateSpecContainersReadinessProbeTcpSocket {
-                port: Some(IntOrString::Int(9080)),
-                ..Default::default()
-            }),
-            initial_delay_seconds: Some(2),
-            period_seconds: Some(5),
-            timeout_seconds: Some(1),
-            success_threshold: Some(1),
-            failure_threshold: Some(3),
-            ..Default::default()
+    if let Some(container) = containers_with_ports.first() {
+        // Check if at least one port has a protocol hint prefix
+        let has_valid_port = container.ports.as_ref().unwrap().iter().any(|port| {
+            port.name
+                .as_deref()
+                .map_or(false, |name| name.starts_with("h2c") || name.starts_with("http1"))
         });
+
+        if !has_valid_port {
+            return Err(Error::InvalidRestateConfig(format!(
+                "Container '{}' defines ports but none have a valid Knative protocol hint prefix ('h2c...' or 'http1...'). \
+                 Restate requires an explicit traffic port definition.",
+                container.name.as_deref().unwrap_or("unknown")
+            )));
+        }
+    } else {
+        return Err(Error::InvalidRestateConfig(
+            "No container defines ports. \
+             Restate requires an explicit traffic port definition with a valid Knative protocol hint prefix ('h2c...' or 'http1...')."
+                .to_string(),
+        ));
     }
 
     Ok(())
@@ -635,7 +583,7 @@ async fn register_or_lookup_deployment(
     // Check if Configuration already has deployment-id annotation
     if let Some(annotations) = &config.metadata.annotations {
         if let Some(deployment_id) = annotations.get(RESTATE_DEPLOYMENT_ID_ANNOTATION) {
-            debug!(
+            trace!(
                 deployment_id = %deployment_id,
                 "Found existing deployment ID in Configuration annotation"
             );
@@ -675,7 +623,7 @@ async fn annotate_configuration(
         let current_id = annotations.get(RESTATE_DEPLOYMENT_ID_ANNOTATION);
 
         if current_id == Some(&deployment_id.to_string()) {
-            debug!("Configuration already annotated with deployment ID, skipping patch");
+            trace!("Configuration already annotated with deployment ID, skipping patch");
             return Ok(());
         }
     }
@@ -713,6 +661,10 @@ async fn annotate_configuration(
         )
         .await?;
 
+    debug!(
+        "Configuration {} annotated with deployment ID {}",
+        config_name, deployment_id
+    );
     Ok(())
 }
 
@@ -817,7 +769,7 @@ pub async fn cleanup_old_configurations(
                 .is_none()
             {
                 // not scheduled for removal; all good.
-                debug!(
+                trace!(
                     "Keeping active Configuration {} in namespace {namespace}",
                     config_name,
                 );
@@ -869,20 +821,15 @@ pub async fn cleanup_old_configurations(
             deployment_exists,
         ) {
             (_, true, _) | (_, _, false) => {
-                // we are past the remove at time, or the endpoint was removed by other means; can now delete it
-
-                // Knative automatically scales down, so we skip the scale-to-zero step
-
-                // If we are here, there is a zero-sized configuration which should be subject to the history limit
+                // we are past the remove-at time, or the endpoint was removed by other means; can now delete it (subject to the history limit)
                 if historic_count < rsd.spec.revision_history_limit {
                     historic_count += 1;
-                    debug!(
+                    trace!(
                         "Keeping old Configuration {} in namespace {namespace} (within revision history limit: {}/{})",
                         config_name,
                         historic_count,
                         rsd.spec.revision_history_limit
                     );
-                    // we haven't hit that limit yet, so we don't need to delete this configuration
                     continue;
                 }
 

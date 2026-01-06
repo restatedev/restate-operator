@@ -444,8 +444,7 @@ impl RestateDeployment {
         use crate::resources::restatedeployments::DeploymentMode;
 
         // Check if Knative mode is enabled
-        let is_knative = matches!(self.spec.deployment_mode, Some(DeploymentMode::Knative))
-            || self.spec.knative.is_some();
+        let is_knative = matches!(self.spec.deployment_mode, Some(DeploymentMode::Knative));
 
         trace!(
             deployment_mode = if is_knative { "Knative" } else { "ReplicaSet" },
@@ -860,10 +859,10 @@ impl RestateDeployment {
         let is_knative = matches!(
             self.spec.deployment_mode,
             Some(crate::resources::restatedeployments::DeploymentMode::Knative)
-        ) || self.spec.knative.is_some();
+        );
 
         let (active_count, next_removal) = if is_knative {
-            // Knative cleanup path - same pattern as ReplicaSet
+            // Knative cleanup path
             reconcilers::knative::cleanup_old_configurations(
                 namespace,
                 &ctx,
