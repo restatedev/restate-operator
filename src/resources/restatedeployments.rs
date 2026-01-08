@@ -442,7 +442,7 @@ pub struct RestateDeploymentStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unavailable_replicas: Option<i32>,
 
-    /// Count of hash collisions for the RestateDeployment. The controller uses this field as a collision avoidance mechanism when it needs to create the name for the newest ReplicaSet.
+    /// Count of hash collisions for the RestateDeployment. The controller uses this field as a collision avoidance mechanism when it needs to create the name for the newest ReplicaSet or Configuration.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub collision_count: Option<i32>,
 

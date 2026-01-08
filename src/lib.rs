@@ -54,7 +54,7 @@ pub enum Error {
     #[error("Failed to make Restate admin API call: {0}")]
     AdminCallFailed(reqwest::Error),
 
-    #[error("Encountered a ReplicaSet hash collision, will retry with a new template hash")]
+    #[error("Encountered a hash collision, will retry with a new template hash")]
     HashCollision,
 
     #[error("This RestateDeployment is backing active versions in Restate. If you want to delete the RestateDeployment, either register new endpoints for the relevant services or delete the Restate versions.")]

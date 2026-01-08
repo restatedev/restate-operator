@@ -549,6 +549,17 @@ impl RestateDeployment {
                         "False".into(),
                     )
                 }
+                Err(Error::HashCollision) => {
+                    rsd_status.collision_count = Some(rsd_status.collision_count.unwrap_or(0) + 1);
+
+                    (
+                        // requeue immediately
+                        Ok(Action::requeue(Duration::ZERO)),
+                        "Encountered a hash collision, will retry with a new template hash".into(),
+                        "HashCollision".into(),
+                        "False".into(),
+                    )
+                }
                 Err(err) => {
                     let message = err.to_string();
                     (
