@@ -23,6 +23,7 @@ use crate::{Error, Result};
 const RESTATE_TAG_ANNOTATION: &str = "restate.dev/tag";
 const RESTATE_REGISTERED_AT_ANNOTATION: &str = "restate.dev/registered-at";
 const RESTATE_DEPLOYMENT_ANNOTATION: &str = "restate.dev/deployment";
+const RESTATE_POD_TEMPLATE_ANNOTATION: &str = "restate.dev/pod-template";
 const KNATIVE_INITIAL_SCALE_ANNOTATION: &str = "autoscaling.knative.dev/initial-scale";
 
 /// Main Knative reconciliation function
@@ -77,6 +78,39 @@ pub async fn reconcile_knative(
         status.ready_replicas = Some(0);
         status.available_replicas = Some(0);
         status.unavailable_replicas = Some(0);
+    }
+
+    // Check for hash collision before applying Configuration if tag is auto-generated
+    let pod_template_annotation = pod_template_annotation(rsd)?;
+    if rsd
+        .spec
+        .knative
+        .as_ref()
+        .and_then(|k| k.tag.as_ref())
+        .is_none()
+    {
+        // Check if Configuration already exists with this name
+        if let Some(existing_config) = ctx
+            .configuration_store
+            .get(&ObjectRef::new(&config_name).within(namespace))
+        {
+            // Configuration exists - verify template matches
+            let existing_pod_template = existing_config
+                .metadata
+                .annotations
+                .as_ref()
+                .and_then(|a| a.get(RESTATE_POD_TEMPLATE_ANNOTATION));
+
+            if existing_pod_template.map(|s| s.as_str()) != Some(pod_template_annotation.as_str()) {
+                // Template mismatch - hash collision!
+                trace!(
+                    configuration_name = %config_name,
+                    namespace = %namespace,
+                    "Detected hash collision: Configuration exists with different template"
+                );
+                return Err(Error::HashCollision);
+            }
+        }
     }
 
     // Apply Configuration for current tag
@@ -211,6 +245,11 @@ fn determine_tag(rsd: &RestateDeployment) -> Result<String> {
     }
 }
 
+/// Serialize pod template for collision detection
+fn pod_template_annotation(rsd: &RestateDeployment) -> Result<String> {
+    Ok(serde_json::to_string(&rsd.spec.template)?)
+}
+
 /// Reconcile Knative Configuration resource
 async fn reconcile_configuration(
     ctx: &Context,
@@ -219,8 +258,20 @@ async fn reconcile_configuration(
     namespace: &str,
     tag: &str,
 ) -> Result<Configuration> {
+    // Calculate pod template annotation (only needed for auto-generated tags)
+    let pod_template_annotation = match rsd.spec.knative.as_ref().and_then(|k| k.tag.as_ref()) {
+        None => Some(pod_template_annotation(rsd)?),
+        Some(_) => None,
+    };
+
     // Build Configuration spec
-    let config_spec = build_configuration_spec(rsd, name, namespace, tag)?;
+    let config_spec = build_configuration_spec(
+        rsd,
+        name,
+        namespace,
+        tag,
+        pod_template_annotation.as_deref(),
+    )?;
 
     debug!(
         configuration_name = %name,
@@ -246,6 +297,7 @@ fn build_configuration_spec(
     name: &str,
     namespace: &str,
     tag: &str,
+    pod_template_annotation: Option<&str>,
 ) -> Result<serde_json::Value> {
     let knative_spec = rsd
         .spec
@@ -279,6 +331,11 @@ fn build_configuration_spec(
                                                                        // Add operator-managed annotations
     config_annotations.insert(RESTATE_DEPLOYMENT_ANNOTATION.to_string(), rsd.name_any());
     config_annotations.insert(RESTATE_TAG_ANNOTATION.to_string(), tag.to_string());
+
+    // Only add pod-template annotation for auto-generated tags (for collision detection)
+    if let Some(v) = pod_template_annotation {
+        config_annotations.insert(RESTATE_POD_TEMPLATE_ANNOTATION.to_string(), v.to_string());
+    }
 
     let mut config_labels = rsd.labels().clone();
     config_labels.insert(
@@ -384,9 +441,9 @@ fn validate_knative_containers(containers: &[ConfigurationTemplateSpecContainers
     if let Some(container) = containers_with_ports.first() {
         // Check if at least one port has a protocol hint prefix
         let has_valid_port = container.ports.as_ref().unwrap().iter().any(|port| {
-            port.name.as_deref().is_some_and(|name| {
-                name.starts_with("h2c") || name.starts_with("http1")
-            })
+            port.name
+                .as_deref()
+                .is_some_and(|name| name.starts_with("h2c") || name.starts_with("http1"))
         });
 
         if !has_valid_port {
