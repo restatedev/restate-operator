@@ -96,35 +96,35 @@ pub struct KnativeDeploymentSpec {
 #[kube(status = "RestateDeploymentStatus", shortname = "rsd")]
 #[serde(rename_all = "camelCase")]
 pub struct RestateDeploymentSpec {
-    /// Deployment mode: replicaset (default) or knative
-    /// If not specified and knative field is present, defaults to knative mode
-    /// This field is immutable after creation
+    /// Deployment mode: replicaset (default) or knative.
+    /// If not specified and knative field is present, defaults to knative mode.
+    /// This field is immutable after creation.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cel_validate(rule = Rule::new("self == oldSelf").message("deploymentMode is immutable after creation"))]
     pub deployment_mode: Option<DeploymentMode>,
 
-    /// Knative-specific configuration
-    /// When specified, enables Knative Serving mode
+    /// Knative-specific configuration.
+    /// When specified, enables Knative Serving mode.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub knative: Option<KnativeDeploymentSpec>,
 
     /// Number of desired pods. Defaults to 1.
-    /// Only used in ReplicaSet mode
+    /// Only used in ReplicaSet mode.
     #[schemars(default = "default_replicas", range(min = 0))]
     pub replicas: i32,
 
     /// The number of old ReplicaSets to retain to allow rollback. Defaults to 10.
-    /// Only used in ReplicaSet mode
+    /// Only used in ReplicaSet mode.
     #[schemars(default = "default_revision_history_limit", range(min = 0))]
     pub revision_history_limit: i32,
 
     /// Minimum number of seconds for which a newly created pod should be ready.
-    /// Only used in ReplicaSet mode
+    /// Only used in ReplicaSet mode.
     #[schemars(range(min = 0))]
     pub min_ready_seconds: Option<i32>,
 
     /// Label selector for pods. Must match the pod template's labels.
-    /// Only used in ReplicaSet mode
+    /// Only used in ReplicaSet mode.
     #[serde(default)]
     #[schemars(schema_with = "label_selector_schema")]
     pub selector: Option<LabelSelector>,
@@ -418,14 +418,13 @@ pub struct RestateDeploymentStatus {
     pub deployment_id: Option<String>,
 
     /// Knative-specific status
-    /// Only populated when deployment_mode is knative
     #[serde(skip_serializing_if = "Option::is_none")]
     pub knative: Option<KnativeDeploymentStatus>,
 
     /// Total number of updated non-terminated pods targeted by this RestateDeployment
     pub replicas: i32,
 
-    /// Desired number of replicas
+    /// Desired number of replicas.
     /// - For ReplicaSet mode: reflects spec.replicas
     /// - For Knative mode: reflects revision.status.desired_replicas from latest revision
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -454,7 +453,6 @@ pub struct RestateDeploymentStatus {
     pub conditions: Option<Vec<RestateDeploymentCondition>>,
 
     /// The label selector of the RestateDeployment as a string, for `kubectl get rsd -o wide`
-    /// Only used in ReplicaSet mode
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label_selector: Option<String>,
 }
