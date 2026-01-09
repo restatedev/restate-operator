@@ -555,20 +555,19 @@ fn build_route_spec(
 /// Check if Route is ready to serve traffic
 fn check_route_ready(route: &Route, expected_revision: &str) -> Result<()> {
     // Check if Route has Ready=True condition
-    if let Some(conditions) = route.status.as_ref().and_then(|s| s.conditions.as_ref()) {
-        if let Some(ready_condition) = conditions.iter().find(|c| c.type_ == "Ready") {
-            if ready_condition.status != "True" {
-                return Err(Error::RouteNotReady {
-                    message: format!(
-                        "Route {} is not ready: {}",
-                        route.name_any(),
-                        ready_condition.message
-                    ),
-                    reason: ready_condition.reason.clone(),
-                    requeue_after: Some(Duration::from_secs(5)),
-                });
-            }
-        }
+    if let Some(conditions) = route.status.as_ref().and_then(|s| s.conditions.as_ref())
+        && let Some(ready_condition) = conditions.iter().find(|c| c.type_ == "Ready")
+        && ready_condition.status != "True"
+    {
+        return Err(Error::RouteNotReady {
+            message: format!(
+                "Route {} is not ready: {}",
+                route.name_any(),
+                ready_condition.message
+            ),
+            reason: ready_condition.reason.clone(),
+            requeue_after: Some(Duration::from_secs(5)),
+        });
     }
 
     // Check if the expected revision is in the traffic block
@@ -603,22 +602,22 @@ fn check_route_ready(route: &Route, expected_revision: &str) -> Result<()> {
 /// Check if Revision is ready to serve traffic
 fn check_revision_ready(revision: &Revision) -> Result<()> {
     // Check if Revision has Ready=True condition
-    if let Some(conditions) = revision.status.as_ref().and_then(|s| s.conditions.as_ref()) {
-        if let Some(ready_condition) = conditions.iter().find(|c| c.type_ == "Ready") {
-            if ready_condition.status == "True" {
-                return Ok(());
-            }
-
-            return Err(Error::ConfigurationNotReady {
-                message: format!(
-                    "Revision {} is not ready: {}",
-                    revision.name_any(),
-                    ready_condition.message
-                ),
-                reason: ready_condition.reason.clone(),
-                requeue_after: Some(Duration::from_secs(5)),
-            });
+    if let Some(conditions) = revision.status.as_ref().and_then(|s| s.conditions.as_ref())
+        && let Some(ready_condition) = conditions.iter().find(|c| c.type_ == "Ready")
+    {
+        if ready_condition.status == "True" {
+            return Ok(());
         }
+
+        return Err(Error::ConfigurationNotReady {
+            message: format!(
+                "Revision {} is not ready: {}",
+                revision.name_any(),
+                ready_condition.message
+            ),
+            reason: ready_condition.reason.clone(),
+            requeue_after: Some(Duration::from_secs(5)),
+        });
     }
 
     // No conditions found - Revision not reconciled yet
@@ -641,14 +640,14 @@ async fn register_or_lookup_deployment(
     route: &Route,
 ) -> Result<String> {
     // Check if Configuration already has deployment-id annotation
-    if let Some(annotations) = &config.metadata.annotations {
-        if let Some(deployment_id) = annotations.get(RESTATE_DEPLOYMENT_ID_ANNOTATION) {
-            trace!(
-                deployment_id = %deployment_id,
-                "Found existing deployment ID in Configuration annotation"
-            );
-            return Ok(deployment_id.clone());
-        }
+    if let Some(annotations) = &config.metadata.annotations
+        && let Some(deployment_id) = annotations.get(RESTATE_DEPLOYMENT_ID_ANNOTATION)
+    {
+        trace!(
+            deployment_id = %deployment_id,
+            "Found existing deployment ID in Configuration annotation"
+        );
+        return Ok(deployment_id.clone());
     }
 
     // Build endpoint URL from Route default URL
@@ -761,10 +760,10 @@ pub async fn cleanup_old_configurations(
         };
 
         // Skip current version if active_tag is provided and matches
-        if let Some(active) = active_tag {
-            if tag == active {
-                return false;
-            }
+        if let Some(active) = active_tag
+            && tag == active
+        {
+            return false;
         }
 
         // Skip if already being deleted
