@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
+use kube::Resource;
 use kube::runtime::WatchStreamExt;
 use kube::runtime::{reflector, watcher};
-use kube::Resource;
 use serde::Serialize;
 use tokio::sync::RwLock;
 use tracing::debug;
@@ -110,8 +110,8 @@ pub async fn prewarmed_reflector<K>(
     store: reflector::Store<K>,
     writer: reflector::store::Writer<K>,
     watch_stream: impl futures::Stream<Item = Result<watcher::Event<K>, watcher::Error>>
-        + Send
-        + 'static,
+    + Send
+    + 'static,
 ) -> impl futures::Stream<Item = Result<K, watcher::Error>>
 where
     K: Clone + std::fmt::Debug + Send + Sync + 'static,

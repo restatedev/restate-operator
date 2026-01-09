@@ -20,7 +20,9 @@ use kube::runtime::events::{Event, EventType, Recorder};
 use kube::runtime::finalizer::{Event as Finalizer, finalizer};
 use kube::runtime::reflector::{ObjectRef, Store};
 use kube::runtime::watcher::Config;
-use kube::runtime::{WatchStreamExt, controller, metadata_watcher, predicates, reflector, watcher, Predicate};
+use kube::runtime::{
+    Predicate, WatchStreamExt, controller, metadata_watcher, predicates, reflector, watcher,
+};
 
 use kube::Resource;
 use reqwest::Method;
@@ -30,7 +32,7 @@ use tokio::sync::RwLock;
 use tracing::*;
 use url::Url;
 
-use crate::controllers::{prewarmed_reflector, Diagnostics, State};
+use crate::controllers::{Diagnostics, State, prewarmed_reflector};
 use crate::metrics::Metrics;
 use crate::resources::knative::{Configuration, Revision, Route};
 use crate::resources::restatecloudenvironments::RestateCloudEnvironment;

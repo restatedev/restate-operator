@@ -328,7 +328,7 @@ fn build_configuration_spec(
     let mut config_annotations = rsd.annotations().clone();
     config_annotations.remove("kubectl.kubernetes.io/last-applied-configuration");
     config_annotations.remove("serving.knative.dev/rollout-duration"); // Route-only annotation
-                                                                       // Add operator-managed annotations
+    // Add operator-managed annotations
     config_annotations.insert(RESTATE_DEPLOYMENT_ANNOTATION.to_string(), rsd.name_any());
     config_annotations.insert(RESTATE_TAG_ANNOTATION.to_string(), tag.to_string());
 
@@ -886,9 +886,7 @@ pub async fn cleanup_old_configurations(
                     historic_count += 1;
                     trace!(
                         "Keeping old Configuration {} in namespace {namespace} (within revision history limit: {}/{})",
-                        config_name,
-                        historic_count,
-                        rsd.spec.revision_history_limit
+                        config_name, historic_count, rsd.spec.revision_history_limit
                     );
                     continue;
                 }
@@ -896,7 +894,9 @@ pub async fn cleanup_old_configurations(
                 if deployment_exists {
                     let config_deployment_id = config_deployment_id.unwrap();
 
-                    debug!("Force-deleting Restate deployment {config_deployment_id} as its associated with old Configuration {config_name} in namespace {namespace}");
+                    debug!(
+                        "Force-deleting Restate deployment {config_deployment_id} as its associated with old Configuration {config_name} in namespace {namespace}"
+                    );
 
                     // Get admin URL and bearer token
                     let admin_url = rsd.spec.restate.register.admin_url(&ctx.rce_store)?;
