@@ -1104,36 +1104,27 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     }
 
     if knative_installed {
-        // Create a single reflector using the shared store's writer.
-        // The shared writer broadcasts events to all subscribers, enabling
-        // both store population and controller reconciliation triggers.
-        let initial_subscriber = configuration_writer
-            .subscribe()
-            .expect("Failed to subscribe to configuration writer");
-        let config_reflector =
+        let mut config_reflector =
             reflector(configuration_writer, watcher(configurations, cfg.clone()))
                 .touched_objects()
-                .default_backoff();
+                .default_backoff()
+                .boxed();
 
-        // Spawn the reflector to drive store population
-        tokio::spawn(async move {
-            let mut stream = Box::pin(config_reflector);
-            while let Some(_) = stream.next().await {
-                // The reflector automatically broadcasts to all subscribers
-            }
-        });
-
-        // Wait for the store to be populated with initial data
         debug!("Waiting for Knative Configuration store to sync...");
-        configuration_store
-            .wait_until_ready()
-            .await
-            .expect("Configuration store failed to sync unexpectedly");
-        debug!("Knative Configuration store ready");
 
-        // Use the initial subscriber for the controller's owns_stream()
-        // Map Arc<Configuration> to Result<Configuration, Error> for controller compatibility
-        let config_handle = initial_subscriber.map(|arc_config| Ok(Arc::unwrap_or_clone(arc_config)));
+        let mut config_ready = std::pin::pin!(configuration_store.wait_until_ready());
+        loop {
+            tokio::select! {
+                // poll the reflector while we wait for it to do the initial sync, but ignore any results
+                _ = futures::StreamExt::next(&mut config_reflector) => {},
+                ready = &mut config_ready => {
+                    ready.expect("Configuration store failed to sync unexpectedly");
+                    break
+                }
+            }
+        }
+
+        debug!("Knative Configuration store ready");
 
         let routes: Api<Route> = Api::all(client.clone());
         let route_watcher = metadata_watcher(routes, cfg.clone())
@@ -1147,7 +1138,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
             .default_backoff();
 
         controller = controller
-            .owns_stream(config_handle)
+            .owns_stream(config_reflector)
             .watches_stream(route_watcher, |meta| {
                 // Extract parent RestateDeployment name from annotation
                 let name = meta.annotations().get("restate.dev/deployment")?;
