@@ -1104,10 +1104,33 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     }
 
     if knative_installed {
-        let config_reflector =
-            reflector(configuration_writer, watcher(configurations, cfg.clone()))
-                .touched_objects()
-                .default_backoff();
+        // Spawn a reflector to populate configuration_store, then wait for initial sync.
+        // This ensures the hash collision check in reconcile_knative has accurate data at startup.
+        let store_reflector = reflector(
+            configuration_writer,
+            watcher(configurations.clone(), cfg.clone()),
+        )
+        .touched_objects()
+        .default_backoff();
+
+        tokio::spawn(store_reflector.for_each(|_| futures::future::ready(())));
+
+        trace!("Waiting for Knative Configuration store to sync...");
+        configuration_store
+            .wait_until_ready()
+            .await
+            .expect("Configuration store failed to sync unexpectedly");
+        trace!("Knative Configuration store ready");
+
+        // Create second reflector for controller to own (reconciliation triggers).
+        // This is separate from the store reflector so owns_stream pattern is preserved.
+        let (_, config_writer_for_controller) = reflector::store::<Configuration>();
+        let config_reflector = reflector(
+            config_writer_for_controller,
+            watcher(configurations, cfg.clone()),
+        )
+        .touched_objects()
+        .default_backoff();
 
         let routes: Api<Route> = Api::all(client.clone());
         let route_watcher = metadata_watcher(routes, cfg.clone())

@@ -103,7 +103,7 @@ pub async fn reconcile_knative(
 
             if existing_pod_template.map(|s| s.as_str()) != Some(pod_template_annotation.as_str()) {
                 // Template mismatch - hash collision!
-                trace!(
+                debug!(
                     configuration_name = %config_name,
                     namespace = %namespace,
                     "Detected hash collision: Configuration exists with different template"
