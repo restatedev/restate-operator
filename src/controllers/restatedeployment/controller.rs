@@ -32,7 +32,7 @@ use tokio::sync::RwLock;
 use tracing::*;
 use url::Url;
 
-use crate::controllers::{Diagnostics, State};
+use crate::controllers::{prewarmed_reflector, Diagnostics, State};
 use crate::metrics::Metrics;
 use crate::resources::knative::{Configuration, Revision, Route};
 use crate::resources::restatecloudenvironments::RestateCloudEnvironment;
@@ -1081,7 +1081,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
             .shutdown_on_signal()
             .owns_stream(replicaset_reflector);
 
-    let (revision_store, revision_writer) = reflector::store();
+    let (revision_store, revision_writer) = reflector::store_shared(32);
     let (configuration_store, configuration_writer) = reflector::store_shared(32);
     let configurations: Api<Configuration> = Api::all(client.clone());
 
@@ -1104,27 +1104,12 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     }
 
     if knative_installed {
-        let mut config_reflector =
-            reflector(configuration_writer, watcher(configurations, cfg.clone()))
-                .touched_objects()
-                .default_backoff()
-                .boxed();
-
-        debug!("Waiting for Knative Configuration store to sync...");
-
-        let mut config_ready = std::pin::pin!(configuration_store.wait_until_ready());
-        loop {
-            tokio::select! {
-                // poll the reflector while we wait for it to do the initial sync, but ignore any results
-                _ = futures::StreamExt::next(&mut config_reflector) => {},
-                ready = &mut config_ready => {
-                    ready.expect("Configuration store failed to sync unexpectedly");
-                    break
-                }
-            }
-        }
-
-        debug!("Knative Configuration store ready");
+        let config_reflector = prewarmed_reflector(
+            configuration_store.clone(),
+            configuration_writer,
+            watcher(configurations, cfg.clone()),
+        )
+        .await;
 
         let routes: Api<Route> = Api::all(client.clone());
         let route_watcher = metadata_watcher(routes, cfg.clone())
@@ -1132,10 +1117,12 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
             .default_backoff();
 
         let revisions: Api<Revision> = Api::all(client.clone());
-        let rev_stream = watcher(revisions, cfg.clone());
-        let revision_reflector = reflector(revision_writer, rev_stream)
-            .touched_objects()
-            .default_backoff();
+        let revision_reflector = prewarmed_reflector(
+            revision_store.clone(),
+            revision_writer,
+            watcher(revisions, cfg.clone()),
+        )
+        .await;
 
         controller = controller
             .owns_stream(config_reflector)

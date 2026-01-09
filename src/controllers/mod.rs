@@ -1,8 +1,13 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use futures::StreamExt;
+use kube::runtime::WatchStreamExt;
+use kube::runtime::{reflector, watcher};
+use kube::Resource;
 use serde::Serialize;
 use tokio::sync::RwLock;
+use tracing::debug;
 use url::Url;
 
 pub mod restatecloudenvironment;
@@ -91,4 +96,50 @@ pub fn service_url(
     }
 
     Ok(url)
+}
+
+/// Creates a pre-warmed reflector stream that can be passed to controller methods.
+///
+/// This function:
+/// 1. Creates a reflector from the given writer and watcher
+/// 2. Polls the reflector until the store is ready (pre-warming)
+/// 3. Returns the reflector stream ready to be passed to owns_stream() or watches_stream()
+///
+/// The store must be created with `store_shared()` for this pattern to work correctly.
+pub async fn prewarmed_reflector<K>(
+    store: reflector::Store<K>,
+    writer: reflector::store::Writer<K>,
+    watch_stream: impl futures::Stream<Item = Result<watcher::Event<K>, watcher::Error>>
+        + Send
+        + 'static,
+) -> impl futures::Stream<Item = Result<K, watcher::Error>>
+where
+    K: Clone + std::fmt::Debug + Send + Sync + 'static,
+    K: Resource<DynamicType = ()>,
+    K::DynamicType: Eq + std::hash::Hash + Clone + Default,
+{
+    let kind = K::kind(&()).to_string();
+
+    debug!("Waiting for {} store to sync...", kind);
+
+    let mut stream = reflector(writer, watch_stream)
+        .touched_objects()
+        .default_backoff()
+        .boxed();
+
+    let mut store_ready = std::pin::pin!(store.wait_until_ready());
+
+    loop {
+        tokio::select! {
+            _ = stream.next() => {},
+            ready = &mut store_ready => {
+                ready.unwrap_or_else(|_| panic!("{} store failed to sync unexpectedly", kind));
+                break
+            }
+        }
+    }
+
+    debug!("{} store ready", kind);
+
+    stream
 }
