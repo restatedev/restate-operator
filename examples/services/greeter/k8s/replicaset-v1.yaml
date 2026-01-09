@@ -1,0 +1,41 @@
+apiVersion: restate.dev/v1beta1
+kind: RestateDeployment
+metadata:
+  name: greeter-replicaset
+spec:
+  replicas: 1
+  restate:
+    register:
+      cluster: restate  # Name of your RestateCluster
+  selector:
+    matchLabels:
+      app: greeter-replicaset
+  template:
+    metadata:
+      labels:
+        app: greeter-replicaset
+    spec:
+      containers:
+        - name: service
+          image: dev.local/restatedev/restate-operator/greeter:local
+          imagePullPolicy: Never
+          ports:
+            - name: h2c
+              containerPort: 9080
+          env:
+            - name: SERVICE_VERSION
+              value: "v1"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            # Uncomment to fix "poison" input handling:
+            # - name: ANTIDOTE
+            #   value: "cure"
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
