@@ -99,7 +99,6 @@ pub struct RestateDeploymentSpec {
     /// If not specified and knative field is present, defaults to knative mode.
     /// This field is immutable after creation.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[cel_validate(rule = Rule::new("self == oldSelf").message("deploymentMode is immutable after creation"))]
     pub deployment_mode: Option<DeploymentMode>,
 
     /// Knative-specific configuration.

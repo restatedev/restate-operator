@@ -56,17 +56,23 @@ spec:
               ensuring old versions remain available until all invocations against them are complete.
             properties:
               deploymentMode:
-                description: 'Deployment mode: replicaset (default) or knative. If not specified and knative field is present, defaults to knative mode. This field is immutable after creation.'
-                enum:
-                - replicaset
-                - knative
-                nullable: true
-                type: string
-                x-kubernetes-validations:
-                - message: deploymentMode is immutable after creation
-                  rule: self == oldSelf
+                anyOf:
+                - description: Deployment mode determines how the RestateDeployment runs workloads
+                  enum:
+                  - replicaset
+                  - knative
+                  type: string
+                - enum:
+                  - null
+                  nullable: true
+                description: |-
+                  Deployment mode: replicaset (default) or knative.
+                  If not specified and knative field is present, defaults to knative mode.
+                  This field is immutable after creation.
               knative:
-                description: Knative-specific configuration. When specified, enables Knative Serving mode.
+                description: |-
+                  Knative-specific configuration.
+                  When specified, enables Knative Serving mode.
                 nullable: true
                 properties:
                   maxScale:
@@ -85,13 +91,26 @@ spec:
                     description: |-
                       Deployment tag - determines Restate deployment identity.
 
-                      A Restate deployment is a specific, versioned instance of your service code. Each deployment is immutable: once registered with Restate, its endpoint and identity (deployment ID) must not change.
+                      A Restate deployment is a specific, versioned instance of your service code.
+                      Each deployment is immutable: once registered with Restate, its endpoint and
+                      identity (deployment ID) must not change.
 
-                      The tag acts as a stable label that groups multiple Knative Revisions under a single Restate deployment: - **Same tag**: In-place updates create new Knative Revisions within the same Restate deployment (no new registration) - **Changed tag**: Creates a new Restate deployment with a new deployment ID (versioned update) - **No tag specified**: Uses template hash as tag, causing every template change to create a new Restate deployment
+                      The tag acts as a stable label that groups multiple Knative Revisions under
+                      a single Restate deployment:
+                      - **Same tag**: In-place updates create new Knative Revisions within the same
+                        Restate deployment (no new registration)
+                      - **Changed tag**: Creates a new Restate deployment with a new deployment ID
+                        (versioned update)
+                      - **No tag specified**: Uses template hash as tag, causing every template change
+                        to create a new Restate deployment
 
-                      The tag must be a valid DNS-1035 label: a lowercase RFC 1123 label that consists of lower case alphanumeric characters or '-', and must start and end with an alphanumeric character (e.g. 'my-name',  or '123-abc', regex used for validation is '[a-z]([-a-z0-9]*[a-z0-9])?').
+                      The tag must be a valid DNS-1035 label: a lowercase RFC 1123 label that consists of
+                      lower case alphanumeric characters or '-', and must start and end with an alphanumeric
+                      character (e.g. 'my-name',  or '123-abc', regex used for validation is
+                      '[a-z]([-a-z0-9]*[a-z0-9])?').
 
-                      Example: tag "v1-0" → Configuration "my-service-v1-0" → Restate deployment "dp_abc123" Multiple Knative Revisions (00001, 00002, ...) all serve this deployment.
+                      Example: tag "v1-0" → Configuration "my-service-v1-0" → Restate deployment "dp_abc123"
+                               Multiple Knative Revisions (00001, 00002, ...) all serve this deployment.
                     nullable: true
                     pattern: ^[a-z]([-a-z0-9]*[a-z0-9])?$
                     type: string
@@ -103,14 +122,18 @@ spec:
                     type: integer
                 type: object
               minReadySeconds:
-                description: Minimum number of seconds for which a newly created pod should be ready. Only used in ReplicaSet mode.
+                description: |-
+                  Minimum number of seconds for which a newly created pod should be ready.
+                  Only used in ReplicaSet mode.
                 format: int32
                 minimum: 0.0
                 nullable: true
                 type: integer
               replicas:
                 default: 1
-                description: Number of desired pods. Defaults to 1. Only used in ReplicaSet mode.
+                description: |-
+                  Number of desired pods. Defaults to 1.
+                  Only used in ReplicaSet mode.
                 format: int32
                 minimum: 0.0
                 type: integer
@@ -178,13 +201,16 @@ spec:
                 type: object
               revisionHistoryLimit:
                 default: 10
-                description: The number of old ReplicaSets to retain to allow rollback. Defaults to 10. Only used in ReplicaSet mode.
+                description: |-
+                  The number of old ReplicaSets to retain to allow rollback. Defaults to 10.
+                  Only used in ReplicaSet mode.
                 format: int32
                 minimum: 0.0
                 type: integer
               selector:
-                description: Label selector for pods. Must match the pod template's labels. Only used in ReplicaSet mode.
-                nullable: true
+                description: |-
+                  Label selector for pods. Must match the pod template's labels.
+                  Only used in ReplicaSet mode.
                 properties:
                   matchExpressions:
                     description: matchExpressions is a list of label selector requirements. The requirements are ANDed.
@@ -251,7 +277,9 @@ spec:
                     description: |-
                       Specification of the desired behavior of the pod. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status.
 
-                      The contents of this field are passed through directly from the operator to the created workload: - **ReplicaSet mode**: Passed to the ReplicaSet's pod template spec. - **Knative mode**: Passed to the Configuration's revision template spec. This supports standard PodSpec fields (containers, serviceAccountName, volumes, etc.) as well as Knative-specific fields (timeoutSeconds, containerConcurrency, etc.).
+                      The contents of this field are passed through directly from the operator to the created workload:
+                      - **ReplicaSet mode**: Passed to the ReplicaSet's pod template spec.
+                      - **Knative mode**: Passed to the Configuration's revision template spec. This supports standard PodSpec fields (containers, serviceAccountName, volumes, etc.) as well as Knative-specific fields (timeoutSeconds, containerConcurrency, etc.).
                     x-kubernetes-preserve-unknown-fields: true
                 required:
                 - spec
@@ -272,7 +300,7 @@ spec:
                 nullable: true
                 type: integer
               collisionCount:
-                description: Count of hash collisions for the RestateDeployment. The controller uses this field as a collision avoidance mechanism when it needs to create the name for the newest ReplicaSet.
+                description: Count of hash collisions for the RestateDeployment. The controller uses this field as a collision avoidance mechanism when it needs to create the name for the newest ReplicaSet or Configuration.
                 format: int32
                 nullable: true
                 type: integer
@@ -311,7 +339,10 @@ spec:
                 nullable: true
                 type: string
               desiredReplicas:
-                description: 'Desired number of replicas. - For ReplicaSet mode: reflects spec.replicas - For Knative mode: reflects revision.status.desired_replicas from latest revision'
+                description: |-
+                  Desired number of replicas.
+                  - For ReplicaSet mode: reflects spec.replicas
+                  - For Knative mode: reflects revision.status.desired_replicas from latest revision
                 format: int32
                 nullable: true
                 type: integer

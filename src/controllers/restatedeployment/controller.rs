@@ -18,9 +18,9 @@ use kube::core::subresource::Scale;
 use kube::runtime::controller::Action;
 use kube::runtime::events::{Event, EventType, Recorder};
 use kube::runtime::finalizer::{Event as Finalizer, finalizer};
-use kube::runtime::reflector::Store;
+use kube::runtime::reflector::{ObjectRef, Store};
 use kube::runtime::watcher::Config;
-use kube::runtime::{WatchStreamExt, controller};
+use kube::runtime::{WatchStreamExt, controller, metadata_watcher, predicates, reflector, watcher, Predicate};
 
 use kube::Resource;
 use reqwest::Method;
