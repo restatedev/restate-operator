@@ -1082,7 +1082,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
             .owns_stream(replicaset_reflector);
 
     let (revision_store, revision_writer) = reflector::store();
-    let (configuration_store, configuration_writer) = reflector::store();
+    let (configuration_store, configuration_writer) = reflector::store_shared(32);
     let configurations: Api<Configuration> = Api::all(client.clone());
 
     // Check if Knative is installed by checking if the serving.knative.dev API group exists
@@ -1104,33 +1104,36 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     }
 
     if knative_installed {
-        // Spawn a reflector to populate configuration_store, then wait for initial sync.
-        // This ensures the hash collision check in reconcile_knative has accurate data at startup.
-        let store_reflector = reflector(
-            configuration_writer,
-            watcher(configurations.clone(), cfg.clone()),
-        )
-        .touched_objects()
-        .default_backoff();
+        // Create a single reflector using the shared store's writer.
+        // The shared writer broadcasts events to all subscribers, enabling
+        // both store population and controller reconciliation triggers.
+        let initial_subscriber = configuration_writer
+            .subscribe()
+            .expect("Failed to subscribe to configuration writer");
+        let config_reflector =
+            reflector(configuration_writer, watcher(configurations, cfg.clone()))
+                .touched_objects()
+                .default_backoff();
 
-        tokio::spawn(store_reflector.for_each(|_| futures::future::ready(())));
+        // Spawn the reflector to drive store population
+        tokio::spawn(async move {
+            let mut stream = Box::pin(config_reflector);
+            while let Some(_) = stream.next().await {
+                // The reflector automatically broadcasts to all subscribers
+            }
+        });
 
-        trace!("Waiting for Knative Configuration store to sync...");
+        // Wait for the store to be populated with initial data
+        debug!("Waiting for Knative Configuration store to sync...");
         configuration_store
             .wait_until_ready()
             .await
             .expect("Configuration store failed to sync unexpectedly");
-        trace!("Knative Configuration store ready");
+        debug!("Knative Configuration store ready");
 
-        // Create second reflector for controller to own (reconciliation triggers).
-        // This is separate from the store reflector so owns_stream pattern is preserved.
-        let (_, config_writer_for_controller) = reflector::store::<Configuration>();
-        let config_reflector = reflector(
-            config_writer_for_controller,
-            watcher(configurations, cfg.clone()),
-        )
-        .touched_objects()
-        .default_backoff();
+        // Use the initial subscriber for the controller's owns_stream()
+        // Map Arc<Configuration> to Result<Configuration, Error> for controller compatibility
+        let config_handle = initial_subscriber.map(|arc_config| Ok(Arc::unwrap_or_clone(arc_config)));
 
         let routes: Api<Route> = Api::all(client.clone());
         let route_watcher = metadata_watcher(routes, cfg.clone())
@@ -1138,12 +1141,13 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
             .default_backoff();
 
         let revisions: Api<Revision> = Api::all(client.clone());
-        let revision_reflector = reflector(revision_writer, watcher(revisions, cfg.clone()))
+        let rev_stream = watcher(revisions, cfg.clone());
+        let revision_reflector = reflector(revision_writer, rev_stream)
             .touched_objects()
             .default_backoff();
 
         controller = controller
-            .owns_stream(config_reflector)
+            .owns_stream(config_handle)
             .watches_stream(route_watcher, |meta| {
                 // Extract parent RestateDeployment name from annotation
                 let name = meta.annotations().get("restate.dev/deployment")?;
