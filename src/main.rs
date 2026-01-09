@@ -1,5 +1,5 @@
 use actix_web::{
-    get, middleware, web::Data, App, HttpRequest, HttpResponse, HttpServer, Responder,
+    App, HttpRequest, HttpResponse, HttpServer, Responder, get, middleware, web::Data,
 };
 use clap::Parser;
 use kube::Client;
@@ -42,7 +42,7 @@ struct Arguments {
         long = "tunnel-client-default-image",
         env = "OPERATOR_TUNNEL_CLIENT_DEFAULT_IMAGE",
         value_name = "IMAGE",
-        default_value = "ghcr.io/restatedev/restate-cloud-tunnel-client:0.4.1"
+        default_value = "ghcr.io/restatedev/restate-cloud-tunnel-client:0.5.0"
     )]
     tunnel_client_default_image: String,
 }
@@ -69,7 +69,7 @@ async fn index(c: Data<State>, _req: HttpRequest) -> impl Responder {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    telemetry::init().await;
+    telemetry::init();
 
     let args: Arguments = Arguments::parse();
 

@@ -13,18 +13,18 @@ use k8s_openapi::{
     apimachinery::pkg::{api::resource::Quantity, util::intstr::IntOrString},
 };
 use kube::{
-    api::{ObjectMeta, Patch, PatchParams},
     Api,
+    api::{ObjectMeta, Patch, PatchParams},
 };
 use tracing::debug;
 
 use crate::{
+    Error,
     controllers::restatecloudenvironment::{
         controller::Context,
         reconcilers::{label_selector, object_meta},
     },
     resources::restatecloudenvironments::RestateCloudEnvironmentSpec,
-    Error,
 };
 
 fn default_resources() -> ResourceRequirements {

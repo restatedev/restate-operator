@@ -1,0 +1,31 @@
+apiVersion: restate.dev/v1
+kind: RestateCluster
+metadata:
+  name: restate-multi-zone
+spec:
+  cluster:
+    autoProvision: true
+  compute:
+    image: restatedev/restate:1.5.3
+    env:
+      # If you want to support restate replication like {zone: 2}, you need to set the location env var.
+      # If topology.kubernetes.io/zone pod label exists, POD_ZONE will be set automatically by the operator.
+      # This pod label will only be propagated from the node labels if the PodTopologyLabelsAdmission feature gate is enabled (alpha in 1.33).
+      # Without that gate, there is no way for a pod to know its own zone.
+      - name: RESTATE_LOCATION
+        value: myregion.$(POD_ZONE)
+    replicas: 3
+    topologySpreadConstraints:
+      # Spread pods evenly across zones
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: restate
+            # this must be set to match the name of the RestateCluster
+            app.kubernetes.io/instance: restate-multi-zone
+  storage:
+    storageRequestBytes: 2147483648
+  config: |
+    auto-provision = false

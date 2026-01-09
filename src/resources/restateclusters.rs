@@ -4,20 +4,20 @@ use std::path::PathBuf;
 
 use k8s_openapi::api::core::v1::{
     Affinity, EnvVar, LocalObjectReference, PodDNSConfig, ResourceRequirements, Toleration,
+    TopologySpreadConstraint,
 };
 use k8s_openapi::api::networking::v1;
 use k8s_openapi::api::networking::v1::{NetworkPolicyPeer, NetworkPolicyPort};
 
-use kube::{CELSchema, CustomResource};
-use schemars::schema::{Schema, SchemaObject};
+use kube::{CustomResource, KubeSchema};
 use schemars::JsonSchema;
+use schemars::Schema;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 pub static RESTATE_CLUSTER_FINALIZER: &str = "clusters.restate.dev";
 
 /// Represents the configuration of a Restate Cluster
-#[derive(CustomResource, CELSchema, Deserialize, Serialize, Clone, Debug)]
+#[derive(CustomResource, KubeSchema, Deserialize, Serialize, Clone, Debug)]
 #[cfg_attr(test, derive(Default))]
 #[kube(
     kind = "RestateCluster",
@@ -33,6 +33,9 @@ pub static RESTATE_CLUSTER_FINALIZER: &str = "clusters.restate.dev";
 pub struct RestateClusterSpec {
     /// clusterName sets the RESTATE_CLUSTER_NAME environment variable. Defaults to the object name.
     pub cluster_name: Option<String>,
+    /// Cluster-wide configuration options
+    // Added with v2.1.0
+    pub cluster: Option<Cluster>,
     pub storage: RestateClusterStorage,
     pub compute: RestateClusterCompute,
     pub security: Option<RestateClusterSecurity>,
@@ -40,75 +43,68 @@ pub struct RestateClusterSpec {
     pub config: Option<String>,
 }
 
+/// Cluster-wide configuration options
+#[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Cluster {
+    /// Whether the operator should automatically provision the cluster.
+    /// When enabled, the operator will call the Restate gRPC ProvisionCluster API after pods are running.
+    /// Defaults to false for backwards compatibility.
+    #[serde(default)]
+    pub auto_provision: bool,
+}
+
 // Hoisted from the derived implementation so that we can restrict names to be valid namespace names
 impl schemars::JsonSchema for RestateCluster {
-    fn schema_name() -> String {
-        "RestateCluster".to_owned()
+    fn schema_name() -> Cow<'static, str> {
+        "RestateCluster".into()
     }
     fn schema_id() -> Cow<'static, str> {
         "restate_operator::controller::RestateCluster".into()
     }
-    fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> Schema {
-        {
-            let mut schema_object = SchemaObject {
-                instance_type: Some(
-                    schemars::schema::InstanceType::Object.into(),
-                ),
-                metadata: Some(Box::new(schemars::schema::Metadata {
-                    description: Some(
-                        "RestateCluster describes the configuration and status of a Restate cluster."
-                            .to_owned(),
-                    ),
-                    ..Default::default()
-                })),
-                ..Default::default()
-            };
-            let object_validation = schema_object.object();
 
-            object_validation
-                .properties
-                .insert(
-                    "metadata".to_owned(),
-                    serde_json::from_value(json!({
-                                "type": "object",
-                                "properties": {
-                                    "name": {
-                                        "type": "string",
-                                        "minLength": 1,
-                                        "maxLength": 63,
-                                        "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
-                                    }
-                                }
-                            })).unwrap(),
-                );
-            object_validation.required.insert("metadata".to_owned());
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> Schema {
+        let spec_schema = generator.subschema_for::<RestateClusterSpec>();
+        let status_schema = generator.subschema_for::<Option<RestateClusterStatus>>();
 
-            object_validation
-                .properties
-                .insert("spec".to_owned(), gen.subschema_for::<RestateClusterSpec>());
-            object_validation.required.insert("spec".to_owned());
-
-            object_validation.properties.insert(
-                "status".to_owned(),
-                gen.subschema_for::<Option<RestateClusterStatus>>(),
-            );
-            Schema::Object(schema_object)
-        }
+        schemars::json_schema!({
+            "type": "object",
+            "description": "RestateCluster describes the configuration and status of a Restate cluster.",
+            "properties": {
+                "metadata": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 63,
+                            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+                        }
+                    }
+                },
+                "spec": spec_schema,
+                "status": status_schema
+            },
+            "required": ["metadata", "spec"]
+        })
     }
 }
 
 /// Storage configuration
-#[derive(Deserialize, Serialize, Clone, Default, Debug, CELSchema)]
+#[derive(Deserialize, Serialize, Clone, Default, Debug, KubeSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RestateClusterStorage {
     /// storageClassName is the name of the StorageClass required by the claim. More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#class-1.
     /// This field is immutable
     #[schemars(default)]
-    #[cel_validate(rule = Rule::new("self == oldSelf").message("storageClassName is immutable"))]
+    #[validate(rule = "self == oldSelf", message = "storageClassName is immutable")]
     pub storage_class_name: Option<String>,
     /// storageRequestBytes is the amount of storage to request in volume claims. It is allowed to increase but not decrease.
     #[schemars(range(min = 1))]
-    #[cel_validate(rule = Rule::new("self >= oldSelf").message("storageRequestBytes cannot be decreased"))]
+    #[validate(
+        rule = "self >= oldSelf",
+        message = "storageRequestBytes cannot be decreased"
+    )]
     pub storage_request_bytes: i64,
     /// volumeAttributesClassName may be used to set the VolumeAttributesClass used by this claim.
     #[schemars(default)]
@@ -149,29 +145,32 @@ pub struct RestateClusterCompute {
     pub node_selector: Option<BTreeMap<String, String>>,
     /// If specified, pod affinity
     pub affinity: Option<Affinity>,
+    /// TopologySpreadConstraints describes how a group of pods ought to spread across topology domains. Scheduler will schedule pods in a way which abides by the constraints.
+    pub topology_spread_constraints: Option<Vec<TopologySpreadConstraint>>,
+    /// If specified, the pod's priority. PriorityClassName indicates the name of the PriorityClass that should be applied to the Restate pods.
+    pub priority_class_name: Option<String>,
 }
 
-fn env_schema(g: &mut schemars::gen::SchemaGenerator) -> Schema {
-    serde_json::from_value(json!({
-        "items": EnvVar::json_schema(g),
+fn env_schema(g: &mut schemars::SchemaGenerator) -> Schema {
+    let env_var_schema = g.subschema_for::<EnvVar>();
+    schemars::json_schema!({
+        "items": env_var_schema,
         "nullable": true,
         "type": "array",
         "x-kubernetes-list-map-keys": ["name"],
         "x-kubernetes-list-type": "map"
-    }))
-    .unwrap()
+    })
 }
 
-fn node_selector_schema(_g: &mut schemars::gen::SchemaGenerator) -> Schema {
-    serde_json::from_value(json!({
+fn node_selector_schema(_g: &mut schemars::SchemaGenerator) -> Schema {
+    schemars::json_schema!({
         "description": "If specified, a node selector for the pod",
         "additionalProperties": {
             "type": "string"
         },
         "type": "object",
         "x-kubernetes-map-type": "atomic"
-    }))
-    .unwrap()
+    })
 }
 
 /// Security configuration
@@ -212,18 +211,31 @@ pub struct RestateClusterNetworkPeers {
     pub ingress: Option<Vec<NetworkPolicyPeer>>,
     #[schemars(default, schema_with = "network_peers_schema")]
     pub admin: Option<Vec<NetworkPolicyPeer>>,
+    /// Network peers to allow inbound access to the node port (5122).
+    /// This is used for inter-cluster communication and operator access for provisioning.
+    // Added with v2.1.0
+    #[schemars(default, schema_with = "network_peers_schema")]
+    pub node: Option<Vec<NetworkPolicyPeer>>,
+    /// Deprecated: use `node` instead. If both are set, `node` takes precedence.
     #[schemars(default, schema_with = "network_peers_schema")]
     pub metrics: Option<Vec<NetworkPolicyPeer>>,
 }
 
-fn network_peers_schema(g: &mut schemars::gen::SchemaGenerator) -> Schema {
-    serde_json::from_value(json!({
-        "items": NetworkPolicyPeer::json_schema(g),
+impl RestateClusterNetworkPeers {
+    /// Returns the node peers, falling back to metrics for backwards compatibility.
+    pub fn node_peers(&self) -> Option<&[NetworkPolicyPeer]> {
+        self.node.as_deref().or(self.metrics.as_deref())
+    }
+}
+
+fn network_peers_schema(g: &mut schemars::SchemaGenerator) -> Schema {
+    let peer_schema = g.subschema_for::<NetworkPolicyPeer>();
+    schemars::json_schema!({
+        "items": peer_schema,
         "nullable": true,
         "type": "array",
         "x-kubernetes-list-type": "atomic"
-    }))
-    .unwrap()
+    })
 }
 
 /// NetworkPolicyEgressRule describes a particular set of traffic that is allowed out of pods matched by a NetworkPolicySpec's podSelector. The traffic must match both ports and to. This type is beta-level in 1.8
@@ -247,33 +259,32 @@ impl From<NetworkPolicyEgressRule> for v1::NetworkPolicyEgressRule {
     }
 }
 
-fn network_ports_schema(_: &mut schemars::gen::SchemaGenerator) -> Schema {
-    serde_json::from_value(json!({
-          "items": {
+fn network_ports_schema(_: &mut schemars::SchemaGenerator) -> Schema {
+    schemars::json_schema!({
+        "items": {
             "description": "NetworkPolicyPort describes a port to allow traffic on",
             "properties": {
-              "endPort": {
-                "description": "endPort indicates that the range of ports from port to endPort if set, inclusive, should be allowed by the policy. This field cannot be defined if the port field is not defined or if the port field is defined as a named (string) port. The endPort must be equal or greater than port.",
-                "format": "int32",
-                "type": "integer"
-              },
-              "port": {
-                "x-kubernetes-int-or-string": true,
-                "anyOf": [{"type": "integer"}, {"type": "string"}],
-                "description": "port represents the port on the given protocol. This can either be a numerical or named port on a pod. If this field is not provided, this matches all port names and numbers. If present, only traffic on the specified protocol AND port will be matched."
-              },
-              "protocol": {
-                "description": "protocol represents the protocol (TCP, UDP, or SCTP) which traffic must match. If not specified, this field defaults to TCP.",
-                "type": "string"
-              }
+                "endPort": {
+                    "description": "endPort indicates that the range of ports from port to endPort if set, inclusive, should be allowed by the policy. This field cannot be defined if the port field is not defined or if the port field is defined as a named (string) port. The endPort must be equal or greater than port.",
+                    "format": "int32",
+                    "type": "integer"
+                },
+                "port": {
+                    "x-kubernetes-int-or-string": true,
+                    "anyOf": [{"type": "integer"}, {"type": "string"}],
+                    "description": "port represents the port on the given protocol. This can either be a numerical or named port on a pod. If this field is not provided, this matches all port names and numbers. If present, only traffic on the specified protocol AND port will be matched."
+                },
+                "protocol": {
+                    "description": "protocol represents the protocol (TCP, UDP, or SCTP) which traffic must match. If not specified, this field defaults to TCP.",
+                    "type": "string"
+                }
             },
-            "type": "object",
-          },
-          "nullable": true,
-          "type": "array",
-          "x-kubernetes-list-type": "atomic"
-        }))
-        .unwrap()
+            "type": "object"
+        },
+        "nullable": true,
+        "type": "array",
+        "x-kubernetes-list-type": "atomic"
+    })
 }
 
 /// Configuration for request signing private keys. Exactly one source of 'secret', 'secretProvider'
@@ -315,6 +326,10 @@ pub struct SecretProviderSigningKeySource {
 #[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
 pub struct RestateClusterStatus {
     pub conditions: Option<Vec<RestateClusterCondition>>,
+    /// Whether the cluster has been provisioned by the operator.
+    /// This is set to true after successful provisioning to avoid repeated provisioning attempts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provisioned: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema, PartialEq, Eq)]

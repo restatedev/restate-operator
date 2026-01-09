@@ -11,7 +11,7 @@ use kube::client::Client;
 use kube::runtime::controller;
 use kube::runtime::controller::Action;
 use kube::runtime::events::{Event, EventType, Recorder};
-use kube::runtime::finalizer::{finalizer, Event as Finalizer};
+use kube::runtime::finalizer::{Event as Finalizer, finalizer};
 use kube::runtime::watcher::Config;
 
 use kube::{Resource, ResourceExt};
@@ -21,7 +21,7 @@ use tracing::*;
 use crate::controllers::{Diagnostics, State};
 use crate::metrics::Metrics;
 use crate::resources::restatecloudenvironments::{
-    RestateCloudEnvironment, RESTATE_CLOUD_ENVIRONMENT_FINALIZER,
+    RESTATE_CLOUD_ENVIRONMENT_FINALIZER, RestateCloudEnvironment,
 };
 use crate::telemetry;
 use crate::{Error, Result};

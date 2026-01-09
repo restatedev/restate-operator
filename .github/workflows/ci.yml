@@ -1,0 +1,19 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install protoc
+        uses: restatedev/restate/.github/actions/install-protoc@main
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --all-features -- -D warnings

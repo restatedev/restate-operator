@@ -13,16 +13,14 @@ use kube::api::{
     Api, ListParams, ObjectMeta, PartialObjectMetaExt, Patch, PatchParams, ResourceExt,
 };
 use kube::client::Client;
-use kube::core::subresource::Scale;
 use kube::core::Selector;
+use kube::core::subresource::Scale;
 use kube::runtime::controller::Action;
 use kube::runtime::events::{Event, EventType, Recorder};
-use kube::runtime::finalizer::{finalizer, Event as Finalizer};
-use kube::runtime::reflector::{ObjectRef, Store};
+use kube::runtime::finalizer::{Event as Finalizer, finalizer};
+use kube::runtime::reflector::Store;
 use kube::runtime::watcher::Config;
-use kube::runtime::{
-    controller, metadata_watcher, predicates, reflector, watcher, Predicate, WatchStreamExt,
-};
+use kube::runtime::{WatchStreamExt, controller};
 
 use kube::Resource;
 use reqwest::Method;
@@ -38,8 +36,8 @@ use crate::resources::knative::{Configuration, Revision, Route};
 use crate::resources::restatecloudenvironments::RestateCloudEnvironment;
 use crate::resources::restateclusters::RestateCluster;
 use crate::resources::restatedeployments::{
-    RestateAdminEndpoint, RestateDeployment, RestateDeploymentCondition, RestateDeploymentStatus,
-    RESTATE_DEPLOYMENT_FINALIZER,
+    RESTATE_DEPLOYMENT_FINALIZER, RestateAdminEndpoint, RestateDeployment,
+    RestateDeploymentCondition, RestateDeploymentStatus,
 };
 use crate::telemetry;
 use crate::{Error, Result};
@@ -328,11 +326,12 @@ impl RestateDeployment {
         )
         .await?;
 
-        let service_endpoint =
-            self.spec
-                .restate
-                .register
-                .service_url(&ctx.rce_store, &versioned_name, namespace)?;
+        let service_endpoint = self.spec.restate.register.service_url(
+            &ctx.rce_store,
+            &versioned_name,
+            namespace,
+            self.spec.restate.service_path.as_deref(),
+        )?;
 
         let mut deployments = self.list_deployments(&ctx).await?;
 
@@ -378,7 +377,9 @@ impl RestateDeployment {
                     {
                         Ok((_, _)) => return Err(ready_err),
                         Err(cleanup_err) => {
-                            error!("Failed to clean up old replicasets while waiting for current replicaset to become ready: {cleanup_err}");
+                            error!(
+                                "Failed to clean up old replicasets while waiting for current replicaset to become ready: {cleanup_err}"
+                            );
                             return Err(ready_err);
                         }
                     }
@@ -398,7 +399,9 @@ impl RestateDeployment {
             // if we fail after this point we will re-register and should get the same deployment id
             deployments.insert(deployment_id.clone(), true);
 
-            debug!("Updating deployment-id annotation of ReplicaSet/Service {versioned_name} in namespace {namespace}");
+            debug!(
+                "Updating deployment-id annotation of ReplicaSet/Service {versioned_name} in namespace {namespace}"
+            );
 
             // store the id against the versioned objects
             let params = PatchParams::apply("restate-operator/deployment-id").force();
@@ -773,7 +776,7 @@ impl RestateDeployment {
                 UNION
                 SELECT DISTINCT pinned_deployment_id as id
                 FROM sys_invocation_status
-                WHERE pinned_deployment_id IS NOT NULL
+                WHERE pinned_deployment_id IS NOT NULL AND status != 'completed'
             )
             SELECT d.id as deployment_id,
                    a.id IS NOT NULL as active
@@ -965,19 +968,40 @@ pub fn validate_replica_set_status(
     let replica_set_status = Some(Box::new(status.clone()));
 
     if replicas != &expected_replicas {
-        return Err(Error::DeploymentNotReady { reason: "ReplicaSetScaling".into(), message: format!("ReplicaSet has {replicas} replicas instead of the expected {expected_replicas}; it may be scaling up or down"), requeue_after: None, replica_set_status });
+        return Err(Error::DeploymentNotReady {
+            reason: "ReplicaSetScaling".into(),
+            message: format!(
+                "ReplicaSet has {replicas} replicas instead of the expected {expected_replicas}; it may be scaling up or down"
+            ),
+            requeue_after: None,
+            replica_set_status,
+        });
     };
 
     let ready_replicas = ready_replicas.unwrap_or(0);
 
     if ready_replicas < expected_replicas {
-        return Err(Error::DeploymentNotReady { reason: "ReplicaSetPodNotReady".into(), message: format!("ReplicaSet has {ready_replicas} ready replicas instead of the expected {expected_replicas}; a pod may not be ready"), requeue_after: None, replica_set_status });
+        return Err(Error::DeploymentNotReady {
+            reason: "ReplicaSetPodNotReady".into(),
+            message: format!(
+                "ReplicaSet has {ready_replicas} ready replicas instead of the expected {expected_replicas}; a pod may not be ready"
+            ),
+            requeue_after: None,
+            replica_set_status,
+        });
     }
 
     let available_replicas = available_replicas.unwrap_or(0);
 
     if available_replicas < expected_replicas {
-        return Err(Error::DeploymentNotReady { reason: "ReplicaSetPodNotAvailable".into(), message: format!("ReplicaSet has {available_replicas} available replicas instead of the expected {expected_replicas}; a pod may not be available"), requeue_after: None, replica_set_status });
+        return Err(Error::DeploymentNotReady {
+            reason: "ReplicaSetPodNotAvailable".into(),
+            message: format!(
+                "ReplicaSet has {available_replicas} available replicas instead of the expected {expected_replicas}; a pod may not be available"
+            ),
+            requeue_after: None,
+            replica_set_status,
+        });
     }
 
     Ok(())

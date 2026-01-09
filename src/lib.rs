@@ -16,9 +16,6 @@ pub enum Error {
     // so boxing this error to break cycles
     FinalizerError(#[from] Box<kube::runtime::finalizer::Error<Error>>),
 
-    #[error("A namespace cannot be created for this name as one already exists")]
-    NameConflict,
-
     #[error("Cluster is not yet Ready: {message}")]
     NotReady {
         message: String,
@@ -36,6 +33,12 @@ pub enum Error {
 
     #[error("Invalid Restate configuration: {0}")]
     InvalidRestateConfig(String),
+
+    #[error("Cluster provisioning failed: {0}")]
+    ProvisioningFailed(String),
+
+    #[error("Cluster was successfully provisioned")]
+    Provisioned,
 
     #[error("The RestateCloudEnvironment {0} does not exist")]
     RestateCloudEnvironmentNotFound(String),
@@ -57,10 +60,14 @@ pub enum Error {
     #[error("Encountered a hash collision, will retry with a new template hash")]
     HashCollision,
 
-    #[error("This RestateDeployment is backing active versions in Restate. If you want to delete the RestateDeployment, either register new endpoints for the relevant services or delete the Restate versions.")]
+    #[error(
+        "This RestateDeployment is backing active versions in Restate. If you want to delete the RestateDeployment, either register new endpoints for the relevant services or delete the Restate versions."
+    )]
     DeploymentInUse,
 
-    #[error("This RestateDeployment is backing recently-active versions in Restate. It will be removed after the drain delay period.")]
+    #[error(
+        "This RestateDeployment is backing recently-active versions in Restate. It will be removed after the drain delay period."
+    )]
     DeploymentDraining { requeue_after: Option<Duration> },
 
     #[error("Knative Configuration is not ready: {message}")]
@@ -89,7 +96,6 @@ impl Error {
             Error::SerializationError(_) => "SerializationError",
             Error::KubeError(_) => "KubeError",
             Error::FinalizerError(_) => "FinalizerError",
-            Error::NameConflict => "NameConflict",
             Error::NotReady { .. } => "NotReady",
             Error::DeploymentNotReady { .. } => "ServiceNotReady",
             Error::InvalidRestateConfig(_) => "InvalidRestateConfig",
@@ -105,6 +111,8 @@ impl Error {
             Error::ConfigurationNotReady { .. } => "ConfigurationNotReady",
             Error::RouteNotReady { .. } => "RouteNotReady",
             Error::InvalidUrl { .. } => "InvalidUrl",
+            Error::ProvisioningFailed(_) => "ProvisioningFailed",
+            Error::Provisioned => "Provisioned",
         }
     }
 }

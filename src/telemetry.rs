@@ -1,7 +1,7 @@
 use opentelemetry::trace::TraceId;
-use tracing_subscriber::{prelude::*, EnvFilter, Registry};
+use tracing_subscriber::{EnvFilter, Registry, prelude::*};
 
-///  Fetch an opentelemetry::trace::TraceId as hex through the full tracing stack
+/// Fetch an opentelemetry::trace::TraceId as hex through the full tracing stack
 pub fn get_trace_id() -> Option<TraceId> {
     use opentelemetry::trace::TraceContextExt as _; // opentelemetry::Context -> opentelemetry::trace::Span
     use tracing_opentelemetry::OpenTelemetrySpanExt as _; // tracing::Span to opentelemetry::Context
@@ -18,38 +18,42 @@ pub fn get_trace_id() -> Option<TraceId> {
 }
 
 #[cfg(feature = "telemetry")]
-async fn init_tracer() -> opentelemetry::sdk::trace::Tracer {
+fn init_tracer_provider() -> opentelemetry_sdk::trace::SdkTracerProvider {
+    use opentelemetry_otlp::{SpanExporter, WithExportConfig};
+    use opentelemetry_sdk::{Resource, trace::SdkTracerProvider};
+
     let otlp_endpoint = std::env::var("OPENTELEMETRY_ENDPOINT_URL")
-        .expect("Need a otel tracing collector configured");
+        .expect("Need a otel tracing collector configured via OPENTELEMETRY_ENDPOINT_URL");
 
-    let channel = tonic::transport::Channel::from_shared(otlp_endpoint)
-        .unwrap()
-        .connect()
-        .await
-        .unwrap();
+    let exporter = SpanExporter::builder()
+        .with_tonic()
+        .with_endpoint(otlp_endpoint)
+        .build()
+        .expect("Failed to create OTLP span exporter");
 
-    opentelemetry_otlp::new_pipeline()
-        .tracing()
-        .with_exporter(
-            opentelemetry_otlp::new_exporter()
-                .tonic()
-                .with_channel(channel),
+    SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .with_resource(
+            Resource::builder()
+                .with_service_name("restate-operator")
+                .build(),
         )
-        .with_trace_config(opentelemetry::sdk::trace::config().with_resource(
-            opentelemetry::sdk::Resource::new(vec![opentelemetry::KeyValue::new(
-                "service.name",
-                "restate-operator",
-            )]),
-        ))
-        .install_batch(opentelemetry::runtime::Tokio)
-        .unwrap()
+        .build()
 }
 
 /// Initialize tracing
-pub async fn init() {
+pub fn init() {
     // Setup tracing layers
     #[cfg(feature = "telemetry")]
-    let telemetry = tracing_opentelemetry::layer().with_tracer(init_tracer().await);
+    let telemetry = {
+        use opentelemetry::trace::TracerProvider;
+        let provider = init_tracer_provider();
+        let tracer = provider.tracer("restate-operator");
+        // Set the global tracer provider so it stays alive
+        opentelemetry::global::set_tracer_provider(provider);
+        tracing_opentelemetry::layer().with_tracer(tracer)
+    };
+
     let logger = tracing_subscriber::fmt::layer().compact();
     let env_filter = EnvFilter::try_from_default_env()
         .or(EnvFilter::try_new("info"))
@@ -73,11 +77,11 @@ mod test {
     // This test only works when telemetry is initialized fully
     // and requires OPENTELEMETRY_ENDPOINT_URL pointing to a valid server
     #[cfg(feature = "telemetry")]
-    #[tokio::test]
+    #[test]
     #[ignore = "requires a trace exporter"]
-    async fn get_trace_id_returns_valid_traces() {
+    fn get_trace_id_returns_valid_traces() {
         use super::*;
-        super::init().await;
+        super::init();
         #[tracing::instrument(name = "test_span")] // need to be in an instrumented fn
         fn test_trace_id() -> Option<TraceId> {
             get_trace_id()

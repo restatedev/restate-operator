@@ -60,11 +60,10 @@ The `RestateCluster` CRD defines a Restate cluster. The operator watches for the
 **All other traffic is denied by default.**
 
 The default behaviour can be disabled with `spec.security.disableNetworkPolicies: true`.
-Alternatively, you can add new allowed inbound callers of the Restate ports with `spec.security.networkPeers.{ingress,admin,metrics}`, which are arrays of [`NetworkPolicyPeer`](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#networkpolicypeer-v1-networking-k8s-io).
+Alternatively, you can add new allowed inbound callers of the Restate ports with `spec.security.networkPeers.{ingress,admin,node}`, which are arrays of [`NetworkPolicyPeer`](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#networkpolicypeer-v1-networking-k8s-io).
 You can allow new outbound destinations by adding to the `spec.security.networkEgressRules` list, which is an array of [`NetworkPolicyEgressRule`](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#networkpolicyegressrule-v1-networking-k8s-io).
 
-**NOTE**: Each cluster is created in its own namespace (enforced by the operator). Do not create the namespace manually,
-and do not use the same namespace that the operator is in.
+**NOTE**: Each cluster is created in its own namespace. Naming the cluster after an existing Namespace is supported, but deploying into namespaces with other applications is not recommended.
 
 #### Minimal Example
 
@@ -76,10 +75,14 @@ kind: RestateCluster
 metadata:
   name: restate-test
 spec:
+  cluster:
+    autoProvision: true
   compute:
     image: restatedev/restate:1.5
   storage:
     storageRequestBytes: 2147483648 # 2 GiB
+  config: |
+    auto-provision = false
 ```
 
 For the full schema as a [Pkl](https://pkl-lang.org/) template see [`crd/RestateCluster.pkl`](./crd/RestateCluster.pkl).
@@ -93,6 +96,7 @@ More examples are available just below the spec that follows.
 | `compute` | `object` | Compute configuration. See details below. |
 | `storage` | `object` | Storage configuration. See details below. |
 | `security` | `object` | Security configuration. See details below. |
+| `cluster` | `object` | Cluster-wide configuration options. See details below. |
 | `config` | `string` | TOML-encoded Restate config file. See details below. |
 | `clusterName` | `string` | Sets the `RESTATE_CLUSTER_NAME` environment variable. Defaults to the object name. |
 
@@ -126,13 +130,35 @@ More examples are available just below the spec that follows.
 
 ---
 
+#### `spec.cluster`
+
+| Field | Type | Description |
+|---|---|---|
+| `autoProvision` | `boolean` | If `true`, the operator will automatically provision the cluster via gRPC after pods are running. Defaults to `false`. |
+
+> ⚠️ **Important**: When `cluster.autoProvision` is set to `true`, you **must** disable all other forms of cluster provisioning:
+> - Set `auto-provision = false` in `spec.config`, or set the `RESTATE_AUTO_PROVISION=false` environment variable
+> - Do not use any sidecar containers or init containers that run `restatectl provision`
+> - Do not manually provision the cluster
+>
+> Running multiple provisioning methods simultaneously can lead to split brain situations in the Restate cluster.
+
+When enabled, the operator will:
+1. Wait for the `restate-0` pod to be in `Running` state
+2. Call the Restate gRPC `ProvisionCluster` API
+3. Set `status.provisioned = true` to avoid repeated provisioning attempts
+
+This feature is particularly useful for Raft-based metadata clusters where manual provisioning was previously required.
+
+---
+
 #### `spec.security`
 
 | Field | Type | Description |
 |---|---|---|
 | `disableNetworkPolicies` | `boolean` | If `true`, the operator will not create any network policies. Defaults to `false`. |
 | `allowOperatorAccessToAdmin` | `boolean` | If `true`, adds a rule to allow the operator to access the admin API. Needed for `RestateDeployment`. Defaults to `true`. |
-| `networkPeers` | `object` | Defines network peers to allow inbound access to `admin`, `ingress`, and `metrics` ports. |
+| `networkPeers` | `object` | Defines network peers to allow inbound access to `admin`, `ingress`, and `node` ports. |
 | `networkEgressRules` | `array` | Custom egress rules for outbound traffic from the cluster. |
 | `serviceAccountAnnotations` | `object` | Annotations to add to the `ServiceAccount`. |
 | `serviceAnnotations`| `object` | Annotations to add to the `Service`. |
@@ -192,7 +218,7 @@ While the `config` field accepts any valid [Restate server configuration](https:
     *   `destination`: The S3 URI where snapshots will be stored (e.g., `s3://my-bucket/snapshots`).
     *   `snapshot-interval-num-records`: How many log records are processed in a particular partition before a new snapshot is taken.
 
-*   **`auto-provision`**: A boolean that controls whether the cluster should automatically initialize itself. This should be `true` for object-store metadata but `false` when using the `replicated` (Raft) metadata store, which requires manual provisioning.
+*   **`auto-provision`**: A boolean that controls whether the Restate node should automatically initialize itself. **When using `cluster.autoProvision: true` (recommended), this must be set to `false`.** If not using operator-managed provisioning, this can be `true` for object-store metadata but must be `false` for `replicated` (Raft) metadata store.
 
 *   **Resource Management**:
     *   `rocksdb-total-memory-size`: Sets the total memory allocated to RocksDB, which Restate uses for its internal state storage. Typically 75% of the memory requests for the pod is appropriate.
@@ -208,6 +234,8 @@ kind: RestateCluster
 metadata:
   name: restate-test
 spec:
+  cluster:
+    autoProvision: true
   compute:
     replicas: 3
     image: restatedev/restate:1.5
@@ -221,8 +249,7 @@ spec:
         "metadata-server",
         "http-ingress",
     ]
-    # auto-provision should not be turned on when using the raft metadata store
-    # provision with kubectl -n restate-test exec -it restate-0 -- restatectl provision
+    # auto-provision must be false when using operator-managed provisioning
     auto-provision = false
     default-num-partitions = 128
     default-replication = 2
@@ -251,6 +278,8 @@ kind: RestateCluster
 metadata:
   name: restate-test
 spec:
+  cluster:
+    autoProvision: true
   compute:
     replicas: 3
     image: restatedev/restate:1.5
@@ -267,7 +296,8 @@ spec:
         "log-server",
         "http-ingress",
     ]
-    auto-provision = true
+    # auto-provision must be false when using operator-managed provisioning
+    auto-provision = false
     default-num-partitions = 128
     default-replication = 2
 

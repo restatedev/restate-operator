@@ -13,21 +13,21 @@ use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::api::policy::v1::PodDisruptionBudget;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{APIGroup, ObjectMeta};
 
-use kube::core::object::HasStatus;
 use kube::core::PartialObjectMeta;
+use kube::core::object::HasStatus;
 use kube::runtime::events::Recorder;
 use kube::runtime::reflector::{ObjectRef, Store};
-use kube::runtime::{metadata_watcher, reflector, watcher, Predicate, WatchStreamExt};
+use kube::runtime::{Predicate, WatchStreamExt, metadata_watcher, reflector, watcher};
 use kube::{
+    Resource,
     api::{Api, ListParams, Patch, PatchParams, ResourceExt},
     client::Client,
     runtime::{
         controller::{Action, Controller},
         events::{Event, EventType},
-        finalizer::{finalizer, Event as Finalizer},
+        finalizer::{Event as Finalizer, finalizer},
         watcher::Config,
     },
-    Resource,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -37,11 +37,11 @@ use tracing::*;
 use crate::controllers::{Diagnostics, State};
 use crate::resources::podidentityassociations::PodIdentityAssociation;
 use crate::resources::restateclusters::{
-    RestateCluster, RestateClusterCondition, RestateClusterStatus, RESTATE_CLUSTER_FINALIZER,
+    RESTATE_CLUSTER_FINALIZER, RestateCluster, RestateClusterCondition, RestateClusterStatus,
 };
 use crate::resources::secretproviderclasses::SecretProviderClass;
 use crate::resources::securitygrouppolicies::SecurityGroupPolicy;
-use crate::{telemetry, Error, Metrics, Result};
+use crate::{Error, Metrics, Result, telemetry};
 
 use super::reconcilers::compute::reconcile_compute;
 use super::reconcilers::network_policies::reconcile_network_policies;
@@ -168,28 +168,48 @@ impl RestateCluster {
             ..Default::default()
         };
 
-        if let Some(ns) = nss.get_metadata_opt(name).await? {
-            // check to see if extant namespace is managed by us
-            if !ns
+        // Check if namespace exists
+        if let Some(existing_ns) = nss.get_metadata_opt(name).await? {
+            // Check if we own the namespace
+            let we_own_namespace = existing_ns
                 .metadata
                 .owner_references
                 .map(|orefs| orefs.contains(&oref))
-                .unwrap_or(false)
-            {
-                return Err(Error::NameConflict);
+                .unwrap_or(false);
+
+            if we_own_namespace {
+                // We own it, apply our full metadata including ownership
+                apply_namespace(
+                    &nss,
+                    Namespace {
+                        metadata: object_meta(&base_metadata, name),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            } else {
+                // We don't own it, just use it without mutation
             }
+        } else {
+            // Namespace doesn't exist, create it with full ownership
+            apply_namespace(
+                &nss,
+                Namespace {
+                    metadata: object_meta(&base_metadata, name),
+                    ..Default::default()
+                },
+            )
+            .await?;
         }
 
-        apply_namespace(
-            &nss,
-            Namespace {
-                metadata: object_meta(&base_metadata, name),
-                ..Default::default()
-            },
+        reconcile_network_policies(
+            &ctx,
+            name,
+            &base_metadata,
+            self.spec.security.as_ref(),
+            self.spec.cluster.as_ref(),
         )
         .await?;
-
-        reconcile_network_policies(&ctx, name, &base_metadata, self.spec.security.as_ref()).await?;
 
         let signing_key = reconcile_signing_key(
             &ctx,
@@ -202,7 +222,15 @@ impl RestateCluster {
         )
         .await?;
 
-        reconcile_compute(&ctx, name, &base_metadata, &self.spec, signing_key).await?;
+        reconcile_compute(
+            &ctx,
+            name,
+            &base_metadata,
+            &self.spec,
+            self.status.as_ref(),
+            signing_key,
+        )
+        .await?;
 
         Ok(())
     }
@@ -212,6 +240,9 @@ impl RestateCluster {
 
         let name = self.name_any();
 
+        // Track whether we should set provisioned = true in status
+        let mut set_provisioned = false;
+
         let (result, message, reason, status) = match self.reconcile(ctx, &name).await {
             Ok(()) => {
                 // If no events were received, check back every 5 minutes
@@ -219,9 +250,22 @@ impl RestateCluster {
 
                 (
                     Ok(action),
-                    "Restate Cluster provisioned successfully".into(),
-                    "Provisioned".into(),
+                    "Restate Cluster reconciled successfully".into(),
+                    "Reconciled".into(),
                     "True".into(),
+                )
+            }
+            Err(Error::Provisioned) => {
+                // Cluster was successfully provisioned, mark it in status and requeue immediately
+                set_provisioned = true;
+                info!("Cluster provisioned successfully, updating status");
+
+                (
+                    // Requeue immediately to continue reconciliation
+                    Ok(Action::requeue(Duration::ZERO)),
+                    "Cluster provisioned, continuing reconciliation".into(),
+                    "Provisioned".into(),
+                    "False".into(),
                 )
             }
             Err(Error::NotReady {
@@ -238,6 +282,18 @@ impl RestateCluster {
                     Ok(Action::requeue(requeue_after)),
                     message,
                     reason,
+                    "False".into(),
+                )
+            }
+            Err(Error::ProvisioningFailed(ref message)) => {
+                // Retry provisioning failures after 5 seconds - transient gRPC failures
+                // should recover quickly once the pod's gRPC server is fully initialized
+                warn!("Cluster provisioning failed, will retry: {message}");
+
+                (
+                    Ok(Action::requeue(Duration::from_secs(5))),
+                    format!("Provisioning failed: {message}"),
+                    "ProvisioningFailed".into(),
                     "False".into(),
                 )
             }
@@ -276,12 +332,18 @@ impl RestateCluster {
             ready.last_transition_time = Some(now)
         }
 
-        // always overwrite status object with what we saw
+        // Preserve the provisioned status from the existing status, or set it if we just provisioned
+        let provisioned = if set_provisioned {
+            Some(true)
+        } else {
+            self.status.as_ref().and_then(|s| s.provisioned)
+        };
         let new_status = Patch::Apply(json!({
             "apiVersion": "restate.dev/v1",
             "kind": "RestateCluster",
             "status": RestateClusterStatus {
                 conditions: Some(vec![ready]),
+                provisioned,
             }
         }));
         let ps = PatchParams::apply("restate-operator").force();
@@ -360,7 +422,9 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     let spc_api = Api::<SecretProviderClass>::all(client.clone());
 
     if state.aws_pod_identity_association_cluster.is_some() && !pod_identity_association_installed {
-        error!("PodIdentityAssociation is not available on apiserver, but a pod identity association cluster was provided. Is the CRD installed?");
+        error!(
+            "PodIdentityAssociation is not available on apiserver, but a pod identity association cluster was provided. Is the CRD installed?"
+        );
         std::process::exit(1);
     }
 

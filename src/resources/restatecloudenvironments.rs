@@ -4,21 +4,17 @@ use k8s_openapi::api::core::v1::{
     Affinity, EnvVar, PodDNSConfig, ResourceRequirements, Secret, Toleration,
 };
 use kube::{
+    CustomResource, KubeSchema,
     runtime::reflector::{ObjectRef, Store},
-    CELSchema, CustomResource,
 };
-use schemars::{
-    schema::{Schema, SchemaObject},
-    JsonSchema,
-};
+use schemars::{JsonSchema, Schema};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use url::Url;
 
 pub static RESTATE_CLOUD_ENVIRONMENT_FINALIZER: &str = "cloudenvironments.restate.dev";
 
 /// Represents the configuration of a Restate Cloud environment
-#[derive(CustomResource, CELSchema, Deserialize, Serialize, Clone, Debug)]
+#[derive(CustomResource, KubeSchema, Deserialize, Serialize, Clone, Debug)]
 #[kube(
     kind = "RestateCloudEnvironment",
     group = "restate.dev",
@@ -42,55 +38,34 @@ pub struct RestateCloudEnvironmentSpec {
 
 // Hoisted from the derived implementation so that we can restrict names to be valid Service names
 impl schemars::JsonSchema for RestateCloudEnvironment {
-    fn schema_name() -> String {
-        "RestateCloudEnvironment".to_owned()
+    fn schema_name() -> Cow<'static, str> {
+        "RestateCloudEnvironment".into()
     }
     fn schema_id() -> Cow<'static, str> {
         "restate_operator::resources::restatecloudenvironments::RestateCloudEnvironment".into()
     }
-    fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> Schema {
-        {
-            let mut schema_object = SchemaObject {
-                instance_type: Some(
-                    schemars::schema::InstanceType::Object.into(),
-                ),
-                metadata: Some(Box::new(schemars::schema::Metadata {
-                    description: Some(
-                        "RestateCloudEnvironment configures a connection between this Kubernetes cluster and a Restate Cloud Environment."
-                            .to_owned(),
-                    ),
-                    ..Default::default()
-                })),
-                ..Default::default()
-            };
-            let object_validation = schema_object.object();
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> Schema {
+        let spec_schema = generator.subschema_for::<RestateCloudEnvironmentSpec>();
 
-            object_validation
-                .properties
-                .insert(
-                    "metadata".to_owned(),
-                    serde_json::from_value(json!({
-                                "type": "object",
-                                "properties": {
-                                    "name": {
-                                        "type": "string",
-                                        "minLength": 1,
-                                        "maxLength": (63 - "tunnel-".len()),
-                                        "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
-                                    }
-                                }
-                            })).unwrap(),
-                );
-            object_validation.required.insert("metadata".to_owned());
-
-            object_validation.properties.insert(
-                "spec".to_owned(),
-                gen.subschema_for::<RestateCloudEnvironmentSpec>(),
-            );
-            object_validation.required.insert("spec".to_owned());
-
-            Schema::Object(schema_object)
-        }
+        schemars::json_schema!({
+            "type": "object",
+            "description": "RestateCloudEnvironment configures a connection between this Kubernetes cluster and a Restate Cloud Environment.",
+            "properties": {
+                "metadata": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": (63 - "tunnel-".len()),
+                            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+                        }
+                    }
+                },
+                "spec": spec_schema
+            },
+            "required": ["metadata", "spec"]
+        })
     }
 }
 
@@ -190,7 +165,7 @@ pub struct SecretReference {
     pub key: String,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug, CELSchema)]
+#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TunnelSpec {
     /// If true, the tunnel pods will expose unauthenticated access to the Restate Cloud environment on ports 8080 (ingress) and 9070 (admin).
@@ -221,25 +196,24 @@ pub struct TunnelSpec {
     pub affinity: Option<Affinity>,
 }
 
-fn env_schema(g: &mut schemars::gen::SchemaGenerator) -> Schema {
-    serde_json::from_value(json!({
-        "items": EnvVar::json_schema(g),
+fn env_schema(g: &mut schemars::SchemaGenerator) -> Schema {
+    let env_var_schema = g.subschema_for::<EnvVar>();
+    schemars::json_schema!({
+        "items": env_var_schema,
         "nullable": true,
         "type": "array",
         "x-kubernetes-list-map-keys": ["name"],
         "x-kubernetes-list-type": "map"
-    }))
-    .unwrap()
+    })
 }
 
-fn node_selector_schema(_g: &mut schemars::gen::SchemaGenerator) -> Schema {
-    serde_json::from_value(json!({
+fn node_selector_schema(_g: &mut schemars::SchemaGenerator) -> Schema {
+    schemars::json_schema!({
         "description": "If specified, a node selector for the pod",
         "additionalProperties": {
             "type": "string"
         },
         "type": "object",
         "x-kubernetes-map-type": "atomic"
-    }))
-    .unwrap()
+    })
 }

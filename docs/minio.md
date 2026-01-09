@@ -93,6 +93,8 @@ kind: RestateCluster
 metadata:
   name: restate-minio-test
 spec:
+  clusterProvisioning:
+    enabled: true
   compute:
     replicas: 3
     image: restatedev/restate:1.5
@@ -117,8 +119,7 @@ spec:
     storageRequestBytes: 2147483648 # 2 GiB
   config: |
     roles = [ "worker", "admin", "log-server", "metadata-server" , "http-ingress" ]
-    # auto-provision should not be turned on when using the raft metadata store
-    # provision with kubectl -n restate-test exec -it restate-0 -- restatectl provision
+    # auto-provision must be false when using operator-managed provisioning
     auto-provision = false
     default-num-partitions = 128
     default-replication = 2

@@ -2,12 +2,13 @@ use std::{collections::BTreeMap, path::PathBuf};
 
 use k8s_openapi::api::core::v1::{CSIVolumeSource, KeyToPath, SecretVolumeSource, Volume};
 use kube::{
-    api::{DeleteParams, ObjectMeta, Patch, PatchParams},
     Api,
+    api::{DeleteParams, ObjectMeta, Patch, PatchParams},
 };
 use tracing::{debug, warn};
 
 use crate::{
+    Error,
     controllers::restatecluster::controller::Context,
     resources::{
         restateclusters::{
@@ -15,7 +16,6 @@ use crate::{
         },
         secretproviderclasses::{SecretProviderClass, SecretProviderClassSpec},
     },
-    Error,
 };
 
 use super::object_meta;
@@ -26,7 +26,9 @@ const SECRET_PROVIDER_CLASS_NAME: &str = "request-signing-key-v1";
 pub enum InvalidSigningKeyError {
     #[error("Invalid signing protocol version; only 'v1' is supported")]
     InvalidVersion,
-    #[error("Multiple sources provided for signing private key; only one of 'secret', 'secretProvider' can be provided")]
+    #[error(
+        "Multiple sources provided for signing private key; only one of 'secret', 'secretProvider' can be provided"
+    )]
     MultipleSourcesProvided,
 }
 
@@ -72,7 +74,9 @@ pub async fn reconcile_signing_key(
                     .await?,
                 ))
             } else {
-                warn!("Ignoring secret provider signing key source as the SecretProviderClass CRD is not installed");
+                warn!(
+                    "Ignoring secret provider signing key source as the SecretProviderClass CRD is not installed"
+                );
                 Ok(None)
             }
         }
