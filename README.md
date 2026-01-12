@@ -318,7 +318,39 @@ See [docs/minio.md](./docs/minio.md)
 
 ### `RestateDeployment`
 
-The `RestateDeployment` CRD is similar to a standard Kubernetes `Deployment` but is tailored for deploying Restate services. It manages `ReplicaSet` and `Service` objects for each version of your service, which is crucial for Restate's versioning and draining capabilities. This ensures that old service versions remain available until all in-flight invocations are completed.
+The `RestateDeployment` CRD is similar to a standard Kubernetes `Deployment` but is tailored for deploying Restate services. It manages `ReplicaSet` and `Service` objects (or `Configuration` and `Route` objects in Knative mode) for each version of your service, which is crucial for Restate's versioning and draining capabilities. This ensures that old service versions remain available until all in-flight invocations are completed.
+
+#### Deployment Identity
+
+The Restate operator uses **deployment identity** to determine whether to create a new Restate deployment or update an existing one:
+
+**ReplicaSet Mode:**
+- Always uses template hash as deployment identity
+- Every template change → new Restate deployment (versioned update only)
+- Does NOT support in-place updates
+
+**Knative Mode with Explicit Tag:**
+- Tag value determines deployment ID
+- Same tag → same Restate deployment (in-place update)
+- Different tag → new Restate deployment (versioned update)
+
+**Knative Mode without Tag:**
+- Uses template hash as tag (auto-versioning)
+- Every template change → new tag → new deployment
+
+#### In-Place vs. Versioned Updates
+
+**In-Place Update:**
+- Same deployment identity
+- Updates implementation without changing deployment ID
+- Gradual rollout within the same deployment
+- Use for: Bug fixes, config changes, minor updates
+
+**Versioned Update:**
+- New deployment identity
+- Creates new deployment in Restate
+- Multiple deployments coexist temporarily
+- Use for: Major versions, breaking changes, parallel testing
 
 #### Example
 
