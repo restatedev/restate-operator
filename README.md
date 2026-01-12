@@ -254,14 +254,8 @@ spec:
     default-num-partitions = 128
     default-replication = 2
 
-    [metadata-server]
-    type = "replicated"
-
     [metadata-client]
     addresses = ["http://restate-cluster:5122/"]
-
-    [bifrost]
-    default-provider = "replicated"
 ```
 
 #### Advanced Example
@@ -305,9 +299,6 @@ spec:
     type = "object-store"
     path = "s3://some-bucket/metadata"
     # the same aws-* parameters as below are supported here
-
-    [bifrost]
-    default-provider = "replicated"
 
     [worker.snapshots]
     destination = "s3://some-bucket/snapshots"
