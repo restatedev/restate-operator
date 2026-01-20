@@ -896,26 +896,15 @@ pub async fn cleanup_old_configurations(
                     debug!(
                         "Force-deleting Restate deployment {config_deployment_id} as its associated with old Configuration {config_name} in namespace {namespace}"
                     );
-
-                    // Get admin URL and bearer token
-                    let admin_url = rsd.spec.restate.register.admin_url(&ctx.rce_store)?;
-                    let bearer_token = rsd.spec.restate.register.bearer_token(
-                        &ctx.rce_store,
-                        &ctx.secret_store,
-                        &ctx.operator_namespace,
-                    )?;
-
-                    let mut request = ctx.http_client.request(
-                        reqwest::Method::DELETE,
-                        admin_url
-                            .join(&format!("/deployments/{}?force=true", config_deployment_id))?,
-                    );
-
-                    if let Some(token) = bearer_token {
-                        request = request.bearer_auth(token);
-                    }
-
-                    let resp = request.send().await.map_err(Error::AdminCallFailed)?;
+                    let resp = ctx
+                        .request(
+                            reqwest::Method::DELETE,
+                            &rsd.spec.restate.register,
+                            &format!("/deployments/{config_deployment_id}?force=true"),
+                        )?
+                        .send()
+                        .await
+                        .map_err(Error::AdminCallFailed)?;
 
                     // for idempotency we have to allow 404
                     if resp.status() != reqwest::StatusCode::NOT_FOUND {
@@ -923,7 +912,7 @@ pub async fn cleanup_old_configurations(
                     }
                 }
 
-                // Delete Configuration and its associated Route
+                debug!("Deleting old Configuration {config_name} in namespace {namespace}");
                 delete_configuration(ctx, namespace, &config_name).await?;
 
                 continue;
