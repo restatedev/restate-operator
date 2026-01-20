@@ -56,19 +56,17 @@ spec:
               ensuring old versions remain available until all invocations against them are complete.
             properties:
               deploymentMode:
-                anyOf:
-                - description: Deployment mode determines how the RestateDeployment runs workloads
-                  enum:
-                  - replicaset
-                  - knative
-                  type: string
-                - enum:
-                  - null
-                  nullable: true
                 description: |-
                   Deployment mode: replicaset (default) or knative.
-                  If not specified and knative field is present, defaults to knative mode.
                   This field is immutable after creation.
+                enum:
+                - replicaset
+                - knative
+                nullable: true
+                type: string
+                x-kubernetes-validations:
+                - message: deploymentMode is immutable after creation
+                  rule: self == oldSelf
               knative:
                 description: |-
                   Knative-specific configuration.

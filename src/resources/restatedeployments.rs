@@ -96,9 +96,10 @@ pub struct KnativeDeploymentSpec {
 #[serde(rename_all = "camelCase")]
 pub struct RestateDeploymentSpec {
     /// Deployment mode: replicaset (default) or knative.
-    /// If not specified and knative field is present, defaults to knative mode.
     /// This field is immutable after creation.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "deployment_mode_schema")]
+    #[x_kube(validation = Rule::new("self == oldSelf").message("deploymentMode is immutable after creation"))]
     pub deployment_mode: Option<DeploymentMode>,
 
     /// Knative-specific configuration.
@@ -140,6 +141,15 @@ fn default_replicas() -> i32 {
 
 fn default_revision_history_limit() -> i32 {
     10
+}
+
+fn deployment_mode_schema(_g: &mut schemars::SchemaGenerator) -> Schema {
+    schemars::json_schema!({
+        "description": "Deployment mode determines how the RestateDeployment runs workloads",
+        "enum": ["replicaset", "knative"],
+        "type": "string",
+        "nullable": true
+    })
 }
 
 fn label_selector_schema(_g: &mut schemars::SchemaGenerator) -> Schema {
