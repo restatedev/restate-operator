@@ -1005,11 +1005,6 @@ fn get_initial_scale(config: &Configuration) -> i32 {
 /// Delete Configuration using Foreground cascading deletion
 /// This ensures the dependent Route is fully cleaned up before the Configuration is removed
 async fn delete_configuration(ctx: &Context, namespace: &str, config_name: &str) -> Result<()> {
-    debug!(
-        configuration = %config_name,
-        namespace = %namespace,
-        "Deleting old Configuration (Foreground Cascading)"
-    );
     let config_api: Api<Configuration> = Api::namespaced(ctx.client.clone(), namespace);
 
     // Use Foreground cascading deletion to ensure Route is cleaned up first
