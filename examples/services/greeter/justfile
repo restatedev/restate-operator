@@ -1,0 +1,8 @@
+export DOCKER_PROGRESS := env_var_or_default('DOCKER_PROGRESS', 'auto')
+
+# Note: use "dev.local" during local development to skip Knative tag resolution,
+# which otherwise requires that the image be pushed to a registry.
+image := "dev.local/restatedev/restate-operator/greeter:local"
+
+docker:
+    docker build . --tag={{ image }} --progress='{{ DOCKER_PROGRESS }}' --load

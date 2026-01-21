@@ -1,0 +1,50 @@
+apiVersion: restate.dev/v1beta1
+kind: RestateDeployment
+metadata:
+  name: greeter-knative
+  namespace: default
+spec:
+  deploymentMode: knative
+
+  # Keep 1 most recent inactive Configuration
+  revisionHistoryLimit: 1
+
+  knative:
+    # No tag specified → uses template hash for automatic versioning
+    # tag: <not specified>
+
+    minScale: 1
+    maxScale: 10
+    target: 50
+
+  template:
+    metadata:
+      labels:
+        app: greeter-knative
+    spec:
+      containers:
+        - name: greeter
+          # Change this image tag to trigger a new versioned deployment
+          image: dev.local/restatedev/restate-operator/greeter:local
+          imagePullPolicy: Never
+          ports:
+            # Knative only allows port names: "h2c" or "http1"
+            - name: h2c
+              containerPort: 9080
+              protocol: TCP
+          env:
+            - name: SERVICE_VERSION
+              value: "auto"  # Indicates auto-versioning
+            - name: ANTIDOTE
+              value: "cure"
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
+
+  restate:
+    register:
+      cluster: restate

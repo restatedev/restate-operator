@@ -57,7 +57,7 @@ pub enum Error {
     #[error("Failed to make Restate admin API call: {0}")]
     AdminCallFailed(reqwest::Error),
 
-    #[error("Encountered a ReplicaSet hash collision, will retry with a new template hash")]
+    #[error("Encountered a hash collision, will retry with a new template hash")]
     HashCollision,
 
     #[error(
@@ -69,6 +69,20 @@ pub enum Error {
         "This RestateDeployment is backing recently-active versions in Restate. It will be removed after the drain delay period."
     )]
     DeploymentDraining { requeue_after: Option<Duration> },
+
+    #[error("Knative Configuration is not ready: {message}")]
+    ConfigurationNotReady {
+        message: String,
+        reason: String,
+        requeue_after: Option<Duration>,
+    },
+
+    #[error("Knative Route is not ready: {message}")]
+    RouteNotReady {
+        message: String,
+        reason: String,
+        requeue_after: Option<Duration>,
+    },
 
     #[error(transparent)]
     InvalidUrl(#[from] url::ParseError),
@@ -94,6 +108,8 @@ impl Error {
             Error::HashCollision => "HashCollision",
             Error::DeploymentInUse => "DeploymentInUse",
             Error::DeploymentDraining { .. } => "DeploymentDraining",
+            Error::ConfigurationNotReady { .. } => "ConfigurationNotReady",
+            Error::RouteNotReady { .. } => "RouteNotReady",
             Error::InvalidUrl { .. } => "InvalidUrl",
             Error::ProvisioningFailed(_) => "ProvisioningFailed",
             Error::Provisioned => "Provisioned",

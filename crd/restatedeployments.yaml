@@ -13,7 +13,7 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.replicas
+    - jsonPath: .status.desiredReplicas
       name: Desired
       type: integer
     - jsonPath: .status.replicas
@@ -28,6 +28,10 @@ spec:
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
+    - jsonPath: .status.deploymentId
+      name: Deployment ID
+      priority: 1
+      type: string
     - jsonPath: .spec.template.spec.containers[*].name
       name: Containers
       priority: 1
@@ -51,15 +55,83 @@ spec:
               It maintains ReplicaSets and Services for each version to support Restate's versioning requirements,
               ensuring old versions remain available until all invocations against them are complete.
             properties:
+              deploymentMode:
+                description: |-
+                  Deployment mode: replicaset (default) or knative.
+                  This field is immutable after creation.
+                enum:
+                - replicaset
+                - knative
+                nullable: true
+                type: string
+                x-kubernetes-validations:
+                - message: deploymentMode is immutable after creation
+                  rule: self == oldSelf
+              knative:
+                description: |-
+                  Knative-specific configuration.
+                  When specified, enables Knative Serving mode.
+                nullable: true
+                properties:
+                  maxScale:
+                    description: 'Maximum number of replicas (default: unlimited)'
+                    format: int32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  minScale:
+                    description: 'Minimum number of replicas (default: 0 for scale-to-zero)'
+                    format: int32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  tag:
+                    description: |-
+                      Deployment tag - determines Restate deployment identity.
+
+                      A Restate deployment is a specific, versioned instance of your service code.
+                      Each deployment is immutable: once registered with Restate, its endpoint and
+                      identity (deployment ID) must not change.
+
+                      The tag acts as a stable label that groups multiple Knative Revisions under
+                      a single Restate deployment:
+                      - **Same tag**: In-place updates create new Knative Revisions within the same
+                        Restate deployment (no new registration)
+                      - **Changed tag**: Creates a new Restate deployment with a new deployment ID
+                        (versioned update)
+                      - **No tag specified**: Uses template hash as tag, causing every template change
+                        to create a new Restate deployment
+
+                      The tag must be a valid DNS-1035 label: a lowercase RFC 1123 label that consists of
+                      lower case alphanumeric characters or '-', and must start and end with an alphanumeric
+                      character (e.g. 'my-name',  or '123-abc', regex used for validation is
+                      '[a-z]([-a-z0-9]*[a-z0-9])?').
+
+                      Example: tag "v1-0" → Configuration "my-service-v1-0" → Restate deployment "dp_abc123"
+                               Multiple Knative Revisions (00001, 00002, ...) all serve this deployment.
+                    nullable: true
+                    pattern: ^[a-z]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  target:
+                    description: 'Target concurrent requests per replica (default: 100)'
+                    format: int32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                type: object
               minReadySeconds:
-                description: Minimum number of seconds for which a newly created pod should be ready.
+                description: |-
+                  Minimum number of seconds for which a newly created pod should be ready.
+                  Only used in ReplicaSet mode.
                 format: int32
                 minimum: 0.0
                 nullable: true
                 type: integer
               replicas:
                 default: 1
-                description: Number of desired pods. Defaults to 1.
+                description: |-
+                  Number of desired pods. Defaults to 1.
+                  Only used in ReplicaSet mode.
                 format: int32
                 minimum: 0.0
                 type: integer
@@ -127,12 +199,16 @@ spec:
                 type: object
               revisionHistoryLimit:
                 default: 10
-                description: The number of old ReplicaSets to retain to allow rollback. Defaults to 10.
+                description: |-
+                  The number of old ReplicaSets to retain to allow rollback. Defaults to 10.
+                  Only used in ReplicaSet mode.
                 format: int32
                 minimum: 0.0
                 type: integer
               selector:
-                description: Label selector for pods. Must match the pod template's labels.
+                description: |-
+                  Label selector for pods. Must match the pod template's labels.
+                  Only used in ReplicaSet mode.
                 properties:
                   matchExpressions:
                     description: matchExpressions is a list of label selector requirements. The requirements are ANDed.
@@ -198,14 +274,16 @@ spec:
                   spec:
                     description: |-
                       Specification of the desired behavior of the pod. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status.
-                      The contents of this field are passed through directly from the operator to the created ReplicaSet and are not validated.
+
+                      The contents of this field are passed through directly from the operator to the created workload:
+                      - **ReplicaSet mode**: Passed to the ReplicaSet's pod template spec.
+                      - **Knative mode**: Passed to the Configuration's revision template spec. This supports standard PodSpec fields (containers, serviceAccountName, volumes, etc.) as well as Knative-specific fields (timeoutSeconds, containerConcurrency, etc.).
                     x-kubernetes-preserve-unknown-fields: true
                 required:
                 - spec
                 type: object
             required:
             - restate
-            - selector
             - template
             type: object
           status:
@@ -220,7 +298,7 @@ spec:
                 nullable: true
                 type: integer
               collisionCount:
-                description: Count of hash collisions for the RestateDeployment. The controller uses this field as a collision avoidance mechanism when it needs to create the name for the newest ReplicaSet.
+                description: Count of hash collisions for the RestateDeployment. The controller uses this field as a collision avoidance mechanism when it needs to create the name for the newest ReplicaSet or Configuration.
                 format: int32
                 nullable: true
                 type: integer
@@ -254,6 +332,39 @@ spec:
                   type: object
                 nullable: true
                 type: array
+              deploymentId:
+                description: Restate deployment ID for the current tag
+                nullable: true
+                type: string
+              desiredReplicas:
+                description: |-
+                  Desired number of replicas.
+                  - For ReplicaSet mode: reflects spec.replicas
+                  - For Knative mode: reflects revision.status.desired_replicas from latest revision
+                format: int32
+                nullable: true
+                type: integer
+              knative:
+                description: Knative-specific status
+                nullable: true
+                properties:
+                  configurationName:
+                    description: Name of the active Configuration for the current tag
+                    nullable: true
+                    type: string
+                  latestRevision:
+                    description: Latest ready revision name for the current Configuration
+                    nullable: true
+                    type: string
+                  routeName:
+                    description: Name of the active Route for the current tag
+                    nullable: true
+                    type: string
+                  url:
+                    description: Default URL for the current deployment
+                    nullable: true
+                    type: string
+                type: object
               labelSelector:
                 description: The label selector of the RestateDeployment as a string, for `kubectl get rsd -o wide`
                 nullable: true

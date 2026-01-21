@@ -18,9 +18,11 @@ use kube::core::subresource::Scale;
 use kube::runtime::controller::Action;
 use kube::runtime::events::{Event, EventType, Recorder};
 use kube::runtime::finalizer::{Event as Finalizer, finalizer};
-use kube::runtime::reflector::Store;
+use kube::runtime::reflector::{ObjectRef, Store};
 use kube::runtime::watcher::Config;
-use kube::runtime::{WatchStreamExt, controller};
+use kube::runtime::{
+    Predicate, WatchStreamExt, controller, metadata_watcher, predicates, reflector, watcher,
+};
 
 use kube::Resource;
 use reqwest::Method;
@@ -30,8 +32,9 @@ use tokio::sync::RwLock;
 use tracing::*;
 use url::Url;
 
-use crate::controllers::{Diagnostics, State};
+use crate::controllers::{Diagnostics, State, prewarmed_reflector};
 use crate::metrics::Metrics;
+use crate::resources::knative::{Configuration, Revision, Route};
 use crate::resources::restatecloudenvironments::RestateCloudEnvironment;
 use crate::resources::restateclusters::RestateCluster;
 use crate::resources::restatedeployments::{
@@ -61,6 +64,10 @@ pub(super) struct Context {
     pub rce_store: Store<RestateCloudEnvironment>,
     /// Store for secrets in the same namespace as the operator
     pub secret_store: Store<Secret>,
+    /// Store for Knative Revisions
+    pub revision_store: Store<Revision>,
+    /// Store for Knative Configurations
+    pub configuration_store: Store<Configuration>,
     /// The namespace in which this operator runs
     pub operator_namespace: String,
     /// Diagnostics read by the web server
@@ -72,11 +79,14 @@ pub(super) struct Context {
 }
 
 impl Context {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         client: Client,
         replicasets_store: Store<ReplicaSet>,
         rce_store: Store<RestateCloudEnvironment>,
         secret_store: Store<Secret>,
+        revision_store: Store<Revision>,
+        configuration_store: Store<Configuration>,
         metrics: Metrics,
         state: State,
     ) -> Arc<Context> {
@@ -86,6 +96,8 @@ impl Context {
             replicasets_store,
             rce_store,
             secret_store,
+            revision_store,
+            configuration_store,
             operator_namespace: state.operator_namespace,
             metrics,
             diagnostics: state.diagnostics.clone(),
@@ -195,7 +207,12 @@ impl RestateDeployment {
         let deployment_name = self.name_any();
         let versioned_name = format!("{deployment_name}-{hash}");
 
-        let replicaset_selector = match &self.spec.selector.match_labels {
+        let replicaset_selector = match self
+            .spec
+            .selector
+            .as_ref()
+            .and_then(|s| s.match_labels.as_ref())
+        {
             None => BTreeMap::from([(POD_TEMPLATE_HASH_LABEL.to_owned(), hash.clone())]),
             Some(match_labels) => {
                 let mut match_labels = match_labels.clone();
@@ -429,6 +446,18 @@ impl RestateDeployment {
     }
 
     async fn reconcile_status(&self, ctx: Arc<Context>, namespace: &str) -> Result<Action> {
+        use crate::resources::restatedeployments::DeploymentMode;
+
+        // Check if Knative mode is enabled
+        let is_knative = matches!(self.spec.deployment_mode, Some(DeploymentMode::Knative));
+
+        trace!(
+            deployment_mode = if is_knative { "Knative" } else { "ReplicaSet" },
+            name = %self.metadata.name.as_deref().unwrap_or("unknown"),
+            namespace = %namespace,
+            "Determined deployment mode"
+        );
+
         let rsd_api: Api<RestateDeployment> = Api::namespaced(ctx.client.clone(), namespace);
 
         let now = chrono::Utc::now();
@@ -442,75 +471,205 @@ impl RestateDeployment {
             .and_then(|s| s.conditions.as_ref())
             .and_then(|c| c.iter().find(|cond| cond.r#type == "Ready"));
 
-        let (result, message, reason, status) = match self.reconcile(ctx, namespace).await {
-            Ok((current_replicaset, next_removal)) => {
-                let action = match next_removal {
-                    Some(next_removal) if next_removal < now => Action::requeue(Duration::ZERO), // immediate requeue
-                    Some(next_removal) => {
-                        let secs = (next_removal - now).num_seconds() as u64;
-                        if secs < 5 * 60 {
-                            Action::requeue(Duration::from_secs(secs))
-                        } else {
-                            Action::requeue(Duration::from_secs(5 * 60))
+        let (result, message, reason, status) = if is_knative {
+            // Delegate to Knative reconciler
+            match reconcilers::knative::reconcile_knative(&ctx, self, namespace, &mut rsd_status)
+                .await
+            {
+                Ok(next_removal) => {
+                    let action = match next_removal {
+                        Some(next_removal) if next_removal < now => Action::requeue(Duration::ZERO),
+                        Some(next_removal) => {
+                            let secs = (next_removal - now).num_seconds() as u64;
+                            if secs < 5 * 60 {
+                                Action::requeue(Duration::from_secs(secs))
+                            } else {
+                                Action::requeue(Duration::from_secs(5 * 60))
+                            }
                         }
-                    }
-                    None => Action::requeue(Duration::from_secs(5 * 60)),
-                };
+                        None => Action::requeue(Duration::from_secs(5 * 60)),
+                    };
 
-                status_from_replica_set(
-                    self.spec.replicas,
-                    &mut rsd_status,
-                    current_replicaset.status.as_ref(),
-                );
-
-                (
-                    Ok(action),
-                    "RestateDeployment is deployed".into(),
-                    "Deployed".into(),
-                    "True".into(),
-                )
-            }
-            Err(Error::DeploymentNotReady {
-                message,
-                reason,
-                requeue_after,
-                replica_set_status,
-            }) => {
-                let requeue_after = requeue_after.unwrap_or(Duration::from_secs(60));
-
-                status_from_replica_set(
-                    self.spec.replicas,
-                    &mut rsd_status,
-                    replica_set_status.as_deref(),
-                );
-
-                (
-                    Ok(Action::requeue(requeue_after)),
+                    (
+                        Ok(action),
+                        "RestateDeployment is deployed".into(),
+                        "Deployed".into(),
+                        "True".into(),
+                    )
+                }
+                Err(Error::RouteNotReady {
                     message,
                     reason,
-                    "False".into(),
-                )
-            }
-            Err(Error::HashCollision) => {
-                rsd_status.collision_count = Some(rsd_status.collision_count.unwrap_or(0) + 1);
-
-                (
-                    // requeue immediately, although in practice the status update should requeue us
-                    Ok(Action::requeue(Duration::ZERO)),
-                    "Encountered a ReplicaSet hash collision, will retry with a new template hash"
-                        .into(),
-                    "HashCollision".into(),
-                    "False".into(),
-                )
-            }
-            Err(err) => {
-                let message = err.to_string();
-                (
-                    Err(err),
+                    requeue_after,
+                }) => {
+                    let requeue_after = requeue_after.unwrap_or(Duration::from_secs(10));
+                    debug!(
+                        name = %self.metadata.name.as_deref().unwrap_or("unknown"),
+                        namespace = %namespace,
+                        reason = %reason,
+                        requeue_after_secs = %requeue_after.as_secs(),
+                        "Knative Route not ready, requeueing"
+                    );
+                    (
+                        Ok(Action::requeue(requeue_after)),
+                        message,
+                        "RouteNotReady".into(),
+                        "False".into(),
+                    )
+                }
+                Err(Error::ConfigurationNotReady {
                     message,
-                    "FailedReconcile".into(),
-                    "Unknown".into(),
-                )
+                    reason,
+                    requeue_after,
+                }) => {
+                    let requeue_after = requeue_after.unwrap_or(Duration::from_secs(10));
+                    debug!(
+                        name = %self.metadata.name.as_deref().unwrap_or("unknown"),
+                        namespace = %namespace,
+                        reason = %reason,
+                        requeue_after_secs = %requeue_after.as_secs(),
+                        "Knative Configuration not ready, requeueing"
+                    );
+                    (
+                        Ok(Action::requeue(requeue_after)),
+                        message,
+                        "ConfigurationNotReady".into(),
+                        "False".into(),
+                    )
+                }
+                Err(Error::AdminCallFailed(ref err)) => {
+                    let message = format!("Failed to make Restate admin API call: {}", err);
+                    let requeue_after = Duration::from_secs(30);
+                    debug!(
+                        name = %self.metadata.name.as_deref().unwrap_or("unknown"),
+                        namespace = %namespace,
+                        error = %err,
+                        requeue_after_secs = %requeue_after.as_secs(),
+                        "Admin API call failed, requeueing"
+                    );
+                    (
+                        Ok(Action::requeue(requeue_after)),
+                        message,
+                        "AdminCallFailed".into(),
+                        "False".into(),
+                    )
+                }
+                Err(Error::HashCollision) => {
+                    rsd_status.collision_count = Some(rsd_status.collision_count.unwrap_or(0) + 1);
+
+                    (
+                        // requeue immediately
+                        Ok(Action::requeue(Duration::ZERO)),
+                        "Encountered a hash collision, will retry with a new template hash".into(),
+                        "HashCollision".into(),
+                        "False".into(),
+                    )
+                }
+                Err(err) => {
+                    let message = err.to_string();
+                    (
+                        Err(err),
+                        message,
+                        "FailedReconcile".into(),
+                        "Unknown".into(),
+                    )
+                }
+            }
+        } else {
+            // ReplicaSet mode
+            match self.reconcile(ctx, namespace).await {
+                Ok((current_replicaset, next_removal)) => {
+                    let action = match next_removal {
+                        Some(next_removal) if next_removal < now => Action::requeue(Duration::ZERO), // immediate requeue
+                        Some(next_removal) => {
+                            let secs = (next_removal - now).num_seconds() as u64;
+                            if secs < 5 * 60 {
+                                Action::requeue(Duration::from_secs(secs))
+                            } else {
+                                Action::requeue(Duration::from_secs(5 * 60))
+                            }
+                        }
+                        None => Action::requeue(Duration::from_secs(5 * 60)),
+                    };
+
+                    status_from_replica_set(
+                        self.spec.replicas,
+                        &mut rsd_status,
+                        current_replicaset.status.as_ref(),
+                    );
+
+                    if let Some(id) = current_replicaset
+                        .annotations()
+                        .get(RESTATE_DEPLOYMENT_ID_ANNOTATION)
+                    {
+                        rsd_status.deployment_id = Some(id.clone());
+                    }
+
+                    (
+                        Ok(action),
+                        "RestateDeployment is deployed".into(),
+                        "Deployed".into(),
+                        "True".into(),
+                    )
+                }
+                Err(Error::DeploymentNotReady {
+                    message,
+                    reason,
+                    requeue_after,
+                    replica_set_status,
+                }) => {
+                    let requeue_after = requeue_after.unwrap_or(Duration::from_secs(60));
+
+                    status_from_replica_set(
+                        self.spec.replicas,
+                        &mut rsd_status,
+                        replica_set_status.as_deref(),
+                    );
+
+                    (
+                        Ok(Action::requeue(requeue_after)),
+                        message,
+                        reason,
+                        "False".into(),
+                    )
+                }
+                Err(Error::HashCollision) => {
+                    rsd_status.collision_count = Some(rsd_status.collision_count.unwrap_or(0) + 1);
+
+                    (
+                        // requeue immediately
+                        Ok(Action::requeue(Duration::ZERO)),
+                        "Encountered a hash collision, will retry with a new template hash".into(),
+                        "HashCollision".into(),
+                        "False".into(),
+                    )
+                }
+                Err(Error::AdminCallFailed(ref err)) => {
+                    let message = format!("Failed to make Restate admin API call: {}", err);
+                    let requeue_after = Duration::from_secs(30);
+                    debug!(
+                        name = %self.metadata.name.as_deref().unwrap_or("unknown"),
+                        namespace = %namespace,
+                        error = %err,
+                        requeue_after_secs = %requeue_after.as_secs(),
+                        "Admin API call failed, requeueing"
+                    );
+                    (
+                        Ok(Action::requeue(requeue_after)),
+                        message,
+                        "AdminCallFailed".into(),
+                        "False".into(),
+                    )
+                }
+                Err(err) => {
+                    let message = err.to_string();
+                    (
+                        Err(err),
+                        message,
+                        "FailedReconcile".into(),
+                        "Unknown".into(),
+                    )
+                }
             }
         };
 
@@ -532,8 +691,15 @@ impl RestateDeployment {
 
         rsd_status.conditions = Some(vec![ready_condition]);
 
-        let selector: Option<Selector> = self.spec.selector.clone().try_into().ok();
-        rsd_status.label_selector = selector.as_ref().map(Selector::to_string);
+        // Only set labelSelector for ReplicaSet mode (Knative manages pods directly)
+        if !is_knative {
+            let selector: Option<Selector> = self
+                .spec
+                .selector
+                .as_ref()
+                .and_then(|s| s.clone().try_into().ok());
+            rsd_status.label_selector = selector.as_ref().map(Selector::to_string);
+        }
         rsd_status.observed_generation = self.metadata.generation;
 
         // Create the status update
@@ -556,7 +722,7 @@ impl RestateDeployment {
     }
 
     /// Register a service version with the Restate cluster
-    async fn register_service_with_restate(
+    pub(super) async fn register_service_with_restate(
         &self,
         ctx: &Context,
         service_endpoint: &Url,
@@ -591,6 +757,13 @@ impl RestateDeployment {
             .json()
             .await
             .map_err(Error::AdminCallFailed)?;
+
+        let deployment_id = &resp.id;
+        info!(
+            deployment_id = %deployment_id,
+            url = %service_endpoint,
+            "Successfully registered Restate deployment"
+        );
 
         Ok(resp.id)
     }
@@ -697,16 +870,36 @@ impl RestateDeployment {
 
         let my_uid = self.uid().expect("RestateDeployment to have a uid");
 
-        let (active_count, next_removal) = reconcilers::replicaset::cleanup_old_replicasets(
-            namespace,
-            &ctx,
-            &rs_api,
-            &my_uid,
-            self,
-            &deployments,
-            None,
-        )
-        .await?;
+        // Check if Knative mode
+        let is_knative = matches!(
+            self.spec.deployment_mode,
+            Some(crate::resources::restatedeployments::DeploymentMode::Knative)
+        );
+
+        let (active_count, next_removal) = if is_knative {
+            // Knative cleanup path
+            reconcilers::knative::cleanup_old_configurations(
+                namespace,
+                &ctx,
+                &my_uid,
+                self,
+                &deployments,
+                None,
+            )
+            .await?
+        } else {
+            // ReplicaSet cleanup path
+            reconcilers::replicaset::cleanup_old_replicasets(
+                namespace,
+                &ctx,
+                &rs_api,
+                &my_uid,
+                self,
+                &deployments,
+                None,
+            )
+            .await?
+        };
 
         if active_count > 0 {
             debug!(
@@ -742,6 +935,7 @@ fn status_from_replica_set(
     // Get status information from the current ReplicaSet
     let status_replicas = rs_status.map(|s| s.replicas).unwrap_or(0);
     rsd_status.replicas = status_replicas;
+    rsd_status.desired_replicas = Some(expected_replicas);
     rsd_status.ready_replicas = Some(rs_status.and_then(|s| s.ready_replicas).unwrap_or(0));
     let available_replicas = rs_status.and_then(|s| s.available_replicas).unwrap_or(0);
     rsd_status.available_replicas = Some(available_replicas);
@@ -851,7 +1045,6 @@ async fn validate_cluster_status(rsc_api: Api<RestateCluster>, cluster_name: &st
 
 /// Run the RestateDeployment controller
 pub async fn run(client: Client, metrics: Metrics, state: State) {
-    let deployments: Api<RestateDeployment> = Api::all(client.clone());
     let replicasets: Api<ReplicaSet> = Api::all(client.clone());
     let rce: Api<RestateCloudEnvironment> = Api::all(client.clone());
     let secrets: Api<Secret> = Api::namespaced(client.clone(), &state.operator_namespace);
@@ -891,10 +1084,89 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     .touched_objects()
     .default_backoff();
 
+    // RestateDeployment reflector - watch metadata and spec (ignore status-only updates)
+    let deployments_for_reflector: Api<RestateDeployment> = Api::all(client.clone());
+    let (deployments_store, deployments_writer) = reflector::store();
+    let deployments_reflector = reflector(
+        deployments_writer,
+        watcher(deployments_for_reflector, not_created_cfg.clone()),
+    )
+    .touched_objects()
+    .default_backoff()
+    .predicate_filter(
+        predicates::generation
+            .combine(predicates::labels)
+            .combine(predicates::annotations)
+            .combine(predicates::finalizers),
+    );
+
     // Create a controller for RestateDeployment
-    controller::Controller::new(deployments, not_created_cfg)
-        .shutdown_on_signal()
-        .owns_stream(replicaset_reflector)
+    // Use deployments_reflector with generation predicate to filter out status-only changes
+    let mut controller =
+        controller::Controller::for_stream(deployments_reflector, deployments_store)
+            .shutdown_on_signal()
+            .owns_stream(replicaset_reflector);
+
+    let (revision_store, revision_writer) = reflector::store_shared(32);
+    let (configuration_store, configuration_writer) = reflector::store_shared(32);
+    let configurations: Api<Configuration> = Api::all(client.clone());
+
+    // Check if Knative is installed by checking if the serving.knative.dev API group exists
+    let knative_installed = client
+        .list_api_groups()
+        .await
+        .map(|groups| {
+            groups
+                .groups
+                .iter()
+                .any(|g| g.name == "serving.knative.dev")
+        })
+        .unwrap_or(false);
+
+    if knative_installed {
+        info!("Knative detected; enabling Knative support");
+    } else {
+        info!("Knative not detected; disabling Knative support");
+    }
+
+    if knative_installed {
+        let config_reflector = prewarmed_reflector(
+            configuration_store.clone(),
+            configuration_writer,
+            watcher(configurations, cfg.clone()),
+        )
+        .await;
+
+        let routes: Api<Route> = Api::all(client.clone());
+        let route_watcher = metadata_watcher(routes, cfg.clone())
+            .touched_objects()
+            .default_backoff();
+
+        let revisions: Api<Revision> = Api::all(client.clone());
+        let revision_reflector = prewarmed_reflector(
+            revision_store.clone(),
+            revision_writer,
+            watcher(revisions, cfg.clone()),
+        )
+        .await;
+
+        controller = controller
+            .owns_stream(config_reflector)
+            .watches_stream(route_watcher, |meta| {
+                // Extract parent RestateDeployment name from annotation
+                let name = meta.annotations().get("restate.dev/deployment")?;
+                let namespace = meta.namespace()?;
+                Some(ObjectRef::new(name).within(&namespace))
+            })
+            .watches_stream(revision_reflector, |obj| {
+                // Extract parent RestateDeployment name from annotation
+                let name = obj.annotations().get("restate.dev/deployment")?;
+                let namespace = obj.namespace()?;
+                Some(ObjectRef::new(name).within(&namespace))
+            });
+    }
+
+    controller
         // just so that these get polled; we have no way to figure out which rsd may use the updated rce or secret
         .watches_stream(rce_reflector, |_| std::iter::empty())
         .watches_stream(secret_reflector, |_| std::iter::empty())
@@ -907,6 +1179,8 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
                 replicasets_store,
                 rce_store,
                 secret_store,
+                revision_store,
+                configuration_store,
                 metrics,
                 state,
             ),
