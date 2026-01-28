@@ -251,7 +251,7 @@ spec:
     ]
     # auto-provision must be false when using operator-managed provisioning
     auto-provision = false
-    default-num-partitions = 128
+    default-num-partitions = 24
     default-replication = 2
 
     [metadata-client]
@@ -292,7 +292,7 @@ spec:
     ]
     # auto-provision must be false when using operator-managed provisioning
     auto-provision = false
-    default-num-partitions = 128
+    default-num-partitions = 24
     default-replication = 2
 
     [metadata-client]
