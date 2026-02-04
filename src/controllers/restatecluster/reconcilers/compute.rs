@@ -324,6 +324,12 @@ fn restate_statefulset(
             read_only: Some(true),
             ..Default::default()
         },
+        // allow debug symbols to be downloaded into the .debug dir
+        VolumeMount {
+            name: "debug".into(),
+            mount_path: "/usr/local/bin/.debug".into(),
+            ..Default::default()
+        },
     ];
 
     let mut volumes = vec![
@@ -338,6 +344,11 @@ fn restate_statefulset(
                 name: cm_name,
                 ..Default::default()
             }),
+            ..Default::default()
+        },
+        Volume {
+            name: "debug".into(),
+            empty_dir: Some(Default::default()),
             ..Default::default()
         },
     ];
