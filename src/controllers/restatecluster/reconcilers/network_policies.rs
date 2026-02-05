@@ -35,7 +35,9 @@ fn deny_all(base_metadata: &ObjectMeta) -> NetworkPolicy {
     }
 }
 
-const ALLOW_DNS_POLICY_NAME: &str = "allow-egress-to-kube-dns";
+const ALLOW_DNS_POLICY_NAME: &str = "allow-egress-to-dns";
+// Old policy name, kept for cleanup during migration
+const ALLOW_DNS_POLICY_NAME_OLD: &str = "allow-egress-to-kube-dns";
 
 fn allow_dns(base_metadata: &ObjectMeta) -> NetworkPolicy {
     NetworkPolicy {
@@ -44,25 +46,38 @@ fn allow_dns(base_metadata: &ObjectMeta) -> NetworkPolicy {
             pod_selector: Some(label_selector(base_metadata)),
             policy_types: Some(vec!["Egress".into()]),
             egress: Some(vec![NetworkPolicyEgressRule {
-                to: Some(vec![NetworkPolicyPeer {
-                    pod_selector: Some(LabelSelector {
-                        match_labels: Some(
-                            [("k8s-app".to_string(), "kube-dns".to_string())].into(),
-                        ),
+                to: Some(vec![
+                    // Allow to kube-dns pods in kube-system namespace
+                    NetworkPolicyPeer {
+                        pod_selector: Some(LabelSelector {
+                            match_labels: Some(
+                                [("k8s-app".to_string(), "kube-dns".to_string())].into(),
+                            ),
+                            ..Default::default()
+                        }),
+                        namespace_selector: Some(LabelSelector {
+                            match_labels: Some(
+                                [(
+                                    "kubernetes.io/metadata.name".to_string(),
+                                    "kube-system".to_string(),
+                                )]
+                                .into(),
+                            ),
+                            ..Default::default()
+                        }),
                         ..Default::default()
-                    }),
-                    namespace_selector: Some(LabelSelector {
-                        match_labels: Some(
-                            [(
-                                "kubernetes.io/metadata.name".to_string(),
-                                "kube-system".to_string(),
-                            )]
-                            .into(),
-                        ),
+                    },
+                    // Allow to node-local DNS cache (169.254.20.10)
+                    // Required for GKE Autopilot and clusters with NodeLocal DNSCache enabled
+                    // https://kubernetes.io/docs/tasks/administer-cluster/nodelocaldns/
+                    NetworkPolicyPeer {
+                        ip_block: Some(IPBlock {
+                            cidr: "169.254.20.10/32".into(),
+                            except: None,
+                        }),
                         ..Default::default()
-                    }),
-                    ..Default::default()
-                }]),
+                    },
+                ]),
                 ports: Some(vec![
                     NetworkPolicyPort {
                         protocol: Some("UDP".into()),
@@ -280,6 +295,7 @@ pub async fn reconcile_network_policies(
     if disable_network_policies {
         delete_network_policy(namespace, &np_api, DENY_ALL_POLICY_NAME).await?;
         delete_network_policy(namespace, &np_api, ALLOW_DNS_POLICY_NAME).await?;
+        delete_network_policy(namespace, &np_api, ALLOW_DNS_POLICY_NAME_OLD).await?;
         delete_network_policy(namespace, &np_api, ALLOW_PUBLIC_POLICY_NAME).await?;
         delete_network_policy(namespace, &np_api, AWS_POD_IDENTITY_POLICY_NAME).await?;
         delete_network_policy(namespace, &np_api, ALLOW_EGRESS_POLICY_NAME).await?;
@@ -292,6 +308,8 @@ pub async fn reconcile_network_policies(
 
     apply_network_policy(namespace, &np_api, deny_all(base_metadata)).await?;
     apply_network_policy(namespace, &np_api, allow_dns(base_metadata)).await?;
+    // Clean up old DNS policy name (renamed from allow-egress-to-kube-dns to allow-egress-to-dns)
+    delete_network_policy(namespace, &np_api, ALLOW_DNS_POLICY_NAME_OLD).await?;
     apply_network_policy(namespace, &np_api, allow_public(base_metadata)).await?;
 
     if aws_pod_identity_enabled {

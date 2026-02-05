@@ -572,6 +572,46 @@ Restate to public IP access, as well as to obtain VPC flow logs.
 The operator can create `SecurityGroupPolicy` objects which put Restate pods into a set of Security Groups. If this CRD
 is installed, you may provide `awsPodSecurityGroups` in the `RestateCluster` spec.
 
+## Troubleshooting
+
+### DNS Resolution Issues / Pods Cannot Provision or Connect
+
+If your Restate pods fail to start with errors like:
+- `dns error caused by: failed to lookup address information`
+- `transport error` when connecting to metadata store
+- Pods showing `0/1 Running` with repeated restarts
+- Nodes unable to connect to each other
+
+This may be caused by the default network policies blocking DNS resolution. The operator creates network policies that allow DNS traffic to:
+1. `kube-dns` pods in `kube-system` namespace
+2. Node-local DNS cache at `169.254.20.10` (for GKE Autopilot and NodeLocal DNSCache)
+
+If your cluster uses a different DNS configuration, you have two options:
+
+**Option 1: Add custom egress rule** (Recommended)
+```yaml
+spec:
+  security:
+    networkEgressRules:
+      - ports:
+          - port: 53
+            protocol: UDP
+          - port: 53
+            protocol: TCP
+        to:
+          - ipBlock:
+              cidr: <your-dns-server-ip>/32
+```
+
+**Option 2: Disable network policies entirely**
+```yaml
+spec:
+  security:
+    disableNetworkPolicies: true
+```
+
+> **Warning**: Disabling network policies removes network isolation from your Restate cluster. This means any pod in your Kubernetes cluster can reach your Restate pods, and your Restate pods can reach any internal IP address. Only use this option if you have alternative network security measures in place (e.g., AWS Security Groups, Calico policies at the cluster level).
+
 ## Releasing
 
 1. Update the version in `charts/restate-operator/Chart.yaml` and the version in `Cargo.{toml,lock}` eg to `0.0.2`
