@@ -1,6 +1,6 @@
 [package]
 name = "restate-operator"
-version = "2.2.0-alpha1"
+version = "2.2.0"
 authors = ["restate.dev"]
 edition = "2024"
 rust-version = "1.92"
