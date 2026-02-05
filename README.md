@@ -352,6 +352,85 @@ The Restate operator uses **deployment identity** to determine whether to create
 - Multiple deployments coexist temporarily
 - Use for: Major versions, breaking changes, parallel testing
 
+#### Knative Serving Mode
+
+RestateDeployment supports [Knative Serving](https://knative.dev/docs/serving/) as an alternative deployment backend. This enables:
+
+- **Scale-to-zero**: Services automatically scale down when idle, saving resources
+- **Automatic scaling**: Replicas scale based on concurrent request load
+- **In-place updates**: Update service implementation without changing Restate deployment identity
+- **Traffic management**: Knative handles gradual rollouts and traffic splitting
+
+##### Prerequisites
+
+- [Knative Serving](https://knative.dev/docs/install/) installed on your cluster
+- Network connectivity between the Restate cluster and Knative pods
+
+##### Basic Example
+
+```yaml
+apiVersion: restate.dev/v1beta1
+kind: RestateDeployment
+metadata:
+  name: my-service
+spec:
+  deploymentMode: knative  # Use Knative Serving
+  
+  knative:
+    tag: "v1"        # Explicit tag for deployment identity
+    minScale: 0      # Allow scale-to-zero
+    maxScale: 10     # Maximum replicas
+    target: 50       # Target concurrent requests per replica
+  
+  template:
+    metadata:
+      labels:
+        app: my-service
+    spec:
+      containers:
+        - name: app
+          image: my-registry/my-service:latest
+          ports:
+            - name: h2c  # Required: Knative only allows "h2c" or "http1"
+              containerPort: 9080
+  
+  restate:
+    register:
+      cluster: my-cluster
+```
+
+##### Tag-Based Versioning
+
+The `knative.tag` field controls how updates are handled:
+
+| Tag Behavior | Result | Use Case |
+|--------------|--------|----------|
+| **Same tag** | In-place update (new Knative Revision, same Restate deployment) | Bug fixes, config changes |
+| **Changed tag** | Versioned update (new Knative Configuration, new Restate deployment) | Breaking changes, major versions |
+| **No tag** | Auto-versioning (template hash as tag, every change = new deployment) | Continuous deployment |
+
+##### Knative-Specific Configuration
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `knative.tag` | string | (hash) | Deployment identity tag |
+| `knative.minScale` | integer | 0 | Minimum replicas (0 enables scale-to-zero) |
+| `knative.maxScale` | integer | unlimited | Maximum replicas |
+| `knative.target` | integer | 100 | Target concurrent requests per replica |
+
+##### Port Naming
+
+Knative requires specific port names:
+- `h2c` - HTTP/2 cleartext (recommended for gRPC/Restate services)
+- `http1` - HTTP/1.1
+
+##### Example Files
+
+See complete examples in [`examples/services/greeter/k8s/`](./examples/services/greeter/k8s/):
+- `knative-v1.yaml` - Knative deployment with explicit tag
+- `knative-v2.yaml` - Versioned update (new tag)
+- `knative-auto.yaml` - Auto-versioning (no tag)
+
 #### Example
 
 ```yaml
