@@ -45,6 +45,14 @@ struct Arguments {
         default_value = "ghcr.io/restatedev/restate-cloud-tunnel-client:0.5.0"
     )]
     tunnel_client_default_image: String,
+
+    #[arg(
+        long = "cluster-dns",
+        env = "CLUSTER_DNS",
+        value_name = "CLUSTER_DNS",
+        default_value = "cluster.local"
+    )]
+    cluster_dns: String,
 }
 
 #[get("/metrics")]
@@ -80,6 +88,7 @@ async fn main() -> anyhow::Result<()> {
         args.operator_label_name,
         args.operator_label_value,
         args.tunnel_client_default_image,
+        args.cluster_dns,
     );
 
     let client = Client::try_default()

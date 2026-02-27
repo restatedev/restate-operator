@@ -677,7 +677,7 @@ pub async fn reconcile_compute(
             }
 
             // Run gRPC provisioning - returns Ok for both new provisioning AND AlreadyExists
-            provisioning::run_provisioning(name).await?;
+            provisioning::run_provisioning(name, &ctx.cluster_dns).await?;
 
             // Return Provisioned error to signal that status.provisioned should be set to true
             // and reconciliation should be requeued immediately

@@ -48,6 +48,9 @@ pub struct State {
 
     /// The default image to use for tunnel client pods
     tunnel_client_default_image: String,
+
+    /// The cluster DNS suffix (e.g. "cluster.local")
+    pub cluster_dns: String,
 }
 
 /// State wrapper around the controller outputs for the web server
@@ -58,6 +61,7 @@ impl State {
         operator_label_name: Option<String>,
         operator_label_value: Option<String>,
         tunnel_client_default_image: String,
+        cluster_dns: String,
     ) -> Self {
         Self {
             diagnostics: Arc::new(RwLock::new(Diagnostics::default())),
@@ -67,6 +71,7 @@ impl State {
             operator_label_name,
             operator_label_value,
             tunnel_client_default_image,
+            cluster_dns,
         }
     }
 
@@ -86,9 +91,10 @@ pub fn service_url(
     service_namespace: &str,
     port: i32,
     path: Option<&str>,
+    cluster_dns: &str,
 ) -> Result<Url, url::ParseError> {
     let mut url = Url::parse(&format!(
-        "http://{service_name}.{service_namespace}.svc.cluster.local:{port}",
+        "http://{service_name}.{service_namespace}.svc.{cluster_dns}:{port}",
     ))?;
 
     if let Some(path) = path {

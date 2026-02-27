@@ -71,6 +71,8 @@ pub(super) struct Context {
     pub security_group_policy_installed: bool,
     // Whether the SecretProviderClass CRD is installed
     pub secret_provider_class_installed: bool,
+    /// The cluster DNS suffix (e.g. "cluster.local")
+    pub cluster_dns: String,
     /// Diagnostics read by the web server
     pub diagnostics: Arc<RwLock<Diagnostics>>,
     /// Prometheus metrics
@@ -100,6 +102,7 @@ impl Context {
             operator_label_value: state.operator_label_value.clone(),
             security_group_policy_installed,
             secret_provider_class_installed,
+            cluster_dns: state.cluster_dns.clone(),
             diagnostics: state.diagnostics.clone(),
             metrics,
         })

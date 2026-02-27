@@ -70,6 +70,8 @@ pub(super) struct Context {
     pub configuration_store: Store<Configuration>,
     /// The namespace in which this operator runs
     pub operator_namespace: String,
+    /// The cluster DNS suffix (e.g. "cluster.local")
+    pub cluster_dns: String,
     /// Diagnostics read by the web server
     pub diagnostics: Arc<RwLock<Diagnostics>>,
     /// Prometheus metrics
@@ -99,6 +101,7 @@ impl Context {
             revision_store,
             configuration_store,
             operator_namespace: state.operator_namespace,
+            cluster_dns: state.cluster_dns,
             metrics,
             diagnostics: state.diagnostics.clone(),
             http_client: reqwest::Client::new(),
@@ -116,7 +119,7 @@ impl Context {
             &self.secret_store,
             &self.operator_namespace,
         )?;
-        let admin_endpoint = admin_endpoint.admin_url(&self.rce_store)?;
+        let admin_endpoint = admin_endpoint.admin_url(&self.rce_store, &self.cluster_dns)?;
 
         let mut request_builder = self.http_client.request(method, admin_endpoint.join(path)?);
 
@@ -333,6 +336,7 @@ impl RestateDeployment {
             &versioned_name,
             namespace,
             self.spec.restate.service_path.as_deref(),
+            &ctx.cluster_dns,
         )?;
 
         let mut deployments = self.list_deployments(&ctx).await?;

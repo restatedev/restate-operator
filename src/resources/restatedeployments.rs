@@ -318,7 +318,7 @@ impl JsonSchema for RestateAdminEndpoint {
 }
 
 impl RestateAdminEndpoint {
-    pub fn admin_url(&self, rce_store: &Store<RestateCloudEnvironment>) -> crate::Result<Url> {
+    pub fn admin_url(&self, rce_store: &Store<RestateCloudEnvironment>, cluster_dns: &str) -> crate::Result<Url> {
         match (
             self.cluster.as_deref(),
             self.cloud.as_deref(),
@@ -326,7 +326,7 @@ impl RestateAdminEndpoint {
             self.url.as_ref(),
         ) {
             (Some(cluster), None, None, None) => {
-                Ok(service_url("restate", cluster, 9070, None)?)
+                Ok(service_url("restate", cluster, 9070, None, cluster_dns)?)
             }
             (None, Some(cloud), None, None) => {
                 let Some(rce) = rce_store.get(&ObjectRef::new(cloud)) else {
@@ -335,7 +335,7 @@ impl RestateAdminEndpoint {
 
                 Ok(rce.admin_url()?)
             }
-            (None, None,Some(service), None) => Ok(service_url(&service.name, &service.namespace, service.port.unwrap_or(9070), service.path.as_deref())?),
+            (None, None,Some(service), None) => Ok(service_url(&service.name, &service.namespace, service.port.unwrap_or(9070), service.path.as_deref(), cluster_dns)?),
             (None, None, None, Some(url)) => Ok(url.clone()),
             _ => Err(crate::Error::InvalidRestateConfig(
                 "Exactly one of `cluster`, `cloud`, `service` or `url` must be specified in spec.restate"
@@ -350,6 +350,7 @@ impl RestateAdminEndpoint {
         service_name: &str,
         service_namespace: &str,
         service_path: Option<&str>,
+        cluster_dns: &str,
     ) -> crate::Result<Url> {
         match (
             self.cluster.as_deref(),
@@ -358,14 +359,14 @@ impl RestateAdminEndpoint {
             self.url.as_ref(),
         ) {
             (Some(_), None, None, None) | (None, None,Some(_), None) | (None, None, None, Some(_)) => {
-                Ok(service_url(service_name, service_namespace, 9080, service_path)?)
+                Ok(service_url(service_name, service_namespace, 9080, service_path, cluster_dns)?)
             }
             (None, Some(cloud), None, None) => {
                 let Some(rce) = rce_store.get(&ObjectRef::new(cloud)) else {
                     return Err(crate::Error::RestateCloudEnvironmentNotFound(cloud.into()))
                 };
 
-                let service_url = service_url(service_name, service_namespace, 9080, service_path)?;
+                let service_url = service_url(service_name, service_namespace, 9080, service_path, cluster_dns)?;
 
                 Ok(rce.tunnel_url(service_url)?)
             }

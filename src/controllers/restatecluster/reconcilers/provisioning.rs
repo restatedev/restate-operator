@@ -110,13 +110,13 @@ pub async fn is_pod_running(pod_api: &Api<Pod>, pod_name: &str) -> Result<bool, 
 
 /// Runs the gRPC provisioning call against the restate-0 pod.
 /// Returns Ok(()) if provisioning succeeded or if the cluster was already provisioned.
-pub async fn run_provisioning(namespace: &str) -> Result<(), Error> {
+pub async fn run_provisioning(namespace: &str, cluster_dns: &str) -> Result<(), Error> {
     use node_ctl_svc::ProvisionClusterRequest;
     use node_ctl_svc::node_ctl_svc_client::NodeCtlSvcClient;
     use tonic::transport::Channel;
 
     // Build the endpoint to the restate-0 pod via the headless service
-    let endpoint = format!("http://restate-0.restate-cluster.{namespace}.svc.cluster.local:5122");
+    let endpoint = format!("http://restate-0.restate-cluster.{namespace}.svc.{cluster_dns}:5122");
 
     info!(endpoint = %endpoint, "Connecting to Restate node for provisioning");
 
