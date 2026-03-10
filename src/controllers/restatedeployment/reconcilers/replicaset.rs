@@ -364,8 +364,9 @@ pub async fn cleanup_old_replicasets(
                     rs_name,
                 );
 
+                let drain_delay_seconds = rsd.spec.restate.drain_delay_seconds();
                 let remove_at = chrono::Utc::now()
-                    .checked_add_signed(chrono::TimeDelta::minutes(5)) // todo configurable?
+                    .checked_add_signed(chrono::TimeDelta::seconds(drain_delay_seconds))
                     .expect("remove_version_at in bounds");
 
                 let params = PatchParams::apply("restate-operator/remove-version-at").force();
