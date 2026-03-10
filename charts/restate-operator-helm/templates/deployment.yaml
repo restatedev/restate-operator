@@ -60,6 +60,8 @@ spec:
             - name: AWS_POD_IDENTITY_ASSOCIATION_CLUSTER
               value: {{ .Values.awsPodIdentityAssociationCluster }}
           {{- end }}
+            - name: PIA_CANARY_IMAGE
+              value: {{ .Values.piaCanaryImage.repository }}:{{ .Values.piaCanaryImage.tag }}
           {{- with .Values.env }}
             {{- toYaml . | nindent 12 }}
           {{- end }}

@@ -48,6 +48,9 @@ pub struct State {
 
     /// The default image to use for tunnel client pods
     tunnel_client_default_image: String,
+
+    /// The image to use for PIA canary pods
+    pub pia_canary_image: String,
 }
 
 /// State wrapper around the controller outputs for the web server
@@ -58,6 +61,7 @@ impl State {
         operator_label_name: Option<String>,
         operator_label_value: Option<String>,
         tunnel_client_default_image: String,
+        pia_canary_image: String,
     ) -> Self {
         Self {
             diagnostics: Arc::new(RwLock::new(Diagnostics::default())),
@@ -67,6 +71,7 @@ impl State {
             operator_label_name,
             operator_label_value,
             tunnel_client_default_image,
+            pia_canary_image,
         }
     }
 

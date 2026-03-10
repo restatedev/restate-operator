@@ -45,6 +45,14 @@ struct Arguments {
         default_value = "ghcr.io/restatedev/restate-cloud-tunnel-client:0.5.0"
     )]
     tunnel_client_default_image: String,
+
+    #[arg(
+        long = "pia-canary-image",
+        env = "PIA_CANARY_IMAGE",
+        value_name = "IMAGE",
+        default_value = "busybox:uclibc"
+    )]
+    pia_canary_image: String,
 }
 
 #[get("/metrics")]
@@ -80,6 +88,7 @@ async fn main() -> anyhow::Result<()> {
         args.operator_label_name,
         args.operator_label_value,
         args.tunnel_client_default_image,
+        args.pia_canary_image,
     );
 
     let client = Client::try_default()
