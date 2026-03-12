@@ -929,15 +929,16 @@ pub async fn cleanup_old_configurations(
             }
             (None, _, true) => {
                 // endpoint exists and there's no valid remove_version_at annotation, create one
+                let drain_delay_seconds = rsd.spec.restate.drain_delay_seconds();
                 info!(
                     configuration = %config_name,
                     namespace = %namespace,
-                    drain_delay = "5 minutes",
+                    drain_delay_seconds,
                     "Scheduling removal of old Configuration (after drain delay)"
                 );
 
                 let remove_at = chrono::Utc::now()
-                    .checked_add_signed(chrono::TimeDelta::minutes(5)) // Same as ReplicaSet cleanup
+                    .checked_add_signed(chrono::TimeDelta::seconds(drain_delay_seconds))
                     .expect("remove_version_at in bounds");
 
                 let config_api: Api<Configuration> = Api::namespaced(ctx.client.clone(), namespace);

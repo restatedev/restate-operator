@@ -247,6 +247,18 @@ pub struct RestateSpec {
     /// Force the use of HTTP/1.1 when registering with Restate
     #[serde(skip_serializing_if = "Option::is_none")]
     pub use_http11: Option<bool>,
+
+    /// Seconds to wait before removing old versions after they are drained.
+    /// Defaults to 300 (5 minutes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0))]
+    pub drain_delay_seconds: Option<i64>,
+}
+
+impl RestateSpec {
+    pub fn drain_delay_seconds(&self) -> i64 {
+        self.drain_delay_seconds.unwrap_or(300).max(0)
+    }
 }
 
 /// The location of the Restate Admin API to register this deployment against
