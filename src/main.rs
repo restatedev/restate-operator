@@ -81,6 +81,17 @@ async fn main() -> anyhow::Result<()> {
 
     let args: Arguments = Arguments::parse();
 
+    // Validate cluster DNS suffix
+    anyhow::ensure!(
+        !args.cluster_dns.is_empty()
+            && args
+                .cluster_dns
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-'),
+        "--cluster-dns must be a valid DNS suffix (e.g. 'cluster.local'), got: '{}'",
+        args.cluster_dns
+    );
+
     // Initialize Kubernetes controller state
     let state = State::new(
         args.aws_pod_identity_association_cluster,

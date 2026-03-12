@@ -318,7 +318,11 @@ impl JsonSchema for RestateAdminEndpoint {
 }
 
 impl RestateAdminEndpoint {
-    pub fn admin_url(&self, rce_store: &Store<RestateCloudEnvironment>, cluster_dns: &str) -> crate::Result<Url> {
+    pub fn admin_url(
+        &self,
+        rce_store: &Store<RestateCloudEnvironment>,
+        cluster_dns: &str,
+    ) -> crate::Result<Url> {
         match (
             self.cluster.as_deref(),
             self.cloud.as_deref(),
@@ -335,7 +339,13 @@ impl RestateAdminEndpoint {
 
                 Ok(rce.admin_url()?)
             }
-            (None, None,Some(service), None) => Ok(service_url(&service.name, &service.namespace, service.port.unwrap_or(9070), service.path.as_deref(), cluster_dns)?),
+            (None, None, Some(service), None) => Ok(service_url(
+                &service.name,
+                &service.namespace,
+                service.port.unwrap_or(9070),
+                service.path.as_deref(),
+                cluster_dns,
+            )?),
             (None, None, None, Some(url)) => Ok(url.clone()),
             _ => Err(crate::Error::InvalidRestateConfig(
                 "Exactly one of `cluster`, `cloud`, `service` or `url` must be specified in spec.restate"
@@ -358,7 +368,9 @@ impl RestateAdminEndpoint {
             self.service.as_ref(),
             self.url.as_ref(),
         ) {
-            (Some(_), None, None, None) | (None, None,Some(_), None) | (None, None, None, Some(_)) => {
+            (Some(_), None, None, None)
+            | (None, None, Some(_), None)
+            | (None, None, None, Some(_)) => {
                 Ok(service_url(service_name, service_namespace, 9080, service_path, cluster_dns)?)
             }
             (None, Some(cloud), None, None) => {

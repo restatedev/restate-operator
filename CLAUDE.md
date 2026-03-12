@@ -187,7 +187,7 @@ Use the helper function from `src/controllers/mod.rs:79-94`:
 ```rust
 use crate::controllers::service_url;
 
-let url = service_url("service-name", "namespace", 9070, Some("/path"))?;
+let url = service_url("service-name", "namespace", 9070, Some("/path"), "cluster.local")?;
 ```
 
 ### Error Handling
