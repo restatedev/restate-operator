@@ -67,6 +67,8 @@ pub(super) struct Context {
     pub operator_label_name: Option<String>,
     // The value of the label named operator_label_name that will select the operator, needed to support the case where restate clusters need to be reached by the operator
     pub operator_label_value: Option<String>,
+    // The image to use for PIA canary pods
+    pub pia_canary_image: String,
     // Whether the EKS SecurityGroupPolicy CRD is installed
     pub security_group_policy_installed: bool,
     // Whether the SecretProviderClass CRD is installed
@@ -98,6 +100,7 @@ impl Context {
             operator_namespace: state.operator_namespace.clone(),
             operator_label_name: state.operator_label_name.clone(),
             operator_label_value: state.operator_label_value.clone(),
+            pia_canary_image: state.pia_canary_image.clone(),
             security_group_policy_installed,
             secret_provider_class_installed,
             diagnostics: state.diagnostics.clone(),

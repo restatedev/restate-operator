@@ -15,6 +15,10 @@ podAnnotations: {}
 
 awsPodIdentityAssociationCluster: null
 
+piaCanaryImage:
+  repository: busybox
+  tag: uclibc
+
 podSecurityContext:
   fsGroup: 2000
   fsGroupChangePolicy: "OnRootMismatch"

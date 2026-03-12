@@ -551,6 +551,7 @@ pub async fn reconcile_compute(
                 name,
                 base_metadata,
                 spec.compute.tolerations.as_ref(),
+                &ctx.pia_canary_image,
                 &job_api,
                 &pod_api,
             )
@@ -745,6 +746,7 @@ async fn check_pia(
     namespace: &str,
     base_metadata: &ObjectMeta,
     tolerations: Option<&Vec<Toleration>>,
+    canary_image: &str,
     job_api: &Api<Job>,
     pod_api: &Api<Pod>,
 ) -> Result<(), Error> {
@@ -779,7 +781,7 @@ async fn check_pia(
                             service_account_name: Some("restate".into()),
                             containers: vec![Container {
                                 name: "canary".into(),
-                                image: Some("busybox:uclibc".into()),
+                                image: Some(canary_image.into()),
                                 command: Some(vec![
                                     "grep".into(),
                                     "-q".into(),
