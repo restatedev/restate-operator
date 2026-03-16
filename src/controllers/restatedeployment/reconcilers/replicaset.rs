@@ -359,12 +359,13 @@ pub async fn cleanup_old_replicasets(
             }
             (None, _, true) => {
                 // endpoint exists and there's no valid remove_version_at annotation, create one
-                debug!(
-                    "Scheduling removal (after drain delay) of old ReplicaSet {} in namespace {namespace}",
-                    rs_name,
-                );
-
                 let drain_delay_seconds = rsd.spec.restate.drain_delay_seconds();
+                info!(
+                    replicaset = %rs_name,
+                    namespace = %namespace,
+                    drain_delay_seconds,
+                    "Scheduling removal of old ReplicaSet (after drain delay)"
+                );
                 let remove_at = chrono::Utc::now()
                     .checked_add_signed(chrono::TimeDelta::seconds(drain_delay_seconds))
                     .expect("remove_version_at in bounds");
