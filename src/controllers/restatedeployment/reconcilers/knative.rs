@@ -908,7 +908,10 @@ pub async fn cleanup_old_configurations(
 
                     // for idempotency we have to allow 404
                     if resp.status() != reqwest::StatusCode::NOT_FOUND {
-                        let _ = resp.error_for_status().map_err(Error::AdminCallFailed)?;
+                        crate::controllers::restatedeployment::controller::check_admin_response(
+                            resp,
+                        )
+                        .await?;
                     }
                 }
 
