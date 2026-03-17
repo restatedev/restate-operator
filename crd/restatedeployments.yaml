@@ -138,6 +138,14 @@ spec:
               restate:
                 description: Restate specific configuration
                 properties:
+                  drainDelaySeconds:
+                    description: |-
+                      Seconds to wait before removing old versions after they are drained.
+                      Defaults to 300 (5 minutes).
+                    format: int64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
                   register:
                     description: The location of the Restate Admin API to register this deployment against
                     oneOf:

@@ -64,6 +64,10 @@ class Restate {
 
   /// Force the use of HTTP/1.1 when registering with Restate
   useHttp11: Boolean?
+
+  /// Seconds to wait before removing old versions after they are drained. Defaults to 300 (5
+  /// minutes).
+  drainDelaySeconds: Int?
 }
 
 /// The location of the Restate Admin API to register this deployment against
