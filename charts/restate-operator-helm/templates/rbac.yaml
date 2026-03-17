@@ -104,6 +104,17 @@ rules:
       - eks.services.k8s.aws
   {{- end }}
   - resources:
+      - iampolicymembers
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - patch
+      - delete
+    apiGroups:
+      - iam.cnrm.cloud.google.com
+  - resources:
       - configurations
       - routes
       - revisions

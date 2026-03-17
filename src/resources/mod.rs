@@ -1,3 +1,4 @@
+pub mod iampolicymembers;
 pub mod knative;
 pub mod podidentityassociations;
 pub mod restatecloudenvironments;
