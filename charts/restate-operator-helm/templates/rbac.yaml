@@ -103,6 +103,19 @@ rules:
     apiGroups:
       - eks.services.k8s.aws
   {{- end }}
+  {{- if .Values.gcpConfigConnector }}
+  - resources:
+      - iampolicymembers
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - patch
+      - delete
+    apiGroups:
+      - iam.cnrm.cloud.google.com
+  {{- end }}
   - resources:
       - configurations
       - routes

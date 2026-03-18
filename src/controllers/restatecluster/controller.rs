@@ -35,6 +35,7 @@ use tokio::{sync::RwLock, time::Duration};
 use tracing::*;
 
 use crate::controllers::{Diagnostics, State};
+use crate::resources::iampolicymembers::IAMPolicyMember;
 use crate::resources::podidentityassociations::PodIdentityAssociation;
 use crate::resources::restateclusters::{
     RESTATE_CLUSTER_FINALIZER, RestateCluster, RestateClusterCondition, RestateClusterStatus,
@@ -396,10 +397,10 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         security_group_policy_installed,
         pod_identity_association_installed,
         secret_provider_class_installed,
-    ) = api_groups
-        .groups
-        .iter()
-        .fold((false, false, false), |(sgp, pia, spc), group| {
+        iam_policy_member_installed,
+    ) = api_groups.groups.iter().fold(
+        (false, false, false, false),
+        |(sgp, pia, spc, ipm), group| {
             fn group_matches<R: Resource<DynamicType = ()>>(group: &APIGroup) -> bool {
                 group.name == R::group(&())
                     && group.versions.iter().any(|v| v.version == R::version(&()))
@@ -408,8 +409,10 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
                 sgp || group_matches::<SecurityGroupPolicy>(group),
                 pia || group_matches::<PodIdentityAssociation>(group),
                 spc || group_matches::<SecretProviderClass>(group),
+                ipm || group_matches::<IAMPolicyMember>(group),
             )
-        });
+        },
+    );
 
     let rc_api = Api::<RestateCluster>::all(client.clone());
     let ns_api = Api::<Namespace>::all(client.clone());
@@ -421,6 +424,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     let cm_api = Api::<ConfigMap>::all(client.clone());
     let np_api = Api::<NetworkPolicy>::all(client.clone());
     let pia_api = Api::<PodIdentityAssociation>::all(client.clone());
+    let ipm_api = Api::<IAMPolicyMember>::all(client.clone());
     let sgp_api = Api::<SecurityGroupPolicy>::all(client.clone());
     let spc_api = Api::<SecretProviderClass>::all(client.clone());
 
@@ -548,6 +552,27 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
             .predicate_filter(changed_predicate);
 
         controller.owns_stream(spc_watcher)
+    } else {
+        controller
+    };
+    let controller = if iam_policy_member_installed {
+        let ipm_watcher = watcher(ipm_api, cfg.clone())
+            .map(ensure_deletion_change)
+            .touched_objects()
+            .predicate_filter(changed_predicate.combine(status_predicate));
+
+        let wi_job_api = Api::<Job>::all(client.clone());
+        let wi_job_watcher = metadata_watcher(
+            wi_job_api,
+            Config::default().labels("app.kubernetes.io/name=restate-wi-canary"),
+        )
+        .map(ensure_deletion_change)
+        .touched_objects()
+        .predicate_filter(changed_predicate);
+
+        controller
+            .owns_stream(ipm_watcher)
+            .owns_stream(wi_job_watcher)
     } else {
         controller
     };
