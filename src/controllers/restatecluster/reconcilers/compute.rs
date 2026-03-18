@@ -678,6 +678,9 @@ pub async fn reconcile_compute(
             "restate.dev/gcp-service-account".into(),
             gcp_sa_email.to_owned(),
         );
+    } else {
+        delete_iam_policy_member(name, &ipm_api, "restate-workload-identity").await?;
+        delete_job(name, &job_api, "restate-wi-canary").await?;
     }
 
     let restate_service = restate_service(
@@ -972,8 +975,9 @@ async fn check_pia(
         CanaryResult::Pending => {}
     }
 
-    // Job hasn't completed yet - try the pod volume shortcut before declaring pending.
-    // The eks-pod-identity-token volume is visible immediately at pod creation.
+    // job hasn't completed yet - try the pod volume shortcut before declaring pending.
+    // the eks-pod-identity-token volume is visible immediately at pod creation.
+    // no need for a controller-uid filter since the job name is unique within the namespace.
     let name = config.name;
     if let Ok(pods) = pod_api
         .list(&ListParams::default().labels(&format!("batch.kubernetes.io/job-name={name}")))
@@ -1126,15 +1130,11 @@ fn restate_iam_policy_member(
 }
 
 fn is_iam_policy_member_ready(ipm: &IAMPolicyMember) -> bool {
-    if let Some(status) = &ipm.status
-        && let Some(conditions) = &status.conditions
-        && let Some(ready) = conditions.iter().find(|cond| cond.r#type == "Ready")
-        && ready.status == "True"
-    {
-        true
-    } else {
-        false
-    }
+    ipm.status
+        .as_ref()
+        .and_then(|s| s.conditions.as_ref())
+        .and_then(|cs| cs.iter().find(|c| c.r#type == "Ready"))
+        .is_some_and(|c| c.status == "True")
 }
 
 async fn apply_iam_policy_member(
@@ -1149,6 +1149,22 @@ async fn apply_iam_policy_member(
         name, namespace
     );
     Ok(ipm_api.patch(name, &params, &Patch::Apply(&ipm)).await?)
+}
+
+async fn delete_iam_policy_member(
+    namespace: &str,
+    ipm_api: &Api<IAMPolicyMember>,
+    name: &str,
+) -> Result<(), Error> {
+    debug!(
+        "Ensuring IAMPolicyMember {} in namespace {} does not exist",
+        name, namespace
+    );
+    match ipm_api.delete(name, &DeleteParams::default()).await {
+        Err(kube::Error::Api(kube::error::ErrorResponse { code: 404, .. })) => Ok(()),
+        Err(err) => Err(err.into()),
+        Ok(_) => Ok(()),
+    }
 }
 
 async fn check_workload_identity(
