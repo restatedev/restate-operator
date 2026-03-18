@@ -890,14 +890,14 @@ fn check_canary_conditions(job: &Job) -> CanaryResult {
 
 /// Shared canary job logic for cloud credential validation.
 /// Creates a one-shot Job and checks whether credentials are available.
-/// Returns Ok(()) if the canary succeeded, or NotReady if pending/failed.
+/// Returns the CanaryResult so callers can distinguish Complete from Pending.
 async fn run_canary_job(
     namespace: &str,
     base_metadata: &ObjectMeta,
     tolerations: Option<&Vec<Toleration>>,
     job_api: &Api<Job>,
     config: &CanaryConfig,
-) -> Result<(), Error> {
+) -> Result<CanaryResult, Error> {
     let name = config.name;
     let params: PatchParams = PatchParams::apply("restate-operator").force();
     let job = canary_job_spec(base_metadata, tolerations, config);
@@ -924,23 +924,26 @@ async fn run_canary_job(
         Err(err) => return Err(err.into()),
     };
 
-    match check_canary_conditions(&created) {
+    let result = check_canary_conditions(&created);
+    match &result {
         CanaryResult::Complete => {
             debug!("Canary {name} succeeded in namespace {namespace}");
-            Ok(())
         }
         CanaryResult::Failed => {
             error!("Canary {name} failed in namespace {namespace}, deleting Job");
             delete_job(namespace, job_api, name).await?;
 
-            Err(Error::NotReady {
+            return Err(Error::NotReady {
                 reason: format!("{}CanaryFailed", config.reason_prefix),
                 message: config.failure_message.into(),
                 requeue_after: None,
-            })
+            });
         }
-        CanaryResult::Pending => Ok(()),
+        CanaryResult::Pending => {
+            debug!("Canary {name} not yet succeeded in namespace {namespace}");
+        }
     }
+    Ok(result)
 }
 
 async fn check_pia(
@@ -963,53 +966,50 @@ async fn check_pia(
         pending_message: "Canary Job has not yet succeeded; PIA webhook may need to catch up",
     };
 
-    let result = run_canary_job(namespace, base_metadata, tolerations, job_api, &config).await;
+    match run_canary_job(namespace, base_metadata, tolerations, job_api, &config).await? {
+        CanaryResult::Complete => return Ok(()),
+        CanaryResult::Failed => unreachable!("run_canary_job returns Err for Failed"),
+        CanaryResult::Pending => {}
+    }
 
-    // If run_canary_job returned Ok but no Complete condition, try the pod volume shortcut
-    // before declaring pending - the eks-pod-identity-token volume is visible immediately
-    if result.is_ok() {
-        let name = config.name;
-        // try to find the canary pod and check for injected volume
-        if let Ok(pods) = pod_api
-            .list(&ListParams::default().labels(&format!("batch.kubernetes.io/job-name={name}")))
-            .await
-            && let Some(pod) = pods.items.first()
+    // Job hasn't completed yet - try the pod volume shortcut before declaring pending.
+    // The eks-pod-identity-token volume is visible immediately at pod creation.
+    let name = config.name;
+    if let Ok(pods) = pod_api
+        .list(&ListParams::default().labels(&format!("batch.kubernetes.io/job-name={name}")))
+        .await
+        && let Some(pod) = pods.items.first()
+    {
+        if pod
+            .spec
+            .as_ref()
+            .and_then(|s| s.volumes.as_ref())
+            .map(|vs| vs.iter().any(|v| v.name == "eks-pod-identity-token"))
+            .unwrap_or(false)
         {
-            if pod
-                .spec
-                .as_ref()
-                .and_then(|s| s.volumes.as_ref())
-                .map(|vs| vs.iter().any(|v| v.name == "eks-pod-identity-token"))
-                .unwrap_or(false)
-            {
-                debug!(
-                    "PodIdentityAssociation canary check succeeded via pod lookup in namespace {namespace}"
-                );
-                return Ok(());
-            }
-
             debug!(
-                "PodIdentityAssociation canary check failed via pod lookup in namespace {namespace}, deleting Job"
+                "PodIdentityAssociation canary check succeeded via pod lookup in namespace {namespace}"
             );
-            delete_job(namespace, job_api, name).await?;
-
-            return Err(Error::NotReady {
-                reason: "PodIdentityAssociationCanaryFailed".into(),
-                message: config.failure_message.into(),
-                requeue_after: None,
-            });
+            return Ok(());
         }
 
-        // no pods yet
-        debug!("Canary {name} not yet succeeded in namespace {namespace}");
+        debug!(
+            "PodIdentityAssociation canary check failed via pod lookup in namespace {namespace}, deleting Job"
+        );
+        delete_job(namespace, job_api, name).await?;
+
         return Err(Error::NotReady {
-            reason: "PodIdentityAssociationCanaryPending".into(),
-            message: config.pending_message.into(),
+            reason: "PodIdentityAssociationCanaryFailed".into(),
+            message: config.failure_message.into(),
             requeue_after: None,
         });
     }
 
-    result
+    Err(Error::NotReady {
+        reason: "PodIdentityAssociationCanaryPending".into(),
+        message: config.pending_message.into(),
+        requeue_after: None,
+    })
 }
 
 fn is_pod_identity_association_synced(pia: PodIdentityAssociation) -> bool {
@@ -1114,7 +1114,9 @@ fn restate_iam_policy_member(
             role: "roles/iam.workloadIdentityUser".into(),
             resource_ref: IAMPolicyMemberResourceRef {
                 kind: "IAMServiceAccount".into(),
-                external: Some(gcp_service_account_email.into()),
+                external: Some(format!(
+                    "projects/{gcp_project}/serviceAccounts/{gcp_service_account_email}"
+                )),
                 name: None,
                 namespace: None,
             },
@@ -1171,21 +1173,15 @@ async fn check_workload_identity(
         pending_message: "Canary Job has not yet succeeded; Workload Identity may need to propagate",
     };
 
-    let result = run_canary_job(namespace, base_metadata, tolerations, job_api, &config).await;
-    if result.is_ok() {
-        // No Complete condition yet - job is still pending
-        debug!(
-            "Canary {} not yet succeeded in namespace {namespace}",
-            config.name
-        );
-        return Err(Error::NotReady {
+    match run_canary_job(namespace, base_metadata, tolerations, job_api, &config).await? {
+        CanaryResult::Complete => Ok(()),
+        CanaryResult::Failed => unreachable!("run_canary_job returns Err for Failed"),
+        CanaryResult::Pending => Err(Error::NotReady {
             reason: "WorkloadIdentityCanaryPending".into(),
             message: config.pending_message.into(),
             requeue_after: None,
-        });
+        }),
     }
-
-    result
 }
 
 async fn change_statefulset_storage(
@@ -1556,7 +1552,7 @@ mod tests {
         assert_eq!(ipm.spec.resource_ref.kind, "IAMServiceAccount");
         assert_eq!(
             ipm.spec.resource_ref.external.as_deref(),
-            Some("sa@proj.iam.gserviceaccount.com")
+            Some("projects/proj/serviceAccounts/sa@proj.iam.gserviceaccount.com")
         );
     }
 
