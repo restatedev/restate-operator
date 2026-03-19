@@ -57,6 +57,13 @@ pub enum Error {
     #[error("Failed to make Restate admin API call: {0}")]
     AdminCallFailed(reqwest::Error),
 
+    #[error("Restate admin API call failed ({status}): {body}")]
+    AdminCallRejected {
+        status: reqwest::StatusCode,
+        url: String,
+        body: String,
+    },
+
     #[error("Encountered a hash collision, will retry with a new template hash")]
     HashCollision,
 
@@ -105,6 +112,7 @@ impl Error {
             Error::InvalidBearerToken => "InvalidBearerToken",
             Error::InvalidSigningKeyError(_) => "InvalidSigningKeyError",
             Error::AdminCallFailed(_) => "AdminCallFailed",
+            Error::AdminCallRejected { .. } => "AdminCallRejected",
             Error::HashCollision => "HashCollision",
             Error::DeploymentInUse => "DeploymentInUse",
             Error::DeploymentDraining { .. } => "DeploymentDraining",

@@ -131,6 +131,19 @@ impl Context {
     }
 }
 
+/// Check an admin API response, returning the response if successful or an error
+/// that includes the response body if not. This replaces the `error_for_status()`
+/// pattern which discards the response body.
+pub(crate) async fn check_admin_response(resp: reqwest::Response) -> Result<reqwest::Response> {
+    if resp.status().is_success() {
+        return Ok(resp);
+    }
+    let status = resp.status();
+    let url = resp.url().to_string();
+    let body = resp.text().await.unwrap_or_default();
+    Err(Error::AdminCallRejected { status, url, body })
+}
+
 #[instrument(skip(ctx, rs), fields(trace_id))]
 async fn reconcile(rs: Arc<RestateDeployment>, ctx: Arc<Context>) -> Result<Action> {
     if let Some(trace_id) = telemetry::get_trace_id() {
@@ -544,7 +557,7 @@ impl RestateDeployment {
                 Err(Error::AdminCallFailed(ref err)) => {
                     let message = format!("Failed to make Restate admin API call: {}", err);
                     let requeue_after = Duration::from_secs(30);
-                    debug!(
+                    warn!(
                         name = %self.metadata.name.as_deref().unwrap_or("unknown"),
                         namespace = %namespace,
                         error = %err,
@@ -555,6 +568,29 @@ impl RestateDeployment {
                         Ok(Action::requeue(requeue_after)),
                         message,
                         "AdminCallFailed".into(),
+                        "False".into(),
+                    )
+                }
+                Err(Error::AdminCallRejected {
+                    ref status,
+                    ref url,
+                    ref body,
+                }) => {
+                    let message = format!("Restate admin API call failed ({status}): {body}");
+                    let requeue_after = Duration::from_secs(30);
+                    warn!(
+                        name = %self.metadata.name.as_deref().unwrap_or("unknown"),
+                        namespace = %namespace,
+                        %status,
+                        %url,
+                        body = %body,
+                        requeue_after_secs = %requeue_after.as_secs(),
+                        "Admin API call rejected, requeueing"
+                    );
+                    (
+                        Ok(Action::requeue(requeue_after)),
+                        message,
+                        "AdminCallRejected".into(),
                         "False".into(),
                     )
                 }
@@ -581,7 +617,7 @@ impl RestateDeployment {
             }
         } else {
             // ReplicaSet mode
-            match self.reconcile(ctx, namespace).await {
+            match self.reconcile(ctx.clone(), namespace).await {
                 Ok((current_replicaset, next_removal)) => {
                     let action = match next_removal {
                         Some(next_removal) if next_removal < now => Action::requeue(Duration::ZERO), // immediate requeue
@@ -651,7 +687,7 @@ impl RestateDeployment {
                 Err(Error::AdminCallFailed(ref err)) => {
                     let message = format!("Failed to make Restate admin API call: {}", err);
                     let requeue_after = Duration::from_secs(30);
-                    debug!(
+                    warn!(
                         name = %self.metadata.name.as_deref().unwrap_or("unknown"),
                         namespace = %namespace,
                         error = %err,
@@ -662,6 +698,29 @@ impl RestateDeployment {
                         Ok(Action::requeue(requeue_after)),
                         message,
                         "AdminCallFailed".into(),
+                        "False".into(),
+                    )
+                }
+                Err(Error::AdminCallRejected {
+                    ref status,
+                    ref url,
+                    ref body,
+                }) => {
+                    let message = format!("Restate admin API call failed ({status}): {body}");
+                    let requeue_after = Duration::from_secs(30);
+                    warn!(
+                        name = %self.metadata.name.as_deref().unwrap_or("unknown"),
+                        namespace = %namespace,
+                        %status,
+                        %url,
+                        body = %body,
+                        requeue_after_secs = %requeue_after.as_secs(),
+                        "Admin API call rejected, requeueing"
+                    );
+                    (
+                        Ok(Action::requeue(requeue_after)),
+                        message,
+                        "AdminCallRejected".into(),
                         "False".into(),
                     )
                 }
@@ -676,6 +735,23 @@ impl RestateDeployment {
                 }
             }
         };
+
+        // Emit a K8s Warning event for admin API failures so they're visible
+        // via `kubectl describe` and `kubectl get events`
+        if reason == "AdminCallFailed" || reason == "AdminCallRejected" {
+            ctx.recorder
+                .publish(
+                    &Event {
+                        type_: EventType::Warning,
+                        reason: reason.clone(),
+                        note: Some(message.clone()),
+                        action: "Reconcile".into(),
+                        secondary: None,
+                    },
+                    &self.object_ref(&()),
+                )
+                .await?;
+        }
 
         let last_transition_time = if existing_ready.is_none_or(|r| r.status != status) {
             Time(now)
@@ -750,14 +826,14 @@ impl RestateDeployment {
             payload["use_http_11"] = serde_json::Value::Bool(use_http11);
         }
 
-        let resp: DeploymentResponse = ctx
+        let resp = ctx
             .request(Method::POST, &self.spec.restate.register, "/deployments")?
             .json(&payload)
             .send()
             .await
-            .map_err(Error::AdminCallFailed)?
-            .error_for_status()
-            .map_err(Error::AdminCallFailed)?
+            .map_err(Error::AdminCallFailed)?;
+        let resp: DeploymentResponse = check_admin_response(resp)
+            .await?
             .json()
             .await
             .map_err(Error::AdminCallFailed)?;
@@ -801,7 +877,7 @@ impl RestateDeployment {
             active: bool,
         }
 
-        let response: DeploymentQueryResult = ctx
+        let resp = ctx
             .request(Method::POST, &self.spec.restate.register, "/query")?
             .header(reqwest::header::ACCEPT, "application/json")
             .json(&serde_json::json!({
@@ -809,9 +885,9 @@ impl RestateDeployment {
             }))
             .send()
             .await
-            .map_err(Error::AdminCallFailed)?
-            .error_for_status()
-            .map_err(Error::AdminCallFailed)?
+            .map_err(Error::AdminCallFailed)?;
+        let response: DeploymentQueryResult = check_admin_response(resp)
+            .await?
             .json()
             .await
             .map_err(Error::AdminCallFailed)?;
