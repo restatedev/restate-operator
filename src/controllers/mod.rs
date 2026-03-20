@@ -38,6 +38,8 @@ pub struct State {
     pub registry: prometheus::Registry,
     /// If set, watch AWS PodIdentityAssociation resources, and if requested create them against this cluster
     aws_pod_identity_association_cluster: Option<String>,
+    /// If true, manage GCP Workload Identity via Config Connector IAMPolicyMember
+    gcp_workload_identity: bool,
 
     /// Our namespace, needed for network policies and reading secrets
     operator_namespace: String,
@@ -57,6 +59,7 @@ pub struct State {
 impl State {
     pub fn new(
         aws_pod_identity_association_cluster: Option<String>,
+        gcp_workload_identity: bool,
         operator_namespace: String,
         operator_label_name: Option<String>,
         operator_label_value: Option<String>,
@@ -67,6 +70,7 @@ impl State {
             diagnostics: Arc::new(RwLock::new(Diagnostics::default())),
             registry: prometheus::Registry::default(),
             aws_pod_identity_association_cluster,
+            gcp_workload_identity,
             operator_namespace,
             operator_label_name,
             operator_label_value,

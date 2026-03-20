@@ -624,63 +624,73 @@ pub async fn reconcile_compute(
         .and_then(|s| s.service_account_annotations.as_ref())
         .and_then(|a| a.get("iam.gke.io/gcp-service-account"));
 
-    if let Some(gcp_sa_email) = gcp_sa_email {
-        let gcp_project = match parse_gcp_project_from_sa_email(gcp_sa_email) {
-            Some(project) => project,
-            None => {
-                return Err(Error::InvalidRestateConfig(format!(
-                    "Cannot parse GCP project from service account email '{gcp_sa_email}'; expected format: name@PROJECT.iam.gserviceaccount.com"
-                )));
-            }
-        };
+    match (ctx.gcp_workload_identity, gcp_sa_email) {
+        (true, Some(gcp_sa_email)) => {
+            let gcp_project = match parse_gcp_project_from_sa_email(gcp_sa_email) {
+                Some(project) => project,
+                None => {
+                    return Err(Error::InvalidRestateConfig(format!(
+                        "Cannot parse GCP project from service account email '{gcp_sa_email}'; expected format: name@PROJECT.iam.gserviceaccount.com"
+                    )));
+                }
+            };
 
-        let ipm = match apply_iam_policy_member(
-            name,
-            &ipm_api,
-            restate_iam_policy_member(name, base_metadata, gcp_project, gcp_sa_email),
-        )
-        .await
-        {
-            Ok(ipm) => ipm,
-            Err(Error::KubeError(kube::Error::Api(kube::error::ErrorResponse {
-                code: 404,
-                ..
-            }))) => {
+            let ipm = match apply_iam_policy_member(
+                name,
+                &ipm_api,
+                restate_iam_policy_member(name, base_metadata, gcp_project, gcp_sa_email),
+            )
+            .await
+            {
+                Ok(ipm) => ipm,
+                Err(Error::KubeError(kube::Error::Api(kube::error::ErrorResponse {
+                    code: 404,
+                    ..
+                }))) => {
+                    return Err(Error::NotReady {
+                        reason: "IAMPolicyMemberCRDNotFound".into(),
+                        message: "IAMPolicyMember CRD not found - is Config Connector installed?"
+                            .into(),
+                        requeue_after: Some(Duration::from_secs(60)),
+                    });
+                }
+                Err(err) => return Err(err),
+            };
+
+            if !is_iam_policy_member_ready(&ipm) {
                 return Err(Error::NotReady {
-                    reason: "IAMPolicyMemberCRDNotFound".into(),
-                    message: "IAMPolicyMember CRD not found - is Config Connector installed?"
-                        .into(),
-                    requeue_after: Some(Duration::from_secs(60)),
+                    reason: "IAMPolicyMemberNotReady".into(),
+                    message:
+                        "Waiting for Config Connector to provision the IAM policy member binding"
+                            .into(),
+                    requeue_after: None,
                 });
             }
-            Err(err) => return Err(err),
-        };
 
-        if !is_iam_policy_member_ready(&ipm) {
-            return Err(Error::NotReady {
-                reason: "IAMPolicyMemberNotReady".into(),
-                message: "Waiting for Config Connector to provision the IAM policy member binding"
-                    .into(),
-                requeue_after: None,
-            });
+            check_workload_identity(
+                name,
+                base_metadata,
+                spec.compute.tolerations.as_ref(),
+                &job_api,
+            )
+            .await?;
+
+            let pod_annotations = pod_annotations.get_or_insert_with(Default::default);
+            pod_annotations.insert(
+                "restate.dev/gcp-service-account".into(),
+                gcp_sa_email.to_owned(),
+            );
         }
-
-        check_workload_identity(
-            name,
-            base_metadata,
-            spec.compute.tolerations.as_ref(),
-            &job_api,
-        )
-        .await?;
-
-        let pod_annotations = pod_annotations.get_or_insert_with(Default::default);
-        pod_annotations.insert(
-            "restate.dev/gcp-service-account".into(),
-            gcp_sa_email.to_owned(),
-        );
-    } else {
-        delete_iam_policy_member(name, &ipm_api, "restate-workload-identity").await?;
-        delete_job(name, &job_api, "restate-wi-canary").await?;
+        (true, None) => {
+            delete_iam_policy_member(name, &ipm_api, "restate-workload-identity").await?;
+            delete_job(name, &job_api, "restate-wi-canary").await?;
+        }
+        (false, Some(gcp_sa_email)) => {
+            warn!(
+                "Ignoring iam.gke.io/gcp-service-account annotation {gcp_sa_email} as the operator is not configured with --gcp-workload-identity"
+            );
+        }
+        (false, None) => {}
     }
 
     let restate_service = restate_service(

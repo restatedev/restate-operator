@@ -14,7 +14,7 @@ serviceAccount:
 podAnnotations: {}
 
 awsPodIdentityAssociationCluster: null
-gcpConfigConnector: null
+gcpWorkloadIdentity: null
 clusterDns: null # defaults to "cluster.local" in the operator binary
 
 podSecurityContext:

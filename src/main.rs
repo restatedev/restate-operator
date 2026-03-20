@@ -18,6 +18,14 @@ struct Arguments {
     aws_pod_identity_association_cluster: Option<String>,
 
     #[arg(
+        long = "gcp-workload-identity",
+        env = "GCP_WORKLOAD_IDENTITY",
+        value_name = "ENABLED",
+        default_value = "false"
+    )]
+    gcp_workload_identity: bool,
+
+    #[arg(
         long = "operator-namespace",
         env = "OPERATOR_NAMESPACE",
         value_name = "NAMESPACE"
@@ -95,6 +103,7 @@ async fn main() -> anyhow::Result<()> {
     // Initialize Kubernetes controller state
     let state = State::new(
         args.aws_pod_identity_association_cluster,
+        args.gcp_workload_identity,
         args.operator_namespace,
         args.operator_label_name,
         args.operator_label_value,
