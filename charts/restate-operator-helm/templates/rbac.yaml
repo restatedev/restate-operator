@@ -103,7 +103,7 @@ rules:
     apiGroups:
       - eks.services.k8s.aws
   {{- end }}
-  {{- if .Values.gcpConfigConnector }}
+  {{- if .Values.gcpWorkloadIdentity }}
   - resources:
       - iampolicymembers
     verbs:

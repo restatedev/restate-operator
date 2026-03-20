@@ -72,6 +72,8 @@ pub(super) struct Context {
     pub security_group_policy_installed: bool,
     // Whether the SecretProviderClass CRD is installed
     pub secret_provider_class_installed: bool,
+    // Whether GCP Workload Identity management is enabled
+    pub gcp_workload_identity: bool,
     /// The cluster DNS suffix (e.g. "cluster.local")
     pub cluster_dns: String,
     /// Diagnostics read by the web server
@@ -81,6 +83,7 @@ pub(super) struct Context {
 }
 
 impl Context {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         client: Client,
         metrics: Metrics,
@@ -103,6 +106,7 @@ impl Context {
             operator_label_value: state.operator_label_value.clone(),
             security_group_policy_installed,
             secret_provider_class_installed,
+            gcp_workload_identity: state.gcp_workload_identity,
             cluster_dns: state.cluster_dns.clone(),
             diagnostics: state.diagnostics.clone(),
             metrics,
@@ -555,7 +559,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     } else {
         controller
     };
-    let controller = if iam_policy_member_installed {
+    let controller = if state.gcp_workload_identity && iam_policy_member_installed {
         let ipm_watcher = watcher(ipm_api, cfg.clone())
             .map(ensure_deletion_change)
             .touched_objects()

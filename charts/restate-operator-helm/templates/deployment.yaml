@@ -60,6 +60,10 @@ spec:
             - name: AWS_POD_IDENTITY_ASSOCIATION_CLUSTER
               value: {{ .Values.awsPodIdentityAssociationCluster }}
           {{- end }}
+          {{- if .Values.gcpWorkloadIdentity }}
+            - name: GCP_WORKLOAD_IDENTITY
+              value: "true"
+          {{- end }}
           {{- if .Values.clusterDns }}
             - name: CLUSTER_DNS
               value: {{ .Values.clusterDns }}
