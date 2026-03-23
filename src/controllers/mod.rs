@@ -53,9 +53,13 @@ pub struct State {
 
     /// The cluster DNS suffix (e.g. "cluster.local")
     pub cluster_dns: String,
+
+    /// The container image to use for canary jobs
+    pub canary_image: String,
 }
 
 /// State wrapper around the controller outputs for the web server
+#[allow(clippy::too_many_arguments)]
 impl State {
     pub fn new(
         aws_pod_identity_association_cluster: Option<String>,
@@ -65,6 +69,7 @@ impl State {
         operator_label_value: Option<String>,
         tunnel_client_default_image: String,
         cluster_dns: String,
+        canary_image: String,
     ) -> Self {
         Self {
             diagnostics: Arc::new(RwLock::new(Diagnostics::default())),
@@ -76,6 +81,7 @@ impl State {
             operator_label_value,
             tunnel_client_default_image,
             cluster_dns,
+            canary_image,
         }
     }
 

@@ -61,6 +61,14 @@ struct Arguments {
         default_value = "cluster.local"
     )]
     cluster_dns: String,
+
+    #[arg(
+        long = "canary-image",
+        env = "CANARY_IMAGE",
+        value_name = "IMAGE",
+        default_value = "busybox:uclibc"
+    )]
+    canary_image: String,
 }
 
 #[get("/metrics")]
@@ -109,6 +117,7 @@ async fn main() -> anyhow::Result<()> {
         args.operator_label_value,
         args.tunnel_client_default_image,
         args.cluster_dns,
+        args.canary_image,
     );
 
     let client = Client::try_default()

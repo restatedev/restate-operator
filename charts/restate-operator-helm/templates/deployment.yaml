@@ -64,6 +64,10 @@ spec:
             - name: GCP_WORKLOAD_IDENTITY
               value: "true"
           {{- end }}
+          {{- if .Values.canaryImage }}
+            - name: CANARY_IMAGE
+              value: {{ .Values.canaryImage }}
+          {{- end }}
           {{- if .Values.clusterDns }}
             - name: CLUSTER_DNS
               value: {{ .Values.clusterDns }}
