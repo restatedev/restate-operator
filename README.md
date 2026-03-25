@@ -642,6 +642,27 @@ cluster name, by setting `awsPodIdentityAssociationCluster` in the helm chart. I
 be installed or the operator will fail to start. Then, you may provide `awsPodIdentityAssociationRoleArn` in
 the `RestateCluster` spec.
 
+### Canary Image
+
+Both EKS Pod Identity and GCP Workload Identity use a canary job to validate that credentials are available before
+starting the Restate cluster. By default, this uses the `busybox:uclibc` image from Docker Hub. In environments where
+nodes cannot pull from Docker Hub (e.g. air-gapped or restricted registries), you can override this with the
+`canaryImage` Helm value:
+
+```yaml
+canaryImage: my-private-registry.example.com/busybox:uclibc
+```
+
+The simplest approach is to mirror the default image:
+
+```bash
+docker pull busybox:uclibc
+docker tag busybox:uclibc my-private-registry.example.com/busybox:uclibc
+docker push my-private-registry.example.com/busybox:uclibc
+```
+
+If using a different base image, it must provide `grep` and `wget`.
+
 ### EKS Security Groups for Pods
 
 [EKS Security Groups for Pods](https://docs.aws.amazon.com/eks/latest/userguide/security-groups-for-pods.html) allows
