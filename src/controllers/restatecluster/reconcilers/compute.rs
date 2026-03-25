@@ -557,6 +557,7 @@ pub async fn reconcile_compute(
                 spec.compute.tolerations.as_ref(),
                 &job_api,
                 &pod_api,
+                &ctx.canary_image,
             )
             .await?;
 
@@ -672,6 +673,7 @@ pub async fn reconcile_compute(
                 base_metadata,
                 spec.compute.tolerations.as_ref(),
                 &job_api,
+                &ctx.canary_image,
             )
             .await?;
 
@@ -825,6 +827,8 @@ async fn apply_pod_identity_association(
 struct CanaryConfig {
     /// Job name, e.g. "restate-pia-canary"
     name: &'static str,
+    /// Container image to use for the canary pod
+    image: String,
     /// Command to run in the canary container
     command: Vec<String>,
     /// Reason prefix for NotReady conditions, e.g. "PodIdentityAssociation"
@@ -859,7 +863,7 @@ fn canary_job_spec(
                     service_account_name: Some("restate".into()),
                     containers: vec![Container {
                         name: "canary".into(),
-                        image: Some("busybox:uclibc".into()),
+                        image: Some(config.image.clone()),
                         command: Some(config.command.clone()),
                         ..Default::default()
                     }],
@@ -965,9 +969,11 @@ async fn check_pia(
     tolerations: Option<&Vec<Toleration>>,
     job_api: &Api<Job>,
     pod_api: &Api<Pod>,
+    canary_image: &str,
 ) -> Result<(), Error> {
     let config = CanaryConfig {
         name: "restate-pia-canary",
+        image: canary_image.into(),
         command: vec![
             "grep".into(),
             "-q".into(),
@@ -1182,9 +1188,11 @@ async fn check_workload_identity(
     base_metadata: &ObjectMeta,
     tolerations: Option<&Vec<Toleration>>,
     job_api: &Api<Job>,
+    canary_image: &str,
 ) -> Result<(), Error> {
     let config = CanaryConfig {
         name: "restate-wi-canary",
+        image: canary_image.into(),
         command: vec![
             "wget".into(),
             "--header".into(),
@@ -1680,6 +1688,7 @@ mod tests {
     fn test_canary_job_spec_structure() {
         let config = CanaryConfig {
             name: "test-canary",
+            image: "my-registry/busybox:latest".into(),
             command: vec!["echo".into(), "hello".into()],
             reason_prefix: "Test",
             failure_message: "test failed",
@@ -1697,7 +1706,10 @@ mod tests {
 
         let container = &pod_spec.containers[0];
         assert_eq!(container.name, "canary");
-        assert_eq!(container.image.as_deref(), Some("busybox:uclibc"));
+        assert_eq!(
+            container.image.as_deref(),
+            Some("my-registry/busybox:latest")
+        );
         assert_eq!(
             container.command.as_ref().unwrap(),
             &vec!["echo".to_string(), "hello".to_string()]
@@ -1708,6 +1720,7 @@ mod tests {
     fn test_canary_job_spec_label() {
         let config = CanaryConfig {
             name: "my-canary",
+            image: "busybox:uclibc".into(),
             command: vec!["true".into()],
             reason_prefix: "Test",
             failure_message: "",
@@ -1734,6 +1747,7 @@ mod tests {
         }];
         let config = CanaryConfig {
             name: "test-canary",
+            image: "busybox:uclibc".into(),
             command: vec!["true".into()],
             reason_prefix: "Test",
             failure_message: "",

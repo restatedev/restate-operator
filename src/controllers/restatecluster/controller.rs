@@ -76,6 +76,8 @@ pub(super) struct Context {
     pub gcp_workload_identity: bool,
     /// The cluster DNS suffix (e.g. "cluster.local")
     pub cluster_dns: String,
+    /// The container image to use for canary jobs
+    pub canary_image: String,
     /// Diagnostics read by the web server
     pub diagnostics: Arc<RwLock<Diagnostics>>,
     /// Prometheus metrics
@@ -108,6 +110,7 @@ impl Context {
             secret_provider_class_installed,
             gcp_workload_identity: state.gcp_workload_identity,
             cluster_dns: state.cluster_dns.clone(),
+            canary_image: state.canary_image.clone(),
             diagnostics: state.diagnostics.clone(),
             metrics,
         })
