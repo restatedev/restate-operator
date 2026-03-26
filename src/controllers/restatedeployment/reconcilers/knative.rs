@@ -979,6 +979,17 @@ pub async fn cleanup_old_configurations(
         }
     }
 
+    // If there are active old deployments still draining but no removal is yet scheduled,
+    // signal the controller to requeue based on the drain delay instead of the default 5m interval.
+    if active_count > 0 && next_removal.is_none() {
+        let drain_delay_seconds = rsd.spec.restate.drain_delay_seconds();
+        next_removal = Some(
+            chrono::Utc::now()
+                .checked_add_signed(chrono::TimeDelta::seconds(drain_delay_seconds))
+                .expect("next_removal in bounds"),
+        );
+    }
+
     Ok((active_count, next_removal))
 }
 
