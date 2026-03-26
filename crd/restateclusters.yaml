@@ -1470,6 +1470,24 @@ spec:
                     description: Annotations to set on the Service created for Restate
                     nullable: true
                     type: object
+                  trustedCaCerts:
+                    description: |-
+                      Optional list of Secrets containing trusted CA certificates.
+                      Each cert is appended to the system CA bundle via an init container.
+                    items:
+                      properties:
+                        key:
+                          description: Key within the Secret that contains the PEM-encoded certificate
+                          type: string
+                        secretName:
+                          description: Name of the Secret containing the CA certificate
+                          type: string
+                      required:
+                      - key
+                      - secretName
+                      type: object
+                    nullable: true
+                    type: array
                 type: object
               storage:
                 description: Storage configuration

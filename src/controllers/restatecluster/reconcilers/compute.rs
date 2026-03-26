@@ -6,11 +6,11 @@ use std::time::Duration;
 use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetSpec, StatefulSetStatus};
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    ConfigMap, ConfigMapVolumeSource, Container, ContainerPort, EnvVar, EnvVarSource,
-    HTTPGetAction, ObjectFieldSelector, PersistentVolumeClaim, PersistentVolumeClaimSpec, Pod,
-    PodSecurityContext, PodSpec, PodTemplateSpec, Probe, SeccompProfile, SecurityContext, Service,
-    ServiceAccount, ServicePort, ServiceSpec, Toleration, Volume, VolumeMount,
-    VolumeResourceRequirements,
+    ConfigMap, ConfigMapVolumeSource, Container, ContainerPort, EmptyDirVolumeSource, EnvVar,
+    EnvVarSource, HTTPGetAction, KeyToPath, ObjectFieldSelector, PersistentVolumeClaim,
+    PersistentVolumeClaimSpec, Pod, PodSecurityContext, PodSpec, PodTemplateSpec, Probe,
+    SeccompProfile, SecretVolumeSource, SecurityContext, Service, ServiceAccount, ServicePort,
+    ServiceSpec, Toleration, Volume, VolumeMount, VolumeResourceRequirements,
 };
 use k8s_openapi::api::policy::v1::{PodDisruptionBudget, PodDisruptionBudgetSpec};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
@@ -35,7 +35,7 @@ use crate::resources::podidentityassociations::{
     PodIdentityAssociation, PodIdentityAssociationSpec,
 };
 use crate::resources::restateclusters::{
-    RestateClusterSpec, RestateClusterStatus, RestateClusterStorage,
+    RestateClusterSpec, RestateClusterStatus, RestateClusterStorage, TrustedCACert,
 };
 use crate::resources::securitygrouppolicies::{
     SecurityGroupPolicy, SecurityGroupPolicySecurityGroups, SecurityGroupPolicySpec,
@@ -290,6 +290,93 @@ fn env(cluster_name: &str, custom: Option<&[EnvVar]>) -> Vec<EnvVar> {
     }
 }
 
+// Debian/Alpine system CA bundle path. If the Restate server base image changes to a
+// different distro (e.g. RHEL uses /etc/pki/tls/certs/ca-bundle.crt), this must be updated.
+const SYSTEM_CA_BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
+const COMBINED_CA_VOLUME: &str = "combined-ca-certs";
+const COMBINED_CA_MOUNT: &str = "/combined-certs";
+const COMBINED_CA_BUNDLE: &str = "/combined-certs/ca-certificates.crt";
+
+/// Build volumes and an init container that concatenates system CA certs with custom trusted CAs.
+/// Returns (additional_volumes, init_container).
+fn trusted_ca_init_container(
+    certs: &[TrustedCACert],
+    canary_image: &str,
+) -> (Vec<Volume>, Container) {
+    let mut ca_volumes = Vec::with_capacity(certs.len() + 1);
+    let mut init_volume_mounts = Vec::with_capacity(certs.len() + 1);
+    let mut cat_sources = vec![SYSTEM_CA_BUNDLE.to_string()];
+
+    for (i, cert) in certs.iter().enumerate() {
+        let vol_name = format!("trusted-ca-{i}");
+        let mount_path = format!("/trusted-ca-{i}");
+
+        ca_volumes.push(Volume {
+            name: vol_name.clone(),
+            secret: Some(SecretVolumeSource {
+                secret_name: Some(cert.secret_name.clone()),
+                items: Some(vec![KeyToPath {
+                    key: cert.key.clone(),
+                    path: "ca.pem".into(),
+                    mode: Some(0o444),
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        init_volume_mounts.push(VolumeMount {
+            name: vol_name,
+            mount_path: mount_path.clone(),
+            read_only: Some(true),
+            ..Default::default()
+        });
+
+        cat_sources.push(format!("{mount_path}/ca.pem"));
+    }
+
+    // emptyDir for the combined bundle
+    ca_volumes.push(Volume {
+        name: COMBINED_CA_VOLUME.into(),
+        empty_dir: Some(EmptyDirVolumeSource::default()),
+        ..Default::default()
+    });
+
+    init_volume_mounts.push(VolumeMount {
+        name: COMBINED_CA_VOLUME.into(),
+        mount_path: COMBINED_CA_MOUNT.into(),
+        ..Default::default()
+    });
+
+    let cat_command = format!("cat {} > {COMBINED_CA_BUNDLE}", cat_sources.join(" "));
+
+    let init_container = Container {
+        name: "combine-ca-certs".into(),
+        image: Some(canary_image.into()),
+        command: Some(vec!["sh".into(), "-c".into(), cat_command]),
+        volume_mounts: Some(init_volume_mounts),
+        security_context: Some(SecurityContext {
+            allow_privilege_escalation: Some(false),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    (ca_volumes, init_container)
+}
+
+/// Compute a hash of trusted CA cert references for use as a pod annotation to trigger rollouts.
+fn hash_trusted_ca_cert_refs(certs: &[TrustedCACert]) -> String {
+    let mut hasher = sha2::Sha256::new();
+    for cert in certs {
+        hasher.update(cert.secret_name.as_bytes());
+        hasher.update(b":");
+        hasher.update(cert.key.as_bytes());
+        hasher.update(b",");
+    }
+    format!("{:x}", hasher.finalize())
+}
+
 const RESTATE_STATEFULSET_NAME: &str = "restate";
 
 fn restate_statefulset(
@@ -298,6 +385,7 @@ fn restate_statefulset(
     pod_annotations: Option<BTreeMap<String, String>>,
     signing_key: Option<(Volume, PathBuf)>,
     cm_name: String,
+    canary_image: &str,
 ) -> StatefulSet {
     let metadata = object_meta(base_metadata, RESTATE_STATEFULSET_NAME);
     let labels = metadata.labels.clone();
@@ -371,6 +459,36 @@ fn restate_statefulset(
         })
     }
 
+    let trusted_ca_certs = spec
+        .security
+        .as_ref()
+        .and_then(|s| s.trusted_ca_certs.as_deref())
+        .unwrap_or_default();
+
+    let init_containers = if !trusted_ca_certs.is_empty() {
+        let (ca_volumes, init_container) =
+            trusted_ca_init_container(trusted_ca_certs, canary_image);
+        volumes.extend(ca_volumes);
+
+        // Mount combined bundle in main container
+        volume_mounts.push(VolumeMount {
+            name: COMBINED_CA_VOLUME.into(),
+            mount_path: COMBINED_CA_MOUNT.into(),
+            read_only: Some(true),
+            ..Default::default()
+        });
+
+        env.push(EnvVar {
+            name: "SSL_CERT_FILE".into(),
+            value: Some(COMBINED_CA_BUNDLE.into()),
+            value_from: None,
+        });
+
+        Some(vec![init_container])
+    } else {
+        None
+    };
+
     StatefulSet {
         metadata,
         spec: Some(StatefulSetSpec {
@@ -389,6 +507,7 @@ fn restate_statefulset(
                     dns_policy: spec.compute.dns_policy.clone(),
                     dns_config: spec.compute.dns_config.clone(),
                     image_pull_secrets: spec.compute.image_pull_secrets.clone(),
+                    init_containers,
                     containers: vec![Container {
                         name: "restate".into(),
                         image: Some(spec.compute.image.clone()),
@@ -695,6 +814,20 @@ pub async fn reconcile_compute(
         (false, None) => {}
     }
 
+    // Add pod annotation for trusted CA certs to trigger rollout on change
+    if let Some(certs) = spec
+        .security
+        .as_ref()
+        .and_then(|s| s.trusted_ca_certs.as_deref())
+        .filter(|c| !c.is_empty())
+    {
+        let pod_annotations = pod_annotations.get_or_insert_with(Default::default);
+        pod_annotations.insert(
+            "restate.dev/trusted-ca-certs".into(),
+            hash_trusted_ca_cert_refs(certs),
+        );
+    }
+
     let restate_service = restate_service(
         base_metadata,
         spec.security
@@ -723,7 +856,14 @@ pub async fn reconcile_compute(
     let ss = apply_stateful_set(
         name,
         &ss_api,
-        restate_statefulset(base_metadata, spec, pod_annotations, signing_key, cm_name),
+        restate_statefulset(
+            base_metadata,
+            spec,
+            pod_annotations,
+            signing_key,
+            cm_name,
+            &ctx.canary_image,
+        ),
     )
     .await?;
 
@@ -1757,5 +1897,64 @@ mod tests {
 
         let pod_spec = job.spec.unwrap().template.spec.unwrap();
         assert_eq!(pod_spec.tolerations.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_trusted_ca_init_container_single_cert() {
+        let certs = vec![TrustedCACert {
+            secret_name: "my-ca".into(),
+            key: "ca.pem".into(),
+        }];
+        let (volumes, init) = trusted_ca_init_container(&certs, "busybox:uclibc");
+
+        // 1 secret volume + 1 emptyDir
+        assert_eq!(volumes.len(), 2);
+        assert_eq!(volumes[0].name, "trusted-ca-0");
+        assert!(volumes[0].secret.is_some());
+        assert_eq!(volumes[1].name, COMBINED_CA_VOLUME);
+        assert!(volumes[1].empty_dir.is_some());
+
+        // init container uses canary image, not restate image
+        assert_eq!(init.image.as_deref(), Some("busybox:uclibc"));
+
+        // init container cat command includes system certs and custom cert
+        let cmd = &init.command.as_ref().unwrap()[2];
+        assert!(cmd.starts_with(&format!("cat {SYSTEM_CA_BUNDLE} /trusted-ca-0/ca.pem >")));
+
+        // volume mount names match volume names
+        let mounts = init.volume_mounts.as_ref().unwrap();
+        let mount_names: Vec<&str> = mounts.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(mount_names, vec!["trusted-ca-0", COMBINED_CA_VOLUME]);
+    }
+
+    #[test]
+    fn test_trusted_ca_init_container_multiple_certs() {
+        let certs = vec![
+            TrustedCACert {
+                secret_name: "ca-one".into(),
+                key: "cert.pem".into(),
+            },
+            TrustedCACert {
+                secret_name: "ca-two".into(),
+                key: "root.pem".into(),
+            },
+        ];
+        let (volumes, init) = trusted_ca_init_container(&certs, "busybox:uclibc");
+
+        // 2 secret volumes + 1 emptyDir
+        assert_eq!(volumes.len(), 3);
+
+        let cmd = &init.command.as_ref().unwrap()[2];
+        assert!(cmd.contains("/trusted-ca-0/ca.pem"));
+        assert!(cmd.contains("/trusted-ca-1/ca.pem"));
+
+        // secret volume references correct secret names and keys
+        let secret0 = volumes[0].secret.as_ref().unwrap();
+        assert_eq!(secret0.secret_name.as_deref(), Some("ca-one"));
+        assert_eq!(secret0.items.as_ref().unwrap()[0].key, "cert.pem");
+
+        let secret1 = volumes[1].secret.as_ref().unwrap();
+        assert_eq!(secret1.secret_name.as_deref(), Some("ca-two"));
+        assert_eq!(secret1.items.as_ref().unwrap()[0].key, "root.pem");
     }
 }
