@@ -402,5 +402,16 @@ pub async fn cleanup_old_replicasets(
         }
     }
 
+    // If there are active old deployments still draining but no removal is yet scheduled,
+    // requeue on a short poll interval to detect drain completion promptly.
+    if active_count > 0 && next_removal.is_none() {
+        let poll_seconds = 10;
+        next_removal = Some(
+            chrono::Utc::now()
+                .checked_add_signed(chrono::TimeDelta::seconds(poll_seconds))
+                .expect("next_removal in bounds"),
+        );
+    }
+
     Ok((active_count, next_removal))
 }
