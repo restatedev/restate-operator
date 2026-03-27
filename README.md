@@ -165,6 +165,7 @@ This feature is particularly useful for Raft-based metadata clusters where manua
 | `awsPodIdentityAssociationRoleArn` | `string` | **Use this to grant your Restate cluster fine-grained access to other AWS resources (like S3) without managing static credentials.** Creates a `PodIdentityAssociation` to grant the cluster an IAM role. Requires the ACK EKS controller. |
 | `awsPodSecurityGroups` | `array` | **Use this to isolate your Restate cluster within specific AWS Security Groups for enhanced network control and auditing.** Creates a `SecurityGroupPolicy` to place pods into these security groups. Requires the Security Groups for Pods CRD. |
 | `requestSigningPrivateKey` | `object` | Configures a private key to sign outbound requests from this cluster. Can be sourced from a `secret` or a CSI `secretProvider`. See details below. |
+| `trustedCaCerts` | `array` | Optional list of Secrets containing trusted CA certificates. Each cert is appended to the system CA bundle via an init container. See details below. |
 
 ---
 
@@ -190,6 +191,30 @@ This feature is particularly useful for Raft-based metadata clusters where manua
 | `provider` | `string` | The name of the CSI secret provider (e.g., `secrets-store.csi.k8s.io`). |
 | `path` | `string` | **Required**. The path of the private key file within the mounted volume. |
 | `parameters` | `object` | Provider-specific configuration parameters. |
+
+---
+
+#### `spec.security.trustedCaCerts`
+
+Use this to trust custom CA certificates (e.g. for calling SDK services behind an internal load balancer with a private certificate, or for object store access via a private CA) without building a custom Restate image.
+The operator adds an init container that concatenates the system CA bundle with your custom certificates, and sets `SSL_CERT_FILE` to point to the combined bundle.
+
+Each entry references a Kubernetes Secret:
+
+| Field | Type | Description |
+|---|---|---|
+| `secretName` | `string` | **Required**. Name of the Secret containing the CA certificate. |
+| `key` | `string` | **Required**. Key within the Secret that contains the PEM-encoded certificate. |
+
+**Example:**
+
+```yaml
+spec:
+  security:
+    trustedCaCerts:
+      - secretName: internal-ca
+        key: ca.pem
+```
 
 ---
 
@@ -645,7 +670,8 @@ the `RestateCluster` spec.
 ### Canary Image
 
 Both EKS Pod Identity and GCP Workload Identity use a canary job to validate that credentials are available before
-starting the Restate cluster. By default, this uses the `busybox:uclibc` image from Docker Hub. In environments where
+starting the Restate cluster. The trusted CA certs feature also uses this image for its init container.
+By default, this uses the `busybox:uclibc` image from Docker Hub. In environments where
 nodes cannot pull from Docker Hub (e.g. air-gapped or restricted registries), you can override this with the
 `canaryImage` Helm value:
 
@@ -661,7 +687,7 @@ docker tag busybox:uclibc my-private-registry.example.com/busybox:uclibc
 docker push my-private-registry.example.com/busybox:uclibc
 ```
 
-If using a different base image, it must provide `grep` and `wget`.
+If using a different base image, it must provide `cat`, `grep` and `wget`.
 
 ### EKS Security Groups for Pods
 

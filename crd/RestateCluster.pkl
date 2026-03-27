@@ -150,6 +150,10 @@ class Security {
   /// Annotations to set on the ServiceAccount created for Restate
   serviceAccountAnnotations: Mapping<String, String>?
 
+  /// Optional list of Secrets containing trusted CA certificates.
+  /// Each cert is appended to the system CA bundle via an init container.
+  trustedCaCerts: Listing<TrustedCACert>?
+
   /// Annotations to set on the Service created for Restate
   serviceAnnotations: Mapping<String, String>?
 }
@@ -200,6 +204,15 @@ class SecretProvider {
 
   /// Configuration for provider name
   provider: String?
+}
+
+/// A reference to a Secret containing a trusted CA certificate.
+class TrustedCACert {
+  /// Name of the Secret containing the CA certificate
+  secretName: String
+
+  /// Key within the Secret that contains the PEM-encoded certificate
+  key: String
 }
 
 /// Storage configuration

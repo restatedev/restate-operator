@@ -203,6 +203,18 @@ pub struct RestateClusterSecurity {
     pub network_egress_rules: Option<Vec<NetworkPolicyEgressRule>>,
     /// If set, configure the use of a private key to sign outbound requests from this cluster
     pub request_signing_private_key: Option<RequestSigningPrivateKey>,
+    /// Optional list of Secrets containing trusted CA certificates.
+    /// Each cert is appended to the system CA bundle via an init container.
+    pub trusted_ca_certs: Option<Vec<TrustedCACert>>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TrustedCACert {
+    /// Name of the Secret containing the CA certificate
+    pub secret_name: String,
+    /// Key within the Secret that contains the PEM-encoded certificate
+    pub key: String,
 }
 
 #[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
