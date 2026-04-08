@@ -290,8 +290,9 @@ fn env(cluster_name: &str, custom: Option<&[EnvVar]>) -> Vec<EnvVar> {
     }
 }
 
-// Debian/Alpine system CA bundle path. If the Restate server base image changes to a
-// different distro (e.g. RHEL uses /etc/pki/tls/certs/ca-bundle.crt), this must be updated.
+// Debian/Alpine system CA bundle path, read from the canary image's filesystem.
+// The default canary image (alpine:3.21) ships this path. If a custom canary image uses
+// a different distro (e.g. RHEL uses /etc/pki/tls/certs/ca-bundle.crt), this must be updated.
 const SYSTEM_CA_BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
 const COMBINED_CA_VOLUME: &str = "combined-ca-certs";
 const COMBINED_CA_MOUNT: &str = "/combined-certs";
