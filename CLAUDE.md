@@ -261,7 +261,7 @@ kubectl delete pod -n restate-operator -l app=restate-operator
 - `image.pullPolicy` - Pull policy (default: `IfNotPresent`)
 - `awsPodIdentityAssociationCluster` - Enables EKS Pod Identity support
 - `gcpWorkloadIdentity` - Enables GCP Workload Identity via Config Connector
-- `canaryImage` - Container image for canary jobs and the trusted CA certs init container (default: `busybox:uclibc`); must provide `cat`, `grep` and `wget`
+- `canaryImage` - Container image for canary jobs and the trusted CA certs init container (default: `alpine:3.21`); must provide `cat`, `grep`, `wget` and a CA bundle at `/etc/ssl/certs/ca-certificates.crt`
 - `operatorNamespace` - Namespace where operator runs
 - `operatorLabelName/Value` - Labels for network policy selectors
 

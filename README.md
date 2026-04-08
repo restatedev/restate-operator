@@ -671,23 +671,23 @@ the `RestateCluster` spec.
 
 Both EKS Pod Identity and GCP Workload Identity use a canary job to validate that credentials are available before
 starting the Restate cluster. The trusted CA certs feature also uses this image for its init container.
-By default, this uses the `busybox:uclibc` image from Docker Hub. In environments where
-nodes cannot pull from Docker Hub (e.g. air-gapped or restricted registries), you can override this with the
-`canaryImage` Helm value:
+By default, this uses the `alpine:3.21` image from Docker Hub. The image must include a
+CA certificate bundle at `/etc/ssl/certs/ca-certificates.crt` (required by the trusted CA
+certs init container) and provide `cat`, `grep` and `wget`. In environments where nodes
+cannot pull from Docker Hub (e.g. air-gapped or restricted registries), you can override
+this with the `canaryImage` Helm value:
 
 ```yaml
-canaryImage: my-private-registry.example.com/busybox:uclibc
+canaryImage: my-private-registry.example.com/alpine:3.21
 ```
 
 The simplest approach is to mirror the default image:
 
 ```bash
-docker pull busybox:uclibc
-docker tag busybox:uclibc my-private-registry.example.com/busybox:uclibc
-docker push my-private-registry.example.com/busybox:uclibc
+docker pull alpine:3.21
+docker tag alpine:3.21 my-private-registry.example.com/alpine:3.21
+docker push my-private-registry.example.com/alpine:3.21
 ```
-
-If using a different base image, it must provide `cat`, `grep` and `wget`.
 
 ### EKS Security Groups for Pods
 

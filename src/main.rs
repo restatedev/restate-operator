@@ -66,7 +66,7 @@ struct Arguments {
         long = "canary-image",
         env = "CANARY_IMAGE",
         value_name = "IMAGE",
-        default_value = "busybox:uclibc"
+        default_value = "alpine:3.21"
     )]
     canary_image: String,
 }
