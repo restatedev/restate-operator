@@ -561,6 +561,14 @@ spec:
                             type: array
                         type: object
                     type: object
+                  annotations:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      Annotations to set on the Restate pod template. These are merged with any annotations
+                      the operator sets internally (e.g. for workload identity, trusted CA certs).
+                    nullable: true
+                    type: object
                   args:
                     description: Arguments to the entrypoint. The container image's CMD is used if this is not provided.
                     items:
@@ -733,6 +741,14 @@ spec:
                       type: object
                     nullable: true
                     type: array
+                  labels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      Labels to set on the Restate pod template. These are merged with the standard labels
+                      the operator sets (app.kubernetes.io/name, etc.).
+                    nullable: true
+                    type: object
                   nodeSelector:
                     additionalProperties:
                       type: string
