@@ -117,6 +117,12 @@ pub struct RestateClusterStorage {
 pub struct RestateClusterCompute {
     /// replicas is the desired number of Restate nodes. If unspecified, defaults to 1.
     pub replicas: Option<i32>,
+    /// Annotations to set on the Restate pod template. These are merged with any annotations
+    /// the operator sets internally (e.g. for workload identity, trusted CA certs).
+    pub annotations: Option<BTreeMap<String, String>>,
+    /// Labels to set on the Restate pod template. These are merged with the standard labels
+    /// the operator sets (app.kubernetes.io/name, etc.).
+    pub labels: Option<BTreeMap<String, String>>,
     /// Container image name. More info: https://kubernetes.io/docs/concepts/containers/images.
     pub image: String,
     /// Entrypoint array. Not executed within a shell. The container image's ENTRYPOINT is used if this is not provided.

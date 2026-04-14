@@ -389,14 +389,32 @@ fn restate_statefulset(
     canary_image: &str,
 ) -> StatefulSet {
     let metadata = object_meta(base_metadata, RESTATE_STATEFULSET_NAME);
-    let labels = metadata.labels.clone();
-    let pod_annotations = match (pod_annotations, metadata.annotations.clone()) {
-        (Some(pod_annotations), Some(mut base_annotations)) => {
-            base_annotations.extend(pod_annotations);
-            Some(base_annotations)
+
+    // Merge pod labels: start with user-specified, then apply standard labels on top
+    // (standard labels take precedence in case of conflict)
+    let labels = {
+        let mut merged = spec.compute.labels.clone().unwrap_or_default();
+        if let Some(standard) = metadata.labels.clone() {
+            merged.extend(standard);
         }
-        (Some(annotations), None) | (None, Some(annotations)) => Some(annotations),
-        (None, None) => None,
+        Some(merged)
+    };
+
+    // Merge pod annotations: start with user-specified, then base metadata, then internal
+    // (internal annotations like WI/trusted-CA hashes take precedence)
+    let pod_annotations = {
+        let mut merged = spec.compute.annotations.clone().unwrap_or_default();
+        if let Some(base) = metadata.annotations.clone() {
+            merged.extend(base);
+        }
+        if let Some(internal) = pod_annotations {
+            merged.extend(internal);
+        }
+        if merged.is_empty() {
+            None
+        } else {
+            Some(merged)
+        }
     };
 
     let mut volume_mounts = vec![
@@ -1564,6 +1582,7 @@ async fn apply_pod_disruption_budget(
 mod tests {
     use super::*;
     use crate::resources::iampolicymembers::{IAMPolicyMemberCondition, IAMPolicyMemberStatus};
+    use crate::resources::restateclusters::RestateClusterCompute;
     use k8s_openapi::api::batch::v1::{JobCondition, JobStatus};
 
     #[test]
@@ -1957,5 +1976,117 @@ mod tests {
         let secret1 = volumes[1].secret.as_ref().unwrap();
         assert_eq!(secret1.secret_name.as_deref(), Some("ca-two"));
         assert_eq!(secret1.items.as_ref().unwrap()[0].key, "root.pem");
+    }
+
+    fn minimal_spec(
+        annotations: Option<BTreeMap<String, String>>,
+        labels: Option<BTreeMap<String, String>>,
+    ) -> RestateClusterSpec {
+        RestateClusterSpec {
+            compute: RestateClusterCompute {
+                image: "restate:test".into(),
+                annotations,
+                labels,
+                ..Default::default()
+            },
+            storage: RestateClusterStorage {
+                storage_request_bytes: 1_000_000_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_statefulset_user_annotations_merged_with_internal() {
+        let user_annotations = BTreeMap::from([
+            (
+                "cloud.google.com/compute-class".into(),
+                "restate-workload".into(),
+            ),
+            (
+                "restate.dev/trusted-ca-certs".into(),
+                "user-should-lose".into(),
+            ),
+        ]);
+        let internal_annotations = BTreeMap::from([(
+            "restate.dev/trusted-ca-certs".into(),
+            "internal-wins".into(),
+        )]);
+        let spec = minimal_spec(Some(user_annotations), None);
+
+        let ss = restate_statefulset(
+            &test_base_metadata(),
+            &spec,
+            Some(internal_annotations),
+            None,
+            "config-abc".into(),
+            "busybox:uclibc",
+        );
+        let pod_annotations = ss
+            .spec
+            .unwrap()
+            .template
+            .metadata
+            .unwrap()
+            .annotations
+            .unwrap();
+
+        // User annotation preserved
+        assert_eq!(
+            pod_annotations
+                .get("cloud.google.com/compute-class")
+                .unwrap(),
+            "restate-workload"
+        );
+        // Internal annotation wins on conflict
+        assert_eq!(
+            pod_annotations.get("restate.dev/trusted-ca-certs").unwrap(),
+            "internal-wins"
+        );
+    }
+
+    #[test]
+    fn test_statefulset_user_labels_merged_with_standard() {
+        let user_labels = BTreeMap::from([
+            ("team".into(), "platform".into()),
+            ("app.kubernetes.io/name".into(), "user-should-lose".into()),
+        ]);
+        let spec = minimal_spec(None, Some(user_labels));
+
+        let ss = restate_statefulset(
+            &test_base_metadata(),
+            &spec,
+            None,
+            None,
+            "config-abc".into(),
+            "busybox:uclibc",
+        );
+        let pod_labels = ss.spec.unwrap().template.metadata.unwrap().labels.unwrap();
+
+        // User label preserved
+        assert_eq!(pod_labels.get("team").unwrap(), "platform");
+        // Standard label wins on conflict
+        assert_eq!(pod_labels.get("app.kubernetes.io/name").unwrap(), "restate");
+    }
+
+    #[test]
+    fn test_statefulset_no_user_annotations_or_labels() {
+        let spec = minimal_spec(None, None);
+
+        let ss = restate_statefulset(
+            &test_base_metadata(),
+            &spec,
+            None,
+            None,
+            "config-abc".into(),
+            "busybox:uclibc",
+        );
+        let tmpl = ss.spec.unwrap().template.metadata.unwrap();
+
+        // Labels should still have standard labels
+        assert!(tmpl.labels.unwrap().contains_key("app.kubernetes.io/name"));
+        // Annotations should be None (no user, no base, no internal)
+        assert!(tmpl.annotations.is_none());
     }
 }
