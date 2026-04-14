@@ -110,6 +110,8 @@ More examples are available just below the spec that follows.
 | `image` | `string` | **Required**. Container image name. |
 | `imagePullPolicy` | `string` | Image pull policy. One of `Always`, `Never`, `IfNotPresent`. Defaults to `Always` if `:latest` tag is specified, or `IfNotPresent` otherwise. |
 | `imagePullSecrets` | `array` | Optional list of references to secrets in the same namespace to use for pulling the image. |
+| `annotations` | `object` | Annotations to set on the Restate pod template. See note on merge ordering below. |
+| `labels` | `object` | Labels to set on the Restate pod template. See note on merge ordering below. |
 | `resources` | `object` | Compute Resources for the Restate container. e.g., `requests` and `limits` for `cpu` and `memory`. |
 | `env` | `array` | List of environment variables to set in the container. |
 | `affinity` | `object` | Standard Kubernetes affinity rules. |
@@ -117,6 +119,13 @@ More examples are available just below the spec that follows.
 | `tolerations` | `array` | Standard Kubernetes tolerations. |
 | `dnsPolicy` | `string` | Pod DNS policy. |
 | `dnsConfig` | `object` | Pod DNS configuration. |
+
+**Pod annotation and label merge ordering**: User-specified `annotations` and `labels` are
+merged with values the operator sets internally (e.g. for workload identity hashes, trusted
+CA cert hashes). If the same key appears in both, the operator's internal value wins. This
+means operator-managed features like GCP Workload Identity annotations cannot be
+accidentally overridden. If you need to set the same annotation that a built-in feature
+uses, disable the built-in feature first — otherwise your value will be silently replaced.
 
 ---
 
