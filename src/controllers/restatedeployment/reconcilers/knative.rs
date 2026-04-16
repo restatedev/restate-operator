@@ -662,6 +662,11 @@ async fn register_or_lookup_deployment(
         })?;
 
     let url = Url::parse(url_str)?;
+    let url = rsd
+        .spec
+        .restate
+        .register
+        .maybe_tunnel_url(&ctx.rce_store, url)?;
 
     let deployment_id = rsd
         .register_service_with_restate(ctx, &url, rsd.spec.restate.use_http11.as_ref().cloned())

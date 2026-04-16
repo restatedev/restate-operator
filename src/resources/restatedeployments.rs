@@ -374,30 +374,39 @@ impl RestateAdminEndpoint {
         service_path: Option<&str>,
         cluster_dns: &str,
     ) -> crate::Result<Url> {
-        match (
-            self.cluster.as_deref(),
-            self.cloud.as_deref(),
-            self.service.as_ref(),
-            self.url.as_ref(),
-        ) {
-            (Some(_), None, None, None)
-            | (None, None, Some(_), None)
-            | (None, None, None, Some(_)) => {
-                Ok(service_url(service_name, service_namespace, 9080, service_path, cluster_dns)?)
-            }
-            (None, Some(cloud), None, None) => {
-                let Some(rce) = rce_store.get(&ObjectRef::new(cloud)) else {
-                    return Err(crate::Error::RestateCloudEnvironmentNotFound(cloud.into()))
-                };
+        self.validate_exactly_one_set()?;
+        let url = service_url(service_name, service_namespace, 9080, service_path, cluster_dns)?;
+        self.maybe_tunnel_url(rce_store, url)
+    }
 
-                let service_url = service_url(service_name, service_namespace, 9080, service_path, cluster_dns)?;
-
-                Ok(rce.tunnel_url(service_url)?)
-            }
-            _ => Err(crate::Error::InvalidRestateConfig(
+    fn validate_exactly_one_set(&self) -> crate::Result<()> {
+        let count = self.cluster.is_some() as u8
+            + self.cloud.is_some() as u8
+            + self.service.is_some() as u8
+            + self.url.is_some() as u8;
+        if count != 1 {
+            return Err(crate::Error::InvalidRestateConfig(
                 "Exactly one of `cluster`, `cloud`, `service` or `url` must be specified in spec.restate"
                     .into(),
-            )),
+            ));
+        }
+        Ok(())
+    }
+
+    /// If this endpoint is configured to use Restate Cloud, rewrite the given URL
+    /// to go through the cloud tunnel. Otherwise, return the URL unchanged.
+    pub fn maybe_tunnel_url(
+        &self,
+        rce_store: &Store<RestateCloudEnvironment>,
+        url: Url,
+    ) -> crate::Result<Url> {
+        if let Some(cloud) = self.cloud.as_deref() {
+            let Some(rce) = rce_store.get(&ObjectRef::new(cloud)) else {
+                return Err(crate::Error::RestateCloudEnvironmentNotFound(cloud.into()));
+            };
+            Ok(rce.tunnel_url(url)?)
+        } else {
+            Ok(url)
         }
     }
 
