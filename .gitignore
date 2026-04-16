@@ -1,1 +1,7 @@
 target
+
+# Claude
+.claude/
+
+# Opencode
+.opencode/
