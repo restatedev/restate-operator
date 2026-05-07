@@ -37,6 +37,8 @@ logging:
 env: []
 
 affinity: {}
+nodeSelector: {}
+tolerations: []
 
 service:
   type: ClusterIP
