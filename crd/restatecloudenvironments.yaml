@@ -12,7 +12,17 @@ spec:
     singular: restatecloudenvironment
   scope: Cluster
   versions:
-  - additionalPrinterColumns: []
+  - additionalPrinterColumns:
+    - jsonPath: .spec.environmentId
+      name: Environment
+      type: string
+    - jsonPath: .spec.region
+      name: Region
+      type: string
+    - description: CreationTimestamp is a timestamp representing the server time when this object was created. It is not guaranteed to be set in happens-before order across separate operations. Clients may not set this value. It is represented in RFC3339 form and is in UTC
+      jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
     name: v1beta1
     schema:
       openAPIV3Schema:
