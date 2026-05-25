@@ -313,13 +313,10 @@ pub async fn cleanup_old_replicasets(
                         .await?;
                 }
 
-                // If we are here, there is a 0 sized replicaset which should be subject to the history limit
-                if historic_count < rsd.spec.revision_history_limit {
-                    historic_count += 1;
-                    // we haven't hit that limit yet, so we don't need to delete this rs
-                    continue;
-                }
-
+                // Deregister the Restate deployment before checking the history
+                // limit. A zero-scaled RS kept for history still has a Service
+                // with no endpoints; leaving the deployment registered causes
+                // Restate to route calls into the void.
                 if deployment_exists {
                     let rs_deployment_id = rs_deployment_id.unwrap();
 
@@ -343,6 +340,13 @@ pub async fn cleanup_old_replicasets(
                         )
                         .await?;
                     }
+                }
+
+                // If we are here, there is a 0 sized replicaset which should be subject to the history limit
+                if historic_count < rsd.spec.revision_history_limit {
+                    historic_count += 1;
+                    // we haven't hit that limit yet, so we don't need to delete this rs
+                    continue;
                 }
 
                 debug!("Deleting old ReplicaSet {rs_name} in namespace {namespace}");
