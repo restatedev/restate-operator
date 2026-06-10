@@ -53,7 +53,7 @@ pub(crate) fn plan_active_version_hpa(autoscaling_configured: bool, rd_deleting:
 /// this version's pods via the target ReplicaSet's own pod selector (which
 /// already carries the pod-template-hash), so no metric-selector injection is
 /// needed for the CPU-based first cut.
-pub fn build_version_hpa(
+pub(crate) fn build_version_hpa(
     rsd: &RestateDeployment,
     namespace: &str,
     versioned_name: &str,
@@ -106,7 +106,7 @@ pub fn build_version_hpa(
 }
 
 /// Create or update the HPA for a non-latest version (server-side apply).
-pub async fn reconcile_version_hpa(
+pub(crate) async fn reconcile_version_hpa(
     client: &kube::Client,
     rsd: &RestateDeployment,
     namespace: &str,
@@ -122,15 +122,14 @@ pub async fn reconcile_version_hpa(
         &PatchParams::apply(FIELD_MANAGER).force(),
         &Patch::Apply(&hpa),
     )
-    .await
-    .map_err(Error::KubeError)?;
+    .await?;
 
     Ok(())
 }
 
 /// Delete the HPA for a version if it exists. Returns whether an HPA was present.
 /// Idempotent: a missing HPA is not an error.
-pub async fn delete_version_hpa(
+pub(crate) async fn delete_version_hpa(
     client: &kube::Client,
     namespace: &str,
     versioned_name: &str,

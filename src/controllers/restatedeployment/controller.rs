@@ -69,6 +69,8 @@ pub(super) struct Context {
     pub revision_store: Store<Revision>,
     /// Store for Knative Configurations
     pub configuration_store: Store<Configuration>,
+    /// Store for operator-managed per-version HorizontalPodAutoscalers
+    pub hpa_store: Store<HorizontalPodAutoscaler>,
     /// The namespace in which this operator runs
     pub operator_namespace: String,
     /// The cluster DNS suffix (e.g. "cluster.local")
@@ -90,6 +92,7 @@ impl Context {
         secret_store: Store<Secret>,
         revision_store: Store<Revision>,
         configuration_store: Store<Configuration>,
+        hpa_store: Store<HorizontalPodAutoscaler>,
         metrics: Metrics,
         state: State,
     ) -> Arc<Context> {
@@ -101,6 +104,7 @@ impl Context {
             secret_store,
             revision_store,
             configuration_store,
+            hpa_store,
             operator_namespace: state.operator_namespace,
             cluster_dns: state.cluster_dns,
             metrics,
@@ -1170,6 +1174,14 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     .touched_objects()
     .default_backoff();
 
+    // Reflector over operator-managed HPAs: drives reconciles (owns_stream) and
+    // gives the reconciler a cache to check existence before issuing deletes.
+    let (hpa_store, hpa_writer) = kube::runtime::reflector::store();
+    let hpa_reflector =
+        kube::runtime::reflector(hpa_writer, kube::runtime::watcher(hpas, cfg.clone()))
+            .touched_objects()
+            .default_backoff();
+
     let (rce_store, rce_writer) = kube::runtime::reflector::store();
     let rce_reflector = kube::runtime::reflector(
         rce_writer,
@@ -1273,7 +1285,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         .watches_stream(rce_reflector, |_| std::iter::empty())
         .watches_stream(secret_reflector, |_| std::iter::empty())
         .owns(services, cfg.clone())
-        .owns(hpas, cfg.clone())
+        .owns_stream(hpa_reflector)
         .run(
             reconcile,
             error_policy,
@@ -1284,6 +1296,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
                 secret_store,
                 revision_store,
                 configuration_store,
+                hpa_store,
                 metrics,
                 state,
             ),

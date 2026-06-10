@@ -1,12 +1,14 @@
 use std::collections::{BTreeMap, HashMap};
 
 use k8s_openapi::api::apps::v1::ReplicaSet;
+use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
 
 use kube::api::{
     Api, ApiResource, DynamicObject, PartialObjectMetaExt, Patch, PatchParams, PostParams,
 };
 use kube::core::subresource::Scale;
+use kube::runtime::reflector::ObjectRef;
 use kube::{Resource, ResourceExt};
 use reqwest::Method;
 use serde_json::json;
@@ -241,19 +243,16 @@ pub async fn cleanup_old_replicasets(
                 rsd.metadata.deletion_timestamp.is_some(),
             ) {
                 HpaPlan::Ensure => {
-                    let template = rsd
-                        .spec
-                        .autoscaling
-                        .as_ref()
-                        .expect("autoscaling configured");
-                    super::autoscaling::reconcile_version_hpa(
-                        &ctx.client,
-                        rsd,
-                        namespace,
-                        &rs_name,
-                        template,
-                    )
-                    .await?;
+                    if let Some(template) = rsd.spec.autoscaling.as_ref() {
+                        super::autoscaling::reconcile_version_hpa(
+                            &ctx.client,
+                            rsd,
+                            namespace,
+                            &rs_name,
+                            template,
+                        )
+                        .await?;
+                    }
                 }
                 HpaPlan::RemoveAndRestore => {
                     // Autoscaling disabled/removed: drop any HPA we created and
@@ -313,12 +312,18 @@ pub async fn cleanup_old_replicasets(
             continue;
         }
 
-        // Non-active version: ensure no operator HPA exists before we scale it
-        // down. Its minReplicas floor (>= 1) would otherwise fight the operator
-        // scaling the ReplicaSet to zero, and would hold the version at the floor
-        // through the revision-history retention window. Unconditional (also runs
-        // during RestateDeployment deletion) so teardown is never contended.
-        super::autoscaling::delete_version_hpa(&ctx.client, namespace, &rs_name).await?;
+        // Non-active version: remove any operator HPA before scaling it down. Its
+        // minReplicas floor (>= 1) would otherwise fight the operator scaling the
+        // ReplicaSet to zero, and would hold the version at the floor through the
+        // revision-history retention window. Gate on the owned-HPA cache so we
+        // only call the API when an HPA actually exists (avoids a wasted delete
+        // per inactive ReplicaSet on every reconcile); this still fires whenever
+        // an HPA is present, including during RestateDeployment deletion, so
+        // teardown is never contended.
+        let hpa_ref = ObjectRef::<HorizontalPodAutoscaler>::new(&rs_name).within(namespace);
+        if ctx.hpa_store.get(&hpa_ref).is_some() {
+            super::autoscaling::delete_version_hpa(&ctx.client, namespace, &rs_name).await?;
+        }
 
         let current_remove_at = rs
             .annotations()
