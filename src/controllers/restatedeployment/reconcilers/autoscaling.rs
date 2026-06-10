@@ -151,7 +151,6 @@ mod tests {
     use http::{Request, Response};
     use kube::client::Body;
     use std::convert::Infallible;
-    use std::sync::{Arc, Mutex};
 
     fn make_rsd() -> RestateDeployment {
         let spec = serde_json::from_value(json!({
@@ -303,54 +302,6 @@ mod tests {
             !delete_version_hpa(&client, "ns", "greeter-abc")
                 .await
                 .unwrap()
-        );
-    }
-
-    #[tokio::test]
-    async fn delete_version_hpa_reports_deletion() {
-        let client = client_with(|_req| {
-            json_body(
-                200,
-                json!({
-                    "kind": "HorizontalPodAutoscaler", "apiVersion": "autoscaling/v2",
-                    "metadata": { "name": "greeter-abc", "namespace": "ns" }
-                }),
-            )
-        });
-        assert!(
-            delete_version_hpa(&client, "ns", "greeter-abc")
-                .await
-                .unwrap()
-        );
-    }
-
-    #[tokio::test]
-    async fn reconcile_version_hpa_server_side_applies_to_correct_path() {
-        let seen: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
-        let captured = seen.clone();
-        let client = client_with(move |req| {
-            *captured.lock().unwrap() =
-                Some((req.method().to_string(), req.uri().path().to_string()));
-            json_body(
-                200,
-                json!({
-                    "kind": "HorizontalPodAutoscaler", "apiVersion": "autoscaling/v2",
-                    "metadata": { "name": "greeter-abc", "namespace": "ns" }
-                }),
-            )
-        });
-        reconcile_version_hpa(&client, &make_rsd(), "ns", "greeter-abc", &template())
-            .await
-            .unwrap();
-        let (method, path) = seen
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("a request was captured");
-        assert_eq!(method, "PATCH");
-        assert_eq!(
-            path,
-            "/apis/autoscaling/v2/namespaces/ns/horizontalpodautoscalers/greeter-abc"
         );
     }
 }

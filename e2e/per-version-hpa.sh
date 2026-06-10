@@ -40,8 +40,14 @@ RD_NAME="${RD_NAME:-greeter-rsd}"
 OPERATOR_IMAGE="ghcr.io/restatedev/restate-operator:local"
 GREETER_IMAGE="dev.local/restatedev/restate-operator/greeter:local"
 PIN_SECONDS="${PIN_SECONDS:-150}"        # how long the pinning slowGreet stays in-flight
-INGRESS_PORT=8080
-ADMIN_PORT=9070
+# In-cluster Restate ports.
+CLUSTER_INGRESS_PORT=8080
+CLUSTER_ADMIN_PORT=9070
+# Local ports for our port-forward. Deliberately uncommon so we don't collide
+# with (and silently hit) an unrelated Restate port-forward — e.g. a Restate
+# Cloud control plane forwarded to 8080/9070. Override if these are taken.
+INGRESS_PORT="${INGRESS_PORT:-18080}"
+ADMIN_PORT="${ADMIN_PORT:-19070}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CTX="kind-${CLUSTER_NAME}"
 
@@ -193,9 +199,17 @@ kc -n "$RESTATE_NS" exec restate-0 -- restatectl provision --yes >/dev/null 2>&1
   || warn "provision returned non-zero (may already be provisioned)"
 
 step "Port-forward Restate ingress + admin"
-kc -n "$RESTATE_NS" port-forward svc/restate "${INGRESS_PORT}:${INGRESS_PORT}" "${ADMIN_PORT}:${ADMIN_PORT}" \
+kc -n "$RESTATE_NS" port-forward svc/restate \
+  "${INGRESS_PORT}:${CLUSTER_INGRESS_PORT}" "${ADMIN_PORT}:${CLUSTER_ADMIN_PORT}" \
   >/tmp/restate-pf.log 2>&1 &
 PF_PID=$!
+sleep 2
+# Fail loudly if the forward could not bind — otherwise a stale listener on these
+# ports (e.g. another Restate) would silently answer our health check and curls.
+if ! kill -0 "$PF_PID" 2>/dev/null || grep -q "address already in use" /tmp/restate-pf.log; then
+  cat /tmp/restate-pf.log >&2
+  die "port-forward to Restate failed (ports ${INGRESS_PORT}/${ADMIN_PORT} in use?). Set INGRESS_PORT/ADMIN_PORT to free ports."
+fi
 wait_until "admin API reachable" 60 admin_healthy || die "admin API never came up"
 
 # ---- manifest + invocation helpers ----------------------------------------
@@ -278,6 +292,177 @@ pin_invocation() {
   [[ -n "$id" ]] && info "pinned invocation ${id} (in-flight ${PIN_SECONDS}s)" \
                  || warn "could not capture invocation id from ingress /send"
 }
+
+# --- opt-in scale demo (RUN_SCALE_DEMO=1) ----------------------------------
+# A "see it with your own eyes" demo, NOT a CI assertion: drive real CPU onto a
+# draining (non-latest) version and watch the operator's HPA scale it up beyond
+# the floor, then back down when the load stops. Latches "max replicas seen" so
+# it reports what happened rather than flaking on exact timing. Best run with
+# KEEP=1 so you can inspect afterwards; may flake under CPU contention.
+BURN_COUNT="${BURN_COUNT:-4}"               # concurrent burns (>= demo maxReplicas)
+DEMO_MAX_REPLICAS="${DEMO_MAX_REPLICAS:-3}"
+# The burst burns stay pinned-but-idle for BURN_START_DELAY (so we can see the
+# version sit at its floor first), then burn for BURN_DURATION (scale up), then
+# finish (scale back down). A long idle slowGreet keeps the version ALIVE through
+# the whole arc so we observe floor->up->floor rather than a drain-to-zero.
+BURN_START_DELAY="${BURN_START_DELAY:-130}" # idle (pinned) before the burst
+BURN_DURATION="${BURN_DURATION:-120}"       # CPU burst length
+KEEPALIVE_SECONDS="${KEEPALIVE_SECONDS:-480}" # idle keep-alive; must outlast the arc
+
+# RD for the demo: floor of 1 (so 1->N->1 is visible), CPU-target autoscaling.
+rd_manifest_demo() {
+  cat <<YAML
+apiVersion: restate.dev/v1beta1
+kind: RestateDeployment
+metadata:
+  name: ${RD_NAME}
+  namespace: ${APP_NS}
+spec:
+  replicas: 1
+  revisionHistoryLimit: 0
+  selector:
+    matchLabels:
+      app: ${RD_NAME}
+  restate:
+    register:
+      cluster: restate
+    drainDelaySeconds: 10
+  autoscaling:
+    minReplicas: 1
+    maxReplicas: ${DEMO_MAX_REPLICAS}
+    metrics:
+      - type: Resource
+        resource:
+          name: cpu
+          target:
+            type: Utilization
+            averageUtilization: 60
+    behavior:
+      scaleDown:
+        stabilizationWindowSeconds: 0
+        policies:
+          - type: Pods
+            value: 4
+            periodSeconds: 15
+  template:
+    metadata:
+      labels:
+        app: ${RD_NAME}
+    spec:
+      containers:
+        - name: service
+          image: ${GREETER_IMAGE}
+          imagePullPolicy: Never
+          ports:
+            - name: h2c
+              containerPort: 9080
+          env:
+            - name: SERVICE_VERSION
+              value: "${1}"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "1"
+              memory: "128Mi"
+YAML
+}
+
+# Fire one async CPU burn at the current latest version: pinned but idle for
+# BURN_START_DELAY, then burning for BURN_DURATION. Prints the invocation id on
+# success; returns 1 (and warns) if the ingress rejected it.
+burn_on_current() {
+  local resp id
+  resp="$(curl -sS "localhost:${INGRESS_PORT}/Greeter/burn/send" \
+    -H 'content-type: application/json' \
+    -d "{\"startDelaySeconds\":${BURN_START_DELAY},\"durationSeconds\":${BURN_DURATION}}" 2>&1)"
+  id="$(jq -r '.invocationId // empty' <<<"$resp" 2>/dev/null)"
+  if [[ -z "$id" ]]; then warn "burn /send rejected: ${resp}"; return 1; fi
+  echo "$id"
+}
+
+# Fire a long idle (suspended) keep-alive pinned to the current latest version,
+# so it stays "active" in Restate — keeping its HPA and avoiding drain — even
+# after the burst load ends, letting us see it scale back to floor (not vanish).
+keepalive_on_current() {
+  local resp id
+  resp="$(curl -sS "localhost:${INGRESS_PORT}/Greeter/slowGreet/send" \
+    -H 'content-type: application/json' \
+    -d "{\"name\":\"keepalive\",\"delaySeconds\":${KEEPALIVE_SECONDS}}" 2>&1)"
+  id="$(jq -r '.invocationId // empty' <<<"$resp" 2>/dev/null)"
+  if [[ -z "$id" ]]; then warn "keepalive /send rejected: ${resp}"; return 1; fi
+  echo "$id"
+}
+
+cpu_util() { kc -n "$APP_NS" get hpa "$1" -o jsonpath='{.status.currentMetrics[0].resource.current.averageUtilization}' 2>/dev/null; }
+
+run_scale_demo() {
+  step "Scale demo — floor -> scale UP under load -> back to floor, on a draining version"
+  rd_manifest_demo v1 | kc apply -f -
+  wait_until "v1 Ready (registered)" 180 rd_ready || warn "v1 not Ready; continuing"
+
+  info "pinning an idle ${KEEPALIVE_SECONDS}s keep-alive to v1…"
+  local ka; ka="$(keepalive_on_current)" || { fail "keep-alive not accepted (service registered? right Restate?)"; return; }
+  info "  keep-alive: ${ka}"
+
+  info "pre-pinning ${BURN_COUNT} burns to v1 (idle ${BURN_START_DELAY}s, then burn ${BURN_DURATION}s)…"
+  local fired=0 i id
+  for i in $(seq 1 "$BURN_COUNT"); do
+    if id="$(burn_on_current)"; then fired=$((fired+1)); info "  burn ${i}: ${id}"; fi
+  done
+  (( fired == 0 )) && { fail "no burns accepted by the ingress"; return; }
+  (( fired < BURN_COUNT )) && warn "only ${fired}/${BURN_COUNT} burns fired"
+  sleep 8   # let them pin on v1
+
+  info "bumping to v2 (v1 becomes non-latest; keep-alive + idle burns keep it active)…"
+  rd_manifest_demo v2 | kc apply -f -
+  # The HPA is only stamped once v2 finishes registering, which takes a couple of
+  # reconcile/readiness cycles — so wait generously here.
+  wait_until "operator HPA for v1 to appear" 180 hpa_count_is 1 || { fail "no HPA stamped for v1"; return; }
+  local hpa rs; hpa="$(operator_hpa_names | head -n1)"
+  rs="$(kc -n "$APP_NS" get hpa "$hpa" -o jsonpath='{.spec.scaleTargetRef.name}')"
+  info "watching v1 ReplicaSet ${rs} via HPA ${hpa} through floor -> up -> floor…"
+
+  # One continuous latched watch over the whole arc.
+  local saw_floor=0 up_seen=0 back_to_floor=0 maxr=0 r
+  local deadline=$(( $(date +%s) + BURN_START_DELAY + BURN_DURATION + 300 ))
+  while (( $(date +%s) < deadline )); do
+    if ! kc -n "$APP_NS" get rs "$rs" >/dev/null 2>&1; then
+      info "  watch: v1 ReplicaSet is gone (drained)"; break
+    fi
+    r="$(rs_replicas "$rs")"; r="${r:-0}"
+    if (( r > maxr )); then maxr=$r; fi
+    if (( r == 1 && up_seen == 0 )); then saw_floor=1; fi   # floor before any scale-up
+    if (( maxr > 1 )); then up_seen=1; fi
+    if (( up_seen == 1 && r == 1 )); then back_to_floor=1; fi   # returned, still alive
+    info "  watch: v1 replicas=${r} cpu=$(cpu_util "$hpa")% (floor_seen=${saw_floor} max=${maxr} back=${back_to_floor})"
+    if (( back_to_floor == 1 )); then break; fi
+    sleep 8
+  done
+
+  (( saw_floor == 1 )) \
+    && pass "v1 sat at its floor (1) before load" \
+    || warn "didn't catch v1 at floor before scale-up (v2 registration may have lagged BURN_START_DELAY)"
+  (( up_seen == 1 )) \
+    && pass "v1 scaled UP to ${maxr} replicas under the burst (> floor)" \
+    || fail "v1 never scaled above 1 (max=${maxr})"
+  (( back_to_floor == 1 )) \
+    && pass "v1 scaled back DOWN to the floor (1) after the burst, while still alive" \
+    || warn "didn't observe return to floor (needs longer, or keep-alive expired)"
+}
+
+if [[ "${RUN_SCALE_DEMO:-0}" == "1" ]]; then
+  run_scale_demo
+  step "Demo results"
+  echo "  ${GREEN}${PASSES} passed${RST}, ${RED}${FAILS} failed${RST}"
+  [[ "${KEEP:-0}" == "1" ]] || warn "cluster will be torn down; re-run with KEEP=1 to inspect"
+  exit $(( FAILS > 0 ? 1 : 0 ))
+fi
 
 # ===========================================================================
 step "Scenario 1 — v1 latest: no operator HPA"
