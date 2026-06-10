@@ -70,27 +70,24 @@ impl schemars::JsonSchema for RestateCloudEnvironment {
 }
 
 impl RestateCloudEnvironment {
-    pub fn admin_url(&self) -> Result<Url, url::ParseError> {
-        let unprefixed_env = self
-            .spec
+    pub fn unprefixed_environment_id(&self) -> &str {
+        self.spec
             .environment_id
             .strip_prefix("env_")
             // if there is no env_ prefix just use it as is
-            .unwrap_or(self.spec.environment_id.as_str());
+            .unwrap_or(self.spec.environment_id.as_str())
+    }
 
+    pub fn admin_url(&self) -> Result<Url, url::ParseError> {
         Url::parse(&format!(
             "https://{}.env.{}.restate.cloud:9070",
-            unprefixed_env, self.spec.region
+            self.unprefixed_environment_id(),
+            self.spec.region
         ))
     }
 
     pub fn tunnel_url(&self, service_url: Url) -> Result<Url, url::ParseError> {
-        let unprefixed_env = self
-            .spec
-            .environment_id
-            .strip_prefix("env_")
-            // if there is no env_ prefix just use it as is
-            .unwrap_or(self.spec.environment_id.as_str());
+        let unprefixed_env = self.unprefixed_environment_id();
 
         let tunnel_name = self
             .metadata
@@ -146,6 +143,111 @@ impl RestateCloudEnvironment {
         match String::from_utf8(bytes) {
             Ok(token) => Ok(token),
             Err(_) => Err(crate::Error::InvalidBearerToken),
+        }
+    }
+}
+
+/// The RestateCloudEnvironment-derived values a `tunnelMode: in-process` deployment
+/// needs. They serve three purposes that must stay consistent within one revision:
+/// they are injected into the pods as `RESTATE_INPROC_*` environment variables, folded
+/// into the revision hash (so a change mints a new revision), and used to build the
+/// tunnel URL the revision is registered under.
+#[derive(Clone, Debug)]
+pub struct InProcessTunnelParams {
+    pub environment_id: String,
+    pub region: String,
+    pub signing_public_key: String,
+}
+
+impl InProcessTunnelParams {
+    /// Resolve and validate the values from a RestateCloudEnvironment. In-process
+    /// tunnel clients (e.g. @restatedev/restate-sdk-tunnel) validate these strictly,
+    /// so an RCE field that deviates from its documented shape must fail the
+    /// reconcile here — the alternative is pods that crash-loop on the injected
+    /// values while the RestateDeployment shows nothing but "not ready".
+    pub fn from_rce(rce: &RestateCloudEnvironment) -> Result<Self, crate::Error> {
+        let rce_name = rce.metadata.name.as_deref().unwrap_or("<unnamed>");
+
+        // Normalized to the env_-prefixed spelling: the RCE tolerates an unprefixed
+        // id, but the injected value and the tunnel handshake use the prefixed form.
+        let unprefixed = rce.unprefixed_environment_id();
+        if unprefixed.is_empty()
+            || !unprefixed
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(crate::Error::InvalidRestateConfig(format!(
+                "tunnelMode: in-process requires RestateCloudEnvironment '{rce_name}' to have an environmentId of the form env_<alphanumerics>, got {:?}",
+                rce.spec.environment_id,
+            )));
+        }
+        let environment_id = format!("env_{unprefixed}");
+
+        let region = rce.spec.region.clone();
+        if region.is_empty()
+            || !region
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        {
+            return Err(crate::Error::InvalidRestateConfig(format!(
+                "tunnelMode: in-process requires RestateCloudEnvironment '{rce_name}' to have a lowercase region (letters, digits, '-'), got {:?}",
+                rce.spec.region,
+            )));
+        }
+
+        let signing_public_key = rce.spec.signing_public_key.clone();
+        if !signing_public_key.starts_with("publickeyv1_") {
+            return Err(crate::Error::InvalidRestateConfig(format!(
+                "tunnelMode: in-process requires RestateCloudEnvironment '{rce_name}' to have a signingPublicKey starting with publickeyv1_, got {:?}",
+                rce.spec.signing_public_key,
+            )));
+        }
+
+        Ok(Self {
+            environment_id,
+            region,
+            signing_public_key,
+        })
+    }
+
+    pub fn unprefixed_environment_id(&self) -> &str {
+        self.environment_id
+            .strip_prefix("env_")
+            // if there is no env_ prefix just use it as is
+            .unwrap_or(self.environment_id.as_str())
+    }
+
+    /// The URL to register for a deployment whose pods hold their own tunnel
+    /// connections under `tunnel_name`. The tunnel server routes purely by the
+    /// `{environment}/{tunnel_name}` key; the `/http/in-process/9080/` destination
+    /// segment is a constant shared with in-process tunnel clients (e.g.
+    /// @restatedev/restate-sdk-tunnel), which strip it without ever dialing it.
+    pub fn tunnel_url(
+        &self,
+        tunnel_name: &str,
+        service_path: Option<&str>,
+    ) -> Result<Url, crate::Error> {
+        let url = Url::parse(&format!(
+            "https://tunnel.{}.restate.cloud:9080/{}/{tunnel_name}/http/in-process/9080/",
+            self.region,
+            self.unprefixed_environment_id(),
+        ))?;
+
+        match service_path {
+            Some(path) => {
+                let joined = url.join(path.trim_start_matches('/'))?;
+                // Url::join resolves dot-segments and absolute references, so a
+                // hostile-but-CRD-valid servicePath ("http://elsewhere", "../..")
+                // could silently rewrite the base — and with it the rendezvous
+                // key the pods actually hold. The path may only append.
+                if !joined.as_str().starts_with(url.as_str()) {
+                    return Err(crate::Error::InvalidRestateConfig(format!(
+                        "spec.restate.servicePath {path:?} escapes the tunnel URL; it must be a plain path to append"
+                    )));
+                }
+                Ok(joined)
+            }
+            None => Ok(url),
         }
     }
 }
@@ -216,4 +318,118 @@ fn node_selector_schema(_g: &mut schemars::SchemaGenerator) -> Schema {
         "type": "object",
         "x-kubernetes-map-type": "atomic"
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn params() -> InProcessTunnelParams {
+        InProcessTunnelParams {
+            environment_id: "env_123abc".into(),
+            region: "us".into(),
+            signing_public_key: "publickeyv1_abc".into(),
+        }
+    }
+
+    #[test]
+    fn in_process_tunnel_url() {
+        assert_eq!(
+            params()
+                .tunnel_url("greeter-5b8c7d", None)
+                .unwrap()
+                .as_str(),
+            "https://tunnel.us.restate.cloud:9080/123abc/greeter-5b8c7d/http/in-process/9080/"
+        );
+    }
+
+    #[test]
+    fn in_process_tunnel_url_tolerates_unprefixed_environment_id() {
+        let mut params = params();
+        params.environment_id = "123abc".into();
+        assert_eq!(
+            params.tunnel_url("greeter-5b8c7d", None).unwrap().as_str(),
+            "https://tunnel.us.restate.cloud:9080/123abc/greeter-5b8c7d/http/in-process/9080/"
+        );
+    }
+
+    #[test]
+    fn in_process_tunnel_url_appends_service_path() {
+        for service_path in ["/api/restate", "api/restate"] {
+            assert_eq!(
+                params()
+                    .tunnel_url("greeter-5b8c7d", Some(service_path))
+                    .unwrap()
+                    .as_str(),
+                "https://tunnel.us.restate.cloud:9080/123abc/greeter-5b8c7d/http/in-process/9080/api/restate"
+            );
+        }
+    }
+
+    #[test]
+    fn in_process_tunnel_url_rejects_escaping_service_paths() {
+        // Url::join resolves these into a different base — the registered URL
+        // would no longer contain the rendezvous key the pods hold
+        for service_path in [
+            "http://elsewhere.example",
+            "../..",
+            "../../../otherenv/othertunnel/http/in-process/9080/",
+        ] {
+            let err = params()
+                .tunnel_url("greeter-5b8c7d", Some(service_path))
+                .expect_err(service_path);
+            assert!(matches!(err, crate::Error::InvalidRestateConfig(_)));
+        }
+    }
+
+    fn rce(
+        environment_id: &str,
+        region: &str,
+        signing_public_key: &str,
+    ) -> RestateCloudEnvironment {
+        RestateCloudEnvironment::new(
+            "my-env",
+            RestateCloudEnvironmentSpec {
+                environment_id: environment_id.into(),
+                region: region.into(),
+                signing_public_key: signing_public_key.into(),
+                authentication: RestateCloudEnvironmentAuthentication {
+                    secret: SecretReference {
+                        name: "secret".into(),
+                        key: "token".into(),
+                    },
+                },
+                tunnel: None,
+            },
+        )
+    }
+
+    #[test]
+    fn from_rce_normalizes_the_environment_id() {
+        // both spellings inject the env_-prefixed form the tunnel handshake uses
+        for id in ["env_123abc", "123abc"] {
+            let params =
+                InProcessTunnelParams::from_rce(&rce(id, "us", "publickeyv1_abc")).unwrap();
+            assert_eq!(params.environment_id, "env_123abc");
+        }
+    }
+
+    #[test]
+    fn from_rce_rejects_values_in_process_clients_would_crash_on() {
+        // in-process tunnel clients validate these on startup; a bad value must
+        // fail the reconcile instead of crash-looping the pods
+        for (id, region, key) in [
+            ("", "us", "publickeyv1_abc"),
+            ("env_", "us", "publickeyv1_abc"),
+            ("env_a b", "us", "publickeyv1_abc"),
+            ("env_123abc", "", "publickeyv1_abc"),
+            ("env_123abc", "US", "publickeyv1_abc"),
+            ("env_123abc", "us/extra", "publickeyv1_abc"),
+            ("env_123abc", "us", "not-a-key"),
+        ] {
+            let err = InProcessTunnelParams::from_rce(&rce(id, region, key))
+                .expect_err(&format!("({id:?}, {region:?}, {key:?})"));
+            assert!(matches!(err, crate::Error::InvalidRestateConfig(_)));
+        }
+    }
 }

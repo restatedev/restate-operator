@@ -35,7 +35,7 @@ use url::Url;
 use crate::controllers::{Diagnostics, State, prewarmed_reflector};
 use crate::metrics::Metrics;
 use crate::resources::knative::{Configuration, Revision, Route};
-use crate::resources::restatecloudenvironments::RestateCloudEnvironment;
+use crate::resources::restatecloudenvironments::{InProcessTunnelParams, RestateCloudEnvironment};
 use crate::resources::restateclusters::RestateCluster;
 use crate::resources::restatedeployments::{
     RESTATE_DEPLOYMENT_FINALIZER, RestateAdminEndpoint, RestateDeployment,
@@ -47,7 +47,9 @@ use crate::{Error, Result};
 // Import our reconcilers
 use crate::controllers::restatedeployment::reconcilers;
 
-use super::reconcilers::replicaset::{POD_TEMPLATE_HASH_LABEL, RESTATE_POD_TEMPLATE_ANNOTATION};
+use super::reconcilers::replicaset::{
+    POD_TEMPLATE_HASH_LABEL, RESTATE_POD_TEMPLATE_ANNOTATION, RESTATE_TUNNEL_NAME_ANNOTATION,
+};
 
 pub(super) const RESTATE_DEPLOYMENT_ID_ANNOTATION: &str = "restate.dev/deployment-id";
 pub(super) const OWNED_BY_LABEL: &str = "restate.dev/owned-by";
@@ -215,11 +217,32 @@ impl RestateDeployment {
         let rs_api = Api::<ReplicaSet>::namespaced(ctx.client.clone(), namespace);
         let svc_api = Api::<Service>::namespaced(ctx.client.clone(), namespace);
 
+        // tunnelMode: in-process needs the RestateCloudEnvironment values up front:
+        // they feed the revision hash, the env vars injected into the pods, and the
+        // registered URL, all of which must agree within one reconcile.
+        let in_process_tunnel = if self.spec.restate.is_in_process_tunnel() {
+            let Some(cloud) = self.spec.restate.register.cloud.as_deref() else {
+                return Err(Error::InvalidRestateConfig(
+                    "tunnelMode: in-process requires registering against a RestateCloudEnvironment (spec.restate.register.cloud)"
+                        .into(),
+                ));
+            };
+            let Some(rce) = ctx.rce_store.get(&ObjectRef::new(cloud)) else {
+                return Err(Error::RestateCloudEnvironmentNotFound(cloud.into()));
+            };
+            Some(InProcessTunnelParams::from_rce(rce.as_ref())?)
+        } else {
+            None
+        };
+
         let pod_template_annotation = reconcilers::replicaset::pod_template_annotation(self);
 
         // Generate a hash for the pod template
-        let hash =
-            reconcilers::replicaset::generate_pod_template_hash(self, &pod_template_annotation);
+        let hash = reconcilers::replicaset::generate_pod_template_hash(
+            self,
+            &pod_template_annotation,
+            in_process_tunnel.as_ref(),
+        );
         let deployment_name = self.name_any();
         let versioned_name = format!("{deployment_name}-{hash}");
 
@@ -240,6 +263,9 @@ impl RestateDeployment {
         let mut annotations = self.annotations().clone();
         // if this is set on the rsd, don't propagate it
         annotations.remove("kubectl.kubernetes.io/last-applied-configuration");
+        // reserved for the operator: set on the ReplicaSet at creation in in-process
+        // tunnel mode; a value on the rsd must not propagate over it
+        annotations.remove(RESTATE_TUNNEL_NAME_ANNOTATION);
 
         // Create/update the ReplicaSet for this version
         let reconcile_result = reconcilers::replicaset::reconcile_replicaset(
@@ -255,9 +281,19 @@ impl RestateDeployment {
                     RESTATE_POD_TEMPLATE_ANNOTATION.to_string(),
                     pod_template_annotation.to_string(),
                 );
+                if in_process_tunnel.is_some() {
+                    // persist the tunnel name the pods were created with, so the
+                    // registered URL keeps matching them even if a future operator
+                    // version computes the hash differently
+                    annotations.insert(
+                        RESTATE_TUNNEL_NAME_ANNOTATION.to_string(),
+                        versioned_name.clone(),
+                    );
+                }
                 annotations
             },
             &hash,
+            in_process_tunnel.as_ref(),
         )
         .await;
 
@@ -344,13 +380,27 @@ impl RestateDeployment {
         )
         .await?;
 
-        let service_endpoint = self.spec.restate.register.service_url(
-            &ctx.rce_store,
-            &versioned_name,
-            namespace,
-            self.spec.restate.service_path.as_deref(),
-            &ctx.cluster_dns,
-        )?;
+        let service_endpoint = match &in_process_tunnel {
+            Some(params) => {
+                // The pods hold their own tunnel connections, registered under the
+                // versioned name; the Service plays no part in routing. Prefer the
+                // name persisted on the ReplicaSet at creation — that is the value
+                // injected into the pods.
+                let tunnel_name = replicaset
+                    .annotations()
+                    .get(RESTATE_TUNNEL_NAME_ANNOTATION)
+                    .map(String::as_str)
+                    .unwrap_or(versioned_name.as_str());
+                params.tunnel_url(tunnel_name, self.spec.restate.service_path.as_deref())?
+            }
+            None => self.spec.restate.register.service_url(
+                &ctx.rce_store,
+                &versioned_name,
+                namespace,
+                self.spec.restate.service_path.as_deref(),
+                &ctx.cluster_dns,
+            )?,
+        };
 
         let mut deployments = self.list_deployments(&ctx).await?;
 
@@ -490,9 +540,19 @@ impl RestateDeployment {
 
         let (result, message, reason, status) = if is_knative {
             // Delegate to Knative reconciler
-            match reconcilers::knative::reconcile_knative(&ctx, self, namespace, &mut rsd_status)
-                .await
-            {
+            let knative_result = if self.spec.restate.is_in_process_tunnel() {
+                // An in-process tunnel carries no traffic the Knative autoscaler can
+                // see, so scale-to-zero would take the deployment down permanently.
+                // Raised here rather than before the status machinery, so the Ready
+                // condition reflects the misconfiguration.
+                Err(Error::InvalidRestateConfig(
+                    "tunnelMode: in-process is not supported in Knative mode".into(),
+                ))
+            } else {
+                reconcilers::knative::reconcile_knative(&ctx, self, namespace, &mut rsd_status)
+                    .await
+            };
+            match knative_result {
                 Ok(next_removal) => {
                     let action = match next_removal {
                         Some(next_removal) if next_removal < now => Action::requeue(Duration::ZERO),

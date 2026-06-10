@@ -535,6 +535,7 @@ This field contains Restate-specific configuration.
 | `register` | `object` | **Required**. The location of the Restate Admin API to register this deployment against. See details below. |
 | `servicePath` | `string` | Optional path to append to the Service url when registering with Restate. |
 | `useHttp11`  | `boolean` | Force the use of HTTP/1.1 when registering with Restate. Defaults to HTTP/2 if not specified. |
+| `tunnelMode` | `string` | How Restate Cloud reaches this deployment; only takes effect with `register.cloud` (`in-process` requires it, and is not supported in Knative mode). `external` (default): invocations are forwarded to the deployment's Service by the tunnel-client pods managed by the `RestateCloudEnvironment`. `in-process`: the pods hold their own outbound tunnel connections. See [In-process tunnels](#in-process-tunnels). |
 
 
 The `register` field must specify exactly one of `cluster`, `service`, or `url`.
@@ -661,6 +662,77 @@ spec:
       cloud: my-cloud-environment
 ```
 
+#### In-process tunnels
+
+By default, invocations from Restate Cloud reach your services through the tunnel-client pods
+managed by the `RestateCloudEnvironment`, which forward them to each version's `Service`. With
+`tunnelMode: in-process`, your pods instead hold their own outbound tunnel connections — for
+example with the [`@restatedev/restate-sdk-tunnel`](https://www.npmjs.com/package/@restatedev/restate-sdk-tunnel)
+package — so invocations arrive without any inbound networking to the pods, and without
+tunnel-client pods on the invocation path.
+
+```yaml
+apiVersion: restate.dev/v1beta1
+kind: RestateDeployment
+metadata:
+  name: my-deployment
+spec:
+  restate:
+    register:
+      cloud: my-cloud-environment
+    tunnelMode: in-process
+  template:
+    spec:
+      containers:
+        - name: app
+          image: my-restate-service-image:main
+```
+
+In this mode the operator injects environment variables into every container of the pod
+template (including init containers, so native sidecars are covered), which in-process
+tunnel clients use to connect and identify themselves:
+
+| Variable | Value |
+|---|---|
+| `RESTATE_INPROC_TUNNEL_NAME` | The versioned name of this revision (e.g. `my-deployment-5b8c7d9f4`). Each replica registers its tunnel connections under this name, and the tunnel server load-balances invocations across them. |
+| `RESTATE_INPROC_ENVIRONMENT_ID` | The `environmentId` of the referenced `RestateCloudEnvironment`, normalized to its `env_`-prefixed form. |
+| `RESTATE_INPROC_CLOUD_REGION` | The `region` of the referenced `RestateCloudEnvironment`. |
+| `RESTATE_INPROC_SIGNING_PUBLIC_KEY` | The `signingPublicKey` of the referenced `RestateCloudEnvironment`, used to verify that requests genuinely come from your environment. |
+
+The operator then registers each version under its tunnel URL
+(`https://tunnel.<region>.restate.cloud:9080/<environment-id-without-env_-prefix>/<versioned-name>/http/in-process/9080/`)
+instead of the Service URL, and versioning, draining and removal work exactly as in the default
+mode. Because the tunnel name identifies a revision, a change to any of the injected values
+(like a rotated signing key) creates a new version. Unlike a pod template change, an edit to
+the `RestateCloudEnvironment` is only picked up on the next periodic reconciliation, so the
+new version may take a few minutes to appear.
+
+A few things to be aware of:
+
+- **Credentials are not injected.** Your pods still need a Restate Cloud API key with tunnel
+  access to open tunnel connections. Mount one from a `Secret` yourself, e.g. as a file whose
+  path you pass to the client (`RESTATE_INPROC_AUTH_TOKEN_FILE` is the conventional variable
+  name for file-based tokens, re-read on every reconnect so rotations are picked up).
+- **Declaring any of the four injected variables yourself is an error**: the operator refuses
+  to reconcile rather than risk pods that disagree with the URL it registers.
+  (`RESTATE_INPROC_AUTH_TOKEN_FILE` is yours to set, and values supplied indirectly via
+  `envFrom` are silently overridden by the injected entries — `env` takes precedence in
+  Kubernetes — rather than rejected.)
+- **Deployments are identified by content, not by namespace.** The tunnel name is
+  `<name>-<template-hash>`, so two `RestateDeployment`s with the same name and identical
+  content (template and Restate configuration) that register against the same environment —
+  across namespaces or even clusters — share one tunnel name and load-balance as one
+  deployment. That is coherent (same code, same environment, same registered URL), but if you
+  want isolation, give them distinct names.
+- **Rotate the signing key gracefully.** Old versions keep verifying requests with the key
+  they were created with. After a hard key cutover their in-flight invocations can no longer
+  be delivered, which also prevents them from draining; let old versions drain before
+  decommissioning the old key, or purge their invocations.
+- **Registration waits for pod readiness**, but pods become Ready slightly before their first
+  tunnel handshake completes; if registration races ahead it is retried after 30 seconds.
+  Consider a readiness probe that reflects tunnel establishment if you need tighter rollouts.
+- `tunnelMode: in-process` is not supported in Knative mode: the Knative autoscaler sees no
+  inbound traffic for tunnel invocations, so scale-to-zero would never scale back up.
 
 ### EKS Pod Identity
 

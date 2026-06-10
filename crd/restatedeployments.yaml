@@ -198,6 +198,22 @@ spec:
                       If not provided, the service will be registered at the root path "/".
                     nullable: true
                     type: string
+                  tunnelMode:
+                    description: |-
+                      How Restate Cloud reaches this deployment. Only takes effect with
+                      `register.cloud` (`in-process` requires it, and is not supported in Knative
+                      mode).
+                      - `external` (default): invocations are forwarded to this deployment's Service
+                        by the tunnel-client pods managed by the RestateCloudEnvironment.
+                      - `in-process`: the deployment's pods hold their own outbound tunnel connections
+                        (e.g. with @restatedev/restate-sdk-tunnel), so no inbound networking to them is
+                        needed. The operator injects RESTATE_INPROC_* environment variables identifying
+                        the revision into the pod template and registers the per-revision tunnel URL.
+                    enum:
+                    - external
+                    - in-process
+                    nullable: true
+                    type: string
                   useHttp11:
                     description: Force the use of HTTP/1.1 when registering with Restate
                     nullable: true

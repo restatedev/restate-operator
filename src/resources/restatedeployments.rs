@@ -26,6 +26,23 @@ pub enum DeploymentMode {
     Knative,
 }
 
+/// Tunnel mode determines how Restate Cloud reaches a deployment registered
+/// against a RestateCloudEnvironment
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+pub enum TunnelMode {
+    /// External mode (default): invocations are forwarded to this deployment's
+    /// Service by the tunnel-client pods managed by the RestateCloudEnvironment
+    #[serde(rename = "external")]
+    External,
+    /// In-process mode: the deployment's pods hold their own outbound tunnel
+    /// connections (e.g. with @restatedev/restate-sdk-tunnel), so no inbound
+    /// networking to them is needed. The operator injects RESTATE_INPROC_*
+    /// environment variables into the pod template and registers the
+    /// per-revision tunnel URL directly
+    #[serde(rename = "in-process")]
+    InProcess,
+}
+
 /// Knative-specific deployment configuration
 #[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -248,6 +265,19 @@ pub struct RestateSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub use_http11: Option<bool>,
 
+    /// How Restate Cloud reaches this deployment. Only takes effect with
+    /// `register.cloud` (`in-process` requires it, and is not supported in Knative
+    /// mode).
+    /// - `external` (default): invocations are forwarded to this deployment's Service
+    ///   by the tunnel-client pods managed by the RestateCloudEnvironment.
+    /// - `in-process`: the deployment's pods hold their own outbound tunnel connections
+    ///   (e.g. with @restatedev/restate-sdk-tunnel), so no inbound networking to them is
+    ///   needed. The operator injects RESTATE_INPROC_* environment variables identifying
+    ///   the revision into the pod template and registers the per-revision tunnel URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "tunnel_mode_schema")]
+    pub tunnel_mode: Option<TunnelMode>,
+
     /// Seconds to wait before removing old versions after they are drained.
     /// Defaults to 300 (5 minutes).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -259,6 +289,19 @@ impl RestateSpec {
     pub fn drain_delay_seconds(&self) -> i64 {
         self.drain_delay_seconds.unwrap_or(300).max(0)
     }
+
+    pub fn is_in_process_tunnel(&self) -> bool {
+        matches!(self.tunnel_mode, Some(TunnelMode::InProcess))
+    }
+}
+
+fn tunnel_mode_schema(_g: &mut schemars::SchemaGenerator) -> Schema {
+    schemars::json_schema!({
+        "description": "How Restate Cloud reaches this deployment. Only takes effect with `register.cloud` (`in-process` requires it, and is not supported in Knative mode). `external` (default): invocations are forwarded to this deployment's Service by the tunnel-client pods managed by the RestateCloudEnvironment. `in-process`: the deployment's pods hold their own outbound tunnel connections (e.g. with @restatedev/restate-sdk-tunnel), so no inbound networking to them is needed; the operator injects RESTATE_INPROC_* environment variables identifying the revision into the pod template and registers the per-revision tunnel URL.",
+        "enum": ["external", "in-process"],
+        "type": "string",
+        "nullable": true
+    })
 }
 
 /// The location of the Restate Admin API to register this deployment against
@@ -375,7 +418,13 @@ impl RestateAdminEndpoint {
         cluster_dns: &str,
     ) -> crate::Result<Url> {
         self.validate_exactly_one_set()?;
-        let url = service_url(service_name, service_namespace, 9080, service_path, cluster_dns)?;
+        let url = service_url(
+            service_name,
+            service_namespace,
+            9080,
+            service_path,
+            cluster_dns,
+        )?;
         self.maybe_tunnel_url(rce_store, url)
     }
 

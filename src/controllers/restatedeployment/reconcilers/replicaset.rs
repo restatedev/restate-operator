@@ -15,14 +15,26 @@ use tracing::*;
 use crate::controllers::restatedeployment::controller::{
     APP_MANAGED_BY_LABEL, Context, OWNED_BY_LABEL, RESTATE_DEPLOYMENT_ID_ANNOTATION,
 };
+use crate::resources::restatecloudenvironments::InProcessTunnelParams;
 use crate::resources::restatedeployments::RestateDeployment;
 use crate::{Error, Result};
 
 pub const POD_TEMPLATE_HASH_LABEL: &str = "pod-template-hash";
 pub const RESTATE_POD_TEMPLATE_ANNOTATION: &str = "restate.dev/pod-template";
 pub const RESTATE_REMOVE_VERSION_AT_ANNOTATION: &str = "restate.dev/remove-version-at";
+/// Records the tunnel name a `tunnelMode: in-process` ReplicaSet was created with —
+/// the same value injected into its pods as RESTATE_INPROC_TUNNEL_NAME.
+pub const RESTATE_TUNNEL_NAME_ANNOTATION: &str = "restate.dev/tunnel-name";
+
+// The environment variables in-process tunnel clients (e.g.
+// @restatedev/restate-sdk-tunnel) resolve their configuration from.
+pub const INPROC_TUNNEL_NAME_ENV: &str = "RESTATE_INPROC_TUNNEL_NAME";
+pub const INPROC_ENVIRONMENT_ID_ENV: &str = "RESTATE_INPROC_ENVIRONMENT_ID";
+pub const INPROC_CLOUD_REGION_ENV: &str = "RESTATE_INPROC_CLOUD_REGION";
+pub const INPROC_SIGNING_PUBLIC_KEY_ENV: &str = "RESTATE_INPROC_SIGNING_PUBLIC_KEY";
 
 /// Ensure a ReplicaSet exists for the latest RestateDeployment version
+#[allow(clippy::too_many_arguments)]
 pub async fn reconcile_replicaset(
     client: &kube::Client,
     rsd: &RestateDeployment,
@@ -31,6 +43,7 @@ pub async fn reconcile_replicaset(
     match_labels: BTreeMap<String, String>,
     annotations: BTreeMap<String, String>,
     hash: &str,
+    in_process_tunnel: Option<&InProcessTunnelParams>,
 ) -> Result<ReplicaSet> {
     // Add version and hash to pod template
     let mut template_metadata = rsd.spec.template.metadata.clone();
@@ -57,6 +70,18 @@ pub async fn reconcile_replicaset(
     // Create replicaset ownership reference
     let owner_reference = rsd.controller_owner_ref(&()).unwrap();
 
+    // Like the pod-template-hash label, the RESTATE_INPROC_* env vars are injected after
+    // hashing — but every injected value derives from hash inputs (the versioned name and
+    // the RestateCloudEnvironment values), so a change in any of them mints a new revision.
+    let template_spec = match (&rsd.spec.template.spec, in_process_tunnel) {
+        (Some(spec), Some(params)) => Some(inject_in_process_tunnel_env(
+            spec.clone(),
+            versioned_name,
+            params,
+        )?),
+        (spec, _) => spec.clone(),
+    };
+
     // Create the replicaset - the pod template should be passed through directly so we can't use the proper type
     let rs_resource = ApiResource::erase::<ReplicaSet>(&());
     let mut replicaset = DynamicObject::new(versioned_name, &rs_resource).within(namespace);
@@ -74,7 +99,7 @@ pub async fn reconcile_replicaset(
             },
             "template": {
                 "metadata": template_metadata,
-                "spec": rsd.spec.template.spec,
+                "spec": template_spec,
             },
             "minReadySeconds": rsd.spec.min_ready_seconds,
         }
@@ -97,12 +122,78 @@ pub async fn reconcile_replicaset(
     Ok(applied_rs)
 }
 
+/// Inject the RESTATE_INPROC_* environment variables that in-process tunnel clients
+/// resolve their configuration from, into every container of the pod template —
+/// including initContainers, so native sidecars (restartPolicy: Always) are covered.
+/// A container that already declares one of them is an error: silently keeping the
+/// user value would desync the pods from the URL the operator registers.
+fn inject_in_process_tunnel_env(
+    mut spec: serde_json::Value,
+    tunnel_name: &str,
+    params: &InProcessTunnelParams,
+) -> Result<serde_json::Value> {
+    let vars = [
+        (INPROC_TUNNEL_NAME_ENV, tunnel_name),
+        (INPROC_ENVIRONMENT_ID_ENV, params.environment_id.as_str()),
+        (INPROC_CLOUD_REGION_ENV, params.region.as_str()),
+        (
+            INPROC_SIGNING_PUBLIC_KEY_ENV,
+            params.signing_public_key.as_str(),
+        ),
+    ];
+
+    // a pod spec without containers is invalid; let the api server report that
+    for field in ["containers", "initContainers"] {
+        let Some(containers) = spec.get_mut(field).and_then(|c| c.as_array_mut()) else {
+            continue;
+        };
+
+        for container in containers.iter_mut() {
+            let Some(container) = container.as_object_mut() else {
+                continue;
+            };
+            let container_name = container
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("<unnamed>")
+                .to_owned();
+
+            let env = container
+                .entry("env")
+                .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+            let Some(env) = env.as_array_mut() else {
+                return Err(Error::InvalidRestateConfig(format!(
+                    "container '{container_name}' has a non-array `env` field"
+                )));
+            };
+
+            for (var, value) in vars {
+                if env
+                    .iter()
+                    .any(|entry| entry.get("name").and_then(|n| n.as_str()) == Some(var))
+                {
+                    return Err(Error::InvalidRestateConfig(format!(
+                        "tunnelMode: in-process injects the environment variable `{var}`, but container '{container_name}' already declares it; remove it from the pod template"
+                    )));
+                }
+                env.push(json!({"name": var, "value": value}));
+            }
+        }
+    }
+
+    Ok(spec)
+}
+
 pub fn pod_template_annotation(rs: &RestateDeployment) -> String {
     serde_json::to_string(&rs.spec.template).expect("PodTemplateSpec to serialize")
 }
 
 /// Generate a hash for a pod template to uniquely identify versions
-pub fn generate_pod_template_hash(rsd: &RestateDeployment, pod_template: &str) -> String {
+pub fn generate_pod_template_hash(
+    rsd: &RestateDeployment,
+    pod_template: &str,
+    in_process_tunnel: Option<&InProcessTunnelParams>,
+) -> String {
     use std::hash::Hasher;
 
     let mut hasher = fnv::FnvHasher::default();
@@ -123,6 +214,23 @@ pub fn generate_pod_template_hash(rsd: &RestateDeployment, pod_template: &str) -
     if let Some(true) = rsd.spec.restate.use_http11 {
         hasher.write(b"use_http11");
     }
+
+    // In-process tunnel mode injects these values into the pods and bakes the versioned
+    // name into the registered URL, so changing any of them must mint a new revision.
+    // Folded in only when the mode is set, so existing deployments keep their hashes.
+    if let Some(params) = in_process_tunnel {
+        hasher.write(b"tunnel_mode=in-process");
+        for value in [
+            &params.environment_id,
+            &params.region,
+            &params.signing_public_key,
+        ] {
+            // length-prefixed so distinct tuples can't concatenate identically
+            hasher.write(&(value.len() as u64).to_be_bytes());
+            hasher.write(value.as_bytes());
+        }
+    }
+
     if let Some(collision_count) = rsd.status.as_ref().and_then(|s| s.collision_count) {
         hasher.write(&collision_count.to_be_bytes());
     }
@@ -414,4 +522,195 @@ pub async fn cleanup_old_replicasets(
     }
 
     Ok((active_count, next_removal))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::resources::restatedeployments::{
+        PodTemplateSpec, RestateAdminEndpoint, RestateDeploymentSpec, RestateSpec, TunnelMode,
+    };
+    use serde_json::json;
+
+    fn test_rsd(tunnel_mode: Option<TunnelMode>) -> RestateDeployment {
+        RestateDeployment::new(
+            "greeter",
+            RestateDeploymentSpec {
+                deployment_mode: None,
+                knative: None,
+                replicas: 1,
+                revision_history_limit: 10,
+                min_ready_seconds: None,
+                selector: None,
+                template: PodTemplateSpec {
+                    metadata: None,
+                    spec: Some(json!({"containers": [{"name": "app", "image": "greeter:1"}]})),
+                },
+                restate: RestateSpec {
+                    register: RestateAdminEndpoint {
+                        cluster: None,
+                        cloud: Some("my-env".into()),
+                        service: None,
+                        url: None,
+                    },
+                    service_path: None,
+                    use_http11: None,
+                    tunnel_mode,
+                    drain_delay_seconds: None,
+                },
+            },
+        )
+    }
+
+    fn test_params() -> InProcessTunnelParams {
+        InProcessTunnelParams {
+            environment_id: "env_123".into(),
+            region: "us".into(),
+            signing_public_key: "publickeyv1_abc".into(),
+        }
+    }
+
+    #[test]
+    fn hash_unchanged_without_in_process_tunnel() {
+        // the only-when-set property: deployments that don't use the mode must keep
+        // their hashes across operator upgrades
+        let rsd = test_rsd(None);
+        let template = pod_template_annotation(&rsd);
+        assert_eq!(
+            generate_pod_template_hash(&rsd, &template, None),
+            generate_pod_template_hash(&rsd, &template, None),
+        );
+    }
+
+    #[test]
+    fn hash_incorporates_in_process_tunnel_params() {
+        let rsd = test_rsd(Some(TunnelMode::InProcess));
+        let template = pod_template_annotation(&rsd);
+
+        let without = generate_pod_template_hash(&rsd, &template, None);
+        let with = generate_pod_template_hash(&rsd, &template, Some(&test_params()));
+        assert_ne!(without, with);
+
+        let mut repointed = test_params();
+        repointed.environment_id = "env_456".into();
+        assert_ne!(
+            generate_pod_template_hash(&rsd, &template, Some(&repointed)),
+            with
+        );
+
+        let mut rotated = test_params();
+        rotated.signing_public_key = "publickeyv1_xyz".into();
+        assert_ne!(
+            generate_pod_template_hash(&rsd, &template, Some(&rotated)),
+            with
+        );
+
+        let mut moved = test_params();
+        moved.region = "eu".into();
+        assert_ne!(
+            generate_pod_template_hash(&rsd, &template, Some(&moved)),
+            with
+        );
+
+        // deterministic for equal inputs
+        assert_eq!(
+            generate_pod_template_hash(&rsd, &template, Some(&test_params())),
+            with
+        );
+    }
+
+    #[test]
+    fn inject_appends_env_to_every_container() {
+        let spec = json!({
+            "containers": [
+                {"name": "app", "image": "greeter:1", "env": [{"name": "USER_VAR", "value": "kept"}]},
+                {"name": "sidecar", "image": "proxy:1"},
+            ],
+            "serviceAccountName": "greeter",
+        });
+
+        let injected =
+            inject_in_process_tunnel_env(spec, "greeter-abc123", &test_params()).unwrap();
+
+        // untouched fields pass through
+        assert_eq!(injected["serviceAccountName"], "greeter");
+
+        for (container, expected_len) in [(0, 5), (1, 4)] {
+            let env = injected["containers"][container]["env"].as_array().unwrap();
+            assert_eq!(env.len(), expected_len, "container {container}");
+            let get = |name: &str| {
+                env.iter()
+                    .find(|e| e["name"] == name)
+                    .unwrap_or_else(|| panic!("{name} missing in container {container}"))["value"]
+                    .clone()
+            };
+            assert_eq!(get(INPROC_TUNNEL_NAME_ENV), "greeter-abc123");
+            assert_eq!(get(INPROC_ENVIRONMENT_ID_ENV), "env_123");
+            assert_eq!(get(INPROC_CLOUD_REGION_ENV), "us");
+            assert_eq!(get(INPROC_SIGNING_PUBLIC_KEY_ENV), "publickeyv1_abc");
+        }
+
+        // user env is preserved
+        assert_eq!(injected["containers"][0]["env"][0]["name"], "USER_VAR");
+    }
+
+    #[test]
+    fn inject_covers_init_containers() {
+        // native sidecars (initContainers with restartPolicy: Always) may host the
+        // tunnel client too — they get the same env vars and the same conflict check
+        let spec = json!({
+            "containers": [{"name": "app"}],
+            "initContainers": [{"name": "sidecar", "restartPolicy": "Always"}],
+        });
+        let injected =
+            inject_in_process_tunnel_env(spec, "greeter-abc123", &test_params()).unwrap();
+        let env = injected["initContainers"][0]["env"].as_array().unwrap();
+        assert_eq!(env.len(), 4);
+        assert_eq!(env[0]["name"], INPROC_TUNNEL_NAME_ENV);
+
+        let conflicting = json!({
+            "containers": [{"name": "app"}],
+            "initContainers": [
+                {"name": "sidecar", "env": [{"name": INPROC_ENVIRONMENT_ID_ENV, "value": "mine"}]},
+            ],
+        });
+        let err = inject_in_process_tunnel_env(conflicting, "greeter-abc123", &test_params())
+            .expect_err("user-declared RESTATE_INPROC_* in an initContainer must be rejected");
+        assert!(err.to_string().contains("sidecar"));
+    }
+
+    #[test]
+    fn inject_rejects_user_declared_inproc_var() {
+        let spec = json!({
+            "containers": [
+                {"name": "app", "env": [{"name": INPROC_TUNNEL_NAME_ENV, "value": "mine"}]},
+            ],
+        });
+
+        let err = inject_in_process_tunnel_env(spec, "greeter-abc123", &test_params())
+            .expect_err("user-declared RESTATE_INPROC_* must be rejected");
+        assert!(matches!(err, Error::InvalidRestateConfig(_)));
+        assert!(err.to_string().contains(INPROC_TUNNEL_NAME_ENV));
+        assert!(err.to_string().contains("app"));
+    }
+
+    #[test]
+    fn inject_rejects_non_array_env() {
+        let spec = json!({
+            "containers": [{"name": "app", "env": "oops"}],
+        });
+
+        let err = inject_in_process_tunnel_env(spec, "greeter-abc123", &test_params())
+            .expect_err("non-array env must be rejected");
+        assert!(matches!(err, Error::InvalidRestateConfig(_)));
+    }
+
+    #[test]
+    fn inject_passes_through_invalid_pod_specs() {
+        // a pod spec without containers is invalid; the api server reports that better
+        let spec = json!({"volumes": []});
+        let injected =
+            inject_in_process_tunnel_env(spec.clone(), "greeter-abc123", &test_params()).unwrap();
+        assert_eq!(injected, spec);
+    }
 }
