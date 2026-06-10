@@ -232,40 +232,49 @@ pub async fn cleanup_old_replicasets(
             active_count += 1;
 
             // Per-version autoscaling: a non-latest version has an operator HPA
-            // iff it is still active. Skip while the RestateDeployment is being
-            // deleted (its owned HPAs are garbage-collected with it).
-            if rsd.metadata.deletion_timestamp.is_none() {
-                match &rsd.spec.autoscaling {
-                    Some(template) => {
-                        super::autoscaling::reconcile_version_hpa(
-                            &ctx.client,
-                            rsd,
-                            namespace,
-                            &rs_name,
-                            template,
-                        )
-                        .await?;
-                    }
-                    None => {
-                        // Autoscaling disabled/removed: drop any HPA we created
-                        // and restore the version to full replicas.
-                        if super::autoscaling::delete_version_hpa(&ctx.client, namespace, &rs_name)
-                            .await?
-                        {
-                            rs_api
-                                .patch_scale(
-                                    &rs_name,
-                                    &PatchParams::apply("restate-operator/scale-restore").force(),
-                                    &Patch::Apply(serde_json::json!({
-                                        "apiVersion": Scale::api_version(&()),
-                                        "kind": Scale::kind(&()),
-                                        "spec": { "replicas": rsd.spec.replicas }
-                                    })),
-                                )
-                                .await?;
-                        }
+            // iff it is still active and autoscaling is configured. (See
+            // `plan_active_version_hpa` for the decision; the inactive case is
+            // handled unconditionally below, before scale-down.)
+            use super::autoscaling::HpaPlan;
+            match super::autoscaling::plan_active_version_hpa(
+                rsd.spec.autoscaling.is_some(),
+                rsd.metadata.deletion_timestamp.is_some(),
+            ) {
+                HpaPlan::Ensure => {
+                    let template = rsd
+                        .spec
+                        .autoscaling
+                        .as_ref()
+                        .expect("autoscaling configured");
+                    super::autoscaling::reconcile_version_hpa(
+                        &ctx.client,
+                        rsd,
+                        namespace,
+                        &rs_name,
+                        template,
+                    )
+                    .await?;
+                }
+                HpaPlan::RemoveAndRestore => {
+                    // Autoscaling disabled/removed: drop any HPA we created and
+                    // restore the version to full replicas.
+                    if super::autoscaling::delete_version_hpa(&ctx.client, namespace, &rs_name)
+                        .await?
+                    {
+                        rs_api
+                            .patch_scale(
+                                &rs_name,
+                                &PatchParams::apply("restate-operator/scale-restore").force(),
+                                &Patch::Apply(serde_json::json!({
+                                    "apiVersion": Scale::api_version(&()),
+                                    "kind": Scale::kind(&()),
+                                    "spec": { "replicas": rsd.spec.replicas }
+                                })),
+                            )
+                            .await?;
                     }
                 }
+                HpaPlan::Skip => {}
             }
 
             if rs

@@ -87,4 +87,5 @@ url = { version = "2.5.7", features = ["serde"] }
 tonic-prost-build = "0.14.2"
 
 [dev-dependencies]
-http = "0.2.9"
+http = "1"
+tower = { version = "0.5", features = ["util"] }

@@ -11,6 +11,35 @@ use crate::{Error, Result};
 /// Field manager used for server-side applies of operator-managed HPAs.
 const FIELD_MANAGER: &str = "restate-operator/autoscaling";
 
+/// What to do with the operator-managed HPA for one owned, non-latest, **active**
+/// ReplicaSet. Encodes the active-version half of the invariant: a non-latest
+/// version has an operator HPA iff it is active *and* autoscaling is configured.
+/// (Inactive versions always have their HPA removed before scale-down; that path
+/// is unconditional and not modelled here.)
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum HpaPlan {
+    /// Create/update the HPA for this version.
+    Ensure,
+    /// Autoscaling was disabled/removed while the version is still active: drop
+    /// any HPA we created and restore the version to its full replica count.
+    RemoveAndRestore,
+    /// Do nothing — e.g. the RestateDeployment is being deleted, in which case
+    /// owned HPAs are garbage-collected with it.
+    Skip,
+}
+
+/// Decide the HPA action for an active, non-latest version. Pure so it can be
+/// table-tested without a cluster.
+pub(crate) fn plan_active_version_hpa(autoscaling_configured: bool, rd_deleting: bool) -> HpaPlan {
+    if rd_deleting {
+        HpaPlan::Skip
+    } else if autoscaling_configured {
+        HpaPlan::Ensure
+    } else {
+        HpaPlan::RemoveAndRestore
+    }
+}
+
 /// Build the HorizontalPodAutoscaler object for a single non-latest version.
 ///
 /// `template` is the user-supplied pass-through HPA `.spec` (without
@@ -120,6 +149,10 @@ pub async fn delete_version_hpa(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http::{Request, Response};
+    use kube::client::Body;
+    use std::convert::Infallible;
+    use std::sync::{Arc, Mutex};
 
     fn make_rsd() -> RestateDeployment {
         let spec = serde_json::from_value(json!({
@@ -209,5 +242,116 @@ mod tests {
         // A malformed/empty template must not panic; scaleTargetRef is still set.
         let hpa = build_version_hpa(&make_rsd(), "ns", "greeter-abc", &json!(null));
         assert_eq!(hpa["spec"]["scaleTargetRef"]["name"], "greeter-abc");
+    }
+
+    // The active-version decision matrix (the invariant). The inactive case is a
+    // separate, unconditional delete and is exercised by the e2e teardown test.
+    #[test]
+    fn plan_ensures_hpa_when_active_and_configured() {
+        assert_eq!(plan_active_version_hpa(true, false), HpaPlan::Ensure);
+    }
+
+    #[test]
+    fn plan_removes_and_restores_when_active_but_unconfigured() {
+        // autoscaling removed while the version is still active
+        assert_eq!(
+            plan_active_version_hpa(false, false),
+            HpaPlan::RemoveAndRestore
+        );
+    }
+
+    #[test]
+    fn plan_skips_while_restate_deployment_is_deleting() {
+        // owned HPAs are GC'd with the RestateDeployment, so don't stamp during deletion
+        assert_eq!(plan_active_version_hpa(true, true), HpaPlan::Skip);
+        assert_eq!(plan_active_version_hpa(false, true), HpaPlan::Skip);
+    }
+
+    // --- mocked-Client tests: a tower service stands in for the apiserver (the
+    // kube-rs idiom), exercising the real HPA API calls deterministically. ---
+
+    fn client_with<F>(handler: F) -> kube::Client
+    where
+        F: Fn(Request<Body>) -> Response<Body> + Clone + Send + 'static,
+    {
+        let svc = tower::service_fn(move |req: Request<Body>| {
+            let handler = handler.clone();
+            async move { Ok::<_, Infallible>(handler(req)) }
+        });
+        kube::Client::new(svc, "default")
+    }
+
+    fn json_body(status: u16, v: serde_json::Value) -> Response<Body> {
+        Response::builder()
+            .status(status)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&v).unwrap()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn delete_version_hpa_tolerates_missing() {
+        let client = client_with(|_req| {
+            json_body(
+                404,
+                json!({
+                    "kind": "Status", "apiVersion": "v1", "status": "Failure",
+                    "reason": "NotFound", "code": 404, "message": "not found"
+                }),
+            )
+        });
+        assert!(
+            !delete_version_hpa(&client, "ns", "greeter-abc")
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_version_hpa_reports_deletion() {
+        let client = client_with(|_req| {
+            json_body(
+                200,
+                json!({
+                    "kind": "HorizontalPodAutoscaler", "apiVersion": "autoscaling/v2",
+                    "metadata": { "name": "greeter-abc", "namespace": "ns" }
+                }),
+            )
+        });
+        assert!(
+            delete_version_hpa(&client, "ns", "greeter-abc")
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_version_hpa_server_side_applies_to_correct_path() {
+        let seen: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
+        let captured = seen.clone();
+        let client = client_with(move |req| {
+            *captured.lock().unwrap() =
+                Some((req.method().to_string(), req.uri().path().to_string()));
+            json_body(
+                200,
+                json!({
+                    "kind": "HorizontalPodAutoscaler", "apiVersion": "autoscaling/v2",
+                    "metadata": { "name": "greeter-abc", "namespace": "ns" }
+                }),
+            )
+        });
+        reconcile_version_hpa(&client, &make_rsd(), "ns", "greeter-abc", &template())
+            .await
+            .unwrap();
+        let (method, path) = seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("a request was captured");
+        assert_eq!(method, "PATCH");
+        assert_eq!(
+            path,
+            "/apis/autoscaling/v2/namespaces/ns/horizontalpodautoscalers/greeter-abc"
+        );
     }
 }

@@ -90,6 +90,19 @@ rules:
       - networking.k8s.io
       - vpcresources.k8s.aws
       - secrets-store.csi.x-k8s.io
+  # Per-version autoscaling: the operator manages one HorizontalPodAutoscaler per
+  # draining (non-latest) RestateDeployment version, and watches them (owns).
+  - resources:
+      - horizontalpodautoscalers
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - patch
+      - delete
+    apiGroups:
+      - autoscaling
   {{- if .Values.awsPodIdentityAssociationCluster }}
   - resources:
       - podidentityassociations
