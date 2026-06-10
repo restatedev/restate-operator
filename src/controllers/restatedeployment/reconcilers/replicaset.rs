@@ -231,6 +231,43 @@ pub async fn cleanup_old_replicasets(
         if deployment_active {
             active_count += 1;
 
+            // Per-version autoscaling: a non-latest version has an operator HPA
+            // iff it is still active. Skip while the RestateDeployment is being
+            // deleted (its owned HPAs are garbage-collected with it).
+            if rsd.metadata.deletion_timestamp.is_none() {
+                match &rsd.spec.autoscaling {
+                    Some(template) => {
+                        super::autoscaling::reconcile_version_hpa(
+                            &ctx.client,
+                            rsd,
+                            namespace,
+                            &rs_name,
+                            template,
+                        )
+                        .await?;
+                    }
+                    None => {
+                        // Autoscaling disabled/removed: drop any HPA we created
+                        // and restore the version to full replicas.
+                        if super::autoscaling::delete_version_hpa(&ctx.client, namespace, &rs_name)
+                            .await?
+                        {
+                            rs_api
+                                .patch_scale(
+                                    &rs_name,
+                                    &PatchParams::apply("restate-operator/scale-restore").force(),
+                                    &Patch::Apply(serde_json::json!({
+                                        "apiVersion": Scale::api_version(&()),
+                                        "kind": Scale::kind(&()),
+                                        "spec": { "replicas": rsd.spec.replicas }
+                                    })),
+                                )
+                                .await?;
+                        }
+                    }
+                }
+            }
+
             if rs
                 .annotations()
                 .get(RESTATE_REMOVE_VERSION_AT_ANNOTATION)
@@ -266,6 +303,13 @@ pub async fn cleanup_old_replicasets(
 
             continue;
         }
+
+        // Non-active version: ensure no operator HPA exists before we scale it
+        // down. Its minReplicas floor (>= 1) would otherwise fight the operator
+        // scaling the ReplicaSet to zero, and would hold the version at the floor
+        // through the revision-history retention window. Unconditional (also runs
+        // during RestateDeployment deletion) so teardown is never contended.
+        super::autoscaling::delete_version_hpa(&ctx.client, namespace, &rs_name).await?;
 
         let current_remove_at = rs
             .annotations()

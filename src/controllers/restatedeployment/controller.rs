@@ -6,6 +6,7 @@ use chrono::Utc;
 use futures::StreamExt;
 
 use k8s_openapi::api::apps::v1::{ReplicaSet, ReplicaSetStatus};
+use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
 use k8s_openapi::api::core::v1::{Secret, Service};
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
@@ -1149,6 +1150,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     let rce: Api<RestateCloudEnvironment> = Api::all(client.clone());
     let secrets: Api<Secret> = Api::namespaced(client.clone(), &state.operator_namespace);
     let services: Api<Service> = Api::all(client.clone());
+    let hpas: Api<HorizontalPodAutoscaler> = Api::all(client.clone());
 
     if let Err(e) = services.list(&ListParams::default().limit(1)).await {
         error!("RestateDeployment is not queryable; {e:?}. Is the CRD installed?");
@@ -1271,6 +1273,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         .watches_stream(rce_reflector, |_| std::iter::empty())
         .watches_stream(secret_reflector, |_| std::iter::empty())
         .owns(services, cfg.clone())
+        .owns(hpas, cfg.clone())
         .run(
             reconcile,
             error_policy,
