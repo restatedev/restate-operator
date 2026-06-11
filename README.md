@@ -571,6 +571,8 @@ Notes:
 - CPU/memory metrics require container resource `requests` to be set; prefer CPU (memory does not scale back down).
 - If you run the operator with your own RBAC (not the bundled Helm chart), grant it `get,list,watch,create,patch,delete` on `horizontalpodautoscalers` in the `autoscaling` API group.
 
+**On the scaling signal:** CPU (or memory) is a coarse proxy for a draining version's real demand — load on an old version is bursty, and an invocation pinned to it can be suspended (awaiting a timer, call, or external event) and so consume no CPU while still requiring the version to stay available. The ideal trigger would be a per-**deployment** metric exposed by Restate itself — the number of in-flight/pending invocations pinned to that specific Restate deployment (note: *deployment*, i.e. a single registered version, not the whole service) — consumed via the custom/external metrics API and targeted per version. Restate does not expose such a metric today; CPU is a pragmatic default until it does, with the caveat that a concurrency-bound but low-CPU version may under-scale.
+
 ```yaml
 apiVersion: restate.dev/v1beta1
 kind: RestateDeployment

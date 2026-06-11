@@ -77,6 +77,7 @@ spec:
                     mode); a value below 1 is raised to 1.
                   - CPU/memory metrics require container resource `requests` to be set;
                     prefer CPU over memory (memory does not scale back down).
+                type: object
                 x-kubernetes-preserve-unknown-fields: true
               deploymentMode:
                 description: |-
@@ -317,6 +318,9 @@ spec:
             - restate
             - template
             type: object
+            x-kubernetes-validations:
+            - message: spec.autoscaling is only supported in replicaset mode (not knative)
+              rule: '!has(self.autoscaling) || !has(self.deploymentMode) || self.deploymentMode != ''knative'''
           status:
             description: |-
               Status of the RestateDeployment

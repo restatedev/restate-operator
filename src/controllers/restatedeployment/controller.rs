@@ -1174,8 +1174,9 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     .touched_objects()
     .default_backoff();
 
-    // Reflector over operator-managed HPAs: drives reconciles (owns_stream) and
-    // gives the reconciler a cache to check existence before issuing deletes.
+    // A reflector (rather than `.owns(...)`) also gives a queryable cache, so we can
+    // check whether a draining version still has an HPA before issuing a delete —
+    // avoiding a wasted API call every reconcile.
     let (hpa_store, hpa_writer) = kube::runtime::reflector::store();
     let hpa_reflector =
         kube::runtime::reflector(hpa_writer, kube::runtime::watcher(hpas, cfg.clone()))

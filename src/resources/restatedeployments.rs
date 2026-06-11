@@ -94,6 +94,12 @@ pub struct KnativeDeploymentSpec {
 )]
 #[kube(status = "RestateDeploymentStatus", shortname = "rsd")]
 #[serde(rename_all = "camelCase")]
+// Per-version autoscaling is only wired into the ReplicaSet path; in Knative mode
+// Knative's own autoscaler handles scaling, so reject the field rather than
+// silently ignoring it.
+#[x_kube(validation = Rule::new(
+    "!has(self.autoscaling) || !has(self.deploymentMode) || self.deploymentMode != 'knative'"
+).message("spec.autoscaling is only supported in replicaset mode (not knative)"))]
 pub struct RestateDeploymentSpec {
     /// Deployment mode: replicaset (default) or knative.
     /// This field is immutable after creation.
@@ -164,7 +170,12 @@ fn default_replicas() -> i32 {
 }
 
 fn autoscaling_schema(_g: &mut schemars::SchemaGenerator) -> Schema {
+    // `type: object` makes the field structurally known (so the spec-level CEL
+    // rule can reference `self.autoscaling`), while preserve-unknown keeps its
+    // contents a free-form pass-through HPA spec. An HPA `.spec` is always an
+    // object, so this is also simply the more accurate schema.
     schemars::json_schema!({
+        "type": "object",
         "x-kubernetes-preserve-unknown-fields": true
     })
 }

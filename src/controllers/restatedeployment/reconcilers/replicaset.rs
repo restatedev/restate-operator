@@ -20,6 +20,8 @@ use crate::controllers::restatedeployment::controller::{
 use crate::resources::restatedeployments::RestateDeployment;
 use crate::{Error, Result};
 
+use super::autoscaling::HpaPlan;
+
 pub const POD_TEMPLATE_HASH_LABEL: &str = "pod-template-hash";
 pub const RESTATE_POD_TEMPLATE_ANNOTATION: &str = "restate.dev/pod-template";
 pub const RESTATE_REMOVE_VERSION_AT_ANNOTATION: &str = "restate.dev/remove-version-at";
@@ -237,7 +239,6 @@ pub async fn cleanup_old_replicasets(
             // iff it is still active and autoscaling is configured. (See
             // `plan_active_version_hpa` for the decision; the inactive case is
             // handled unconditionally below, before scale-down.)
-            use super::autoscaling::HpaPlan;
             match super::autoscaling::plan_active_version_hpa(
                 rsd.spec.autoscaling.is_some(),
                 rsd.metadata.deletion_timestamp.is_some(),
