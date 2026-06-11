@@ -29,17 +29,16 @@ pub enum DeploymentMode {
 /// Tunnel mode determines how Restate Cloud reaches a deployment registered
 /// against a RestateCloudEnvironment
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
 pub enum TunnelMode {
     /// External mode (default): invocations are forwarded to this deployment's
     /// Service by the tunnel-client pods managed by the RestateCloudEnvironment
-    #[serde(rename = "external")]
     External,
     /// In-process mode: the deployment's pods hold their own outbound tunnel
     /// connections (e.g. with @restatedev/restate-sdk-tunnel), so no inbound
     /// networking to them is needed. The operator injects RESTATE_INPROC_*
     /// environment variables into the pod template and registers the
     /// per-revision tunnel URL directly
-    #[serde(rename = "in-process")]
     InProcess,
 }
 
