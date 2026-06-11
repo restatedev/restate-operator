@@ -260,11 +260,14 @@ impl RestateDeployment {
             }
         };
 
+        // The rsd's annotations are copied onto the ReplicaSet/Service below; drop
+        // the ones the operator manages itself so a user-set value on the rsd can't
+        // shadow them on the way through.
         let mut annotations = self.annotations().clone();
-        // if this is set on the rsd, don't propagate it
+        // kubectl bookkeeping; meaningful only on the object it was applied to
         annotations.remove("kubectl.kubernetes.io/last-applied-configuration");
-        // reserved for the operator: set on the ReplicaSet at creation in in-process
-        // tunnel mode; a value on the rsd must not propagate over it
+        // recorded by the operator on the ReplicaSet at creation (in-process tunnel
+        // mode) and read back when building the registration URL
         annotations.remove(RESTATE_TUNNEL_NAME_ANNOTATION);
 
         // Create/update the ReplicaSet for this version
