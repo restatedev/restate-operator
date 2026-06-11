@@ -70,6 +70,11 @@ pub(crate) fn build_version_hpa(
     }
     let spec_obj = spec.as_object_mut().expect("spec is a JSON object");
 
+    if spec_obj.contains_key("scaleTargetRef") {
+        warn!(
+            "autoscaling template for {versioned_name} sets scaleTargetRef; the operator manages it per version and is overriding the provided value (it should be omitted)"
+        );
+    }
     spec_obj.insert(
         "scaleTargetRef".to_string(),
         json!({

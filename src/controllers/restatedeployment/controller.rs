@@ -330,6 +330,21 @@ impl RestateDeployment {
             Err(err) => return Err(err),
         };
 
+        // The latest version is scaled via the RD scale subresource (the operator
+        // propagates spec.replicas to its ReplicaSet), never by a per-version HPA.
+        // If a draining version becomes latest again — a rollback, or a reintroduced
+        // identical spec re-adopting its ReplicaSet via the AlreadyExists path above —
+        // it can still carry the operator HPA stamped while it drained. Remove it,
+        // otherwise that HPA and propagate-replicas would fight over the ReplicaSet's
+        // scale every reconcile. Gated on the owned-HPA cache so it's a no-op (no API
+        // call) in the common case.
+        let latest_hpa =
+            ObjectRef::<HorizontalPodAutoscaler>::new(&versioned_name).within(namespace);
+        if ctx.hpa_store.get(&latest_hpa).is_some() {
+            reconcilers::autoscaling::delete_version_hpa(&ctx.client, namespace, &versioned_name)
+                .await?;
+        }
+
         let mut service_labels = self.labels().clone();
         service_labels.insert(
             APP_MANAGED_BY_LABEL.to_string(),

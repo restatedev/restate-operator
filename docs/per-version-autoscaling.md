@@ -117,9 +117,18 @@ versioned RS name:
 - `scaleTargetRef` → `{ apiVersion: apps/v1, kind: ReplicaSet, name: <rd>-<hash> }`
   — the HPA targets the version's ReplicaSet directly (a ReplicaSet exposes a
   scale subresource).
-- the metric selector / target scoping is constrained to that version's pods
-  via the existing `pod-template-hash=<hash>` label, so a per-version metric (if
-  present) is read only for that version.
+The operator injects **only** `scaleTargetRef` — it does not modify the metric
+spec. Whether a metric is therefore per-version depends on its type:
+
+- **Resource / ContainerResource / Pods** metrics are read from the pods of the
+  `scaleTargetRef` (this version's ReplicaSet, whose pods carry the
+  `pod-template-hash`), so they are inherently per-version. This is the CPU case;
+  nothing extra is needed.
+- **Object / External** metrics reference an external series by their own
+  metadata, not the target's pods. The same template is applied to every draining
+  version, so each version's HPA would read the **same** value — these are **not**
+  per-version. Don't put an Object/External metric in the template expecting
+  per-version scaling: the operator does not inject a version-scoping selector.
 
 ### Defaults / validation
 
@@ -149,10 +158,11 @@ secondary (Restate idiom pushes waits through suspending awaits) and bounded
 (load on a draining version only falls over time).
 
 **Follow-up:** add a per-`deployment-id` demand metric in the Restate runtime
-(in-flight / concurrency, the Knative-equivalent signal) and let users target it
-via the same pass-through template. This closes the concurrency-bound gap with
-no operator change beyond what this design ships — it is a metric source,
-surfaced through the existing custom/external-metrics path.
+(in-flight / concurrency, the Knative-equivalent signal). Note this is **not**
+zero-operator-change: such a signal is an External/Object metric (see "Operator-
+injected fields"), so consuming it *per version* requires the operator to inject
+a version-scoped selector into each stamped HPA — which it does not do today —
+in addition to the runtime metric source itself.
 
 Recommend **CPU, not memory**: memory is sticky and won't scale *down*,
 defeating the goal.
@@ -226,7 +236,8 @@ the RD finalizer/cleanup path.
 1. **Prerequisite:** land #139 (hash-filter `.status.labelSelector`).
 2. Add pass-through `autoscaling` field to `RestateDeploymentSpec`; `just generate`.
 3. HPA reconciler: stamp/update an HPA for each non-latest **active** version,
-   injecting `scaleTargetRef` and version-scoped metric labels; own by the RD.
+   injecting `scaleTargetRef` (Resource metrics are per-version via the target's
+   pod selector; the operator does not inject metric-label scoping); own by the RD.
 4. Stop propagating `spec.replicas` to an RS once it has an operator HPA.
 5. Teardown: delete the HPA at the inactive→scale-to-0 transition (before
    scaling to 0), per the invariant above; ensure the RD finalizer/cleanup path
@@ -250,8 +261,7 @@ active/inactive map, assert the exact set of HPA create/update/delete actions
 and replica handling:
 
 - **Stamping:** a non-latest, active version with `autoscaling` set gets exactly
-  one HPA, with `scaleTargetRef` pointing at that version's RS and the metric
-  selector scoped to that version's `pod-template-hash`.
+  one HPA, with `scaleTargetRef` pointing at that version's RS.
 - **Latest is excluded:** the latest version never gets an operator HPA.
 - **Replicas handoff:** once a version has an HPA, the operator stops writing
   `spec.replicas` to its RS (no reconcile should re-assert a replica count).

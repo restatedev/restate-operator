@@ -8,6 +8,7 @@ use kube::api::{
     Api, ApiResource, DynamicObject, PartialObjectMetaExt, Patch, PatchParams, PostParams,
 };
 use kube::core::subresource::Scale;
+use kube::runtime::events::{Event, EventType};
 use kube::runtime::reflector::ObjectRef;
 use kube::{Resource, ResourceExt};
 use reqwest::Method;
@@ -244,23 +245,57 @@ pub async fn cleanup_old_replicasets(
                 rsd.metadata.deletion_timestamp.is_some(),
             ) {
                 HpaPlan::Ensure => {
-                    if let Some(template) = rsd.spec.autoscaling.as_ref() {
-                        super::autoscaling::reconcile_version_hpa(
+                    if let Some(template) = rsd.spec.autoscaling.as_ref()
+                        && let Err(err) = super::autoscaling::reconcile_version_hpa(
                             &ctx.client,
                             rsd,
                             namespace,
                             &rs_name,
                             template,
                         )
-                        .await?;
+                        .await
+                    {
+                        // A bad autoscaling template (rejected by the apiserver at
+                        // HPA-apply time) or a transient apply failure must not wedge
+                        // cleanup of every other version — drain scheduling, scale-down
+                        // and teardown still need to run. Surface it and carry on; this
+                        // version just stays at full replicas (no worse than no
+                        // autoscaling) until the template is fixed or the apply succeeds.
+                        warn!(
+                            "failed to apply autoscaling HPA for {rs_name} in {namespace}: {err}; \
+                             continuing (other versions unaffected)"
+                        );
+                        let _ = ctx
+                            .recorder
+                            .publish(
+                                &Event {
+                                    type_: EventType::Warning,
+                                    reason: "AutoscalingApplyFailed".into(),
+                                    note: Some(format!(
+                                        "Failed to apply per-version HorizontalPodAutoscaler for {rs_name}: {err}"
+                                    )),
+                                    action: "Reconcile".into(),
+                                    secondary: None,
+                                },
+                                &rsd.object_ref(&()),
+                            )
+                            .await;
                     }
                 }
                 HpaPlan::RemoveAndRestore => {
-                    // Autoscaling disabled/removed: drop any HPA we created and
-                    // restore the version to full replicas.
-                    if super::autoscaling::delete_version_hpa(&ctx.client, namespace, &rs_name)
-                        .await?
-                    {
+                    // Autoscaling was disabled/removed: if we previously created an
+                    // HPA for this version, drop it and restore the version to full
+                    // replicas. Gate on the owned-HPA cache — it avoids a blind
+                    // DELETE per draining version every reconcile in the common
+                    // (no-autoscaling) case, and since the cache only holds our
+                    // managed-by-labelled HPAs it doubles as an ownership check, so
+                    // we never delete a user's hand-rolled HPA that happens to share
+                    // the ReplicaSet's name.
+                    let hpa_ref =
+                        ObjectRef::<HorizontalPodAutoscaler>::new(&rs_name).within(namespace);
+                    if ctx.hpa_store.get(&hpa_ref).is_some() {
+                        super::autoscaling::delete_version_hpa(&ctx.client, namespace, &rs_name)
+                            .await?;
                         rs_api
                             .patch_scale(
                                 &rs_name,

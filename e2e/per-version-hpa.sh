@@ -464,6 +464,70 @@ if [[ "${RUN_SCALE_DEMO:-0}" == "1" ]]; then
   exit $(( FAILS > 0 ? 1 : 0 ))
 fi
 
+# Does an HPA with this name exist? (operator HPAs are named after their RS.)
+hpa_absent() { ! kc -n "$APP_NS" get hpa "$1" >/dev/null 2>&1; }
+
+# Opt-in rollback reproducer (RUN_ROLLBACK=1). A version that drained (and was
+# stamped with a per-version HPA) and is then promoted back to latest — a rollback,
+# or a reintroduced identical spec — must shed that HPA, otherwise it and the
+# operator's propagate-replicas fight over the ReplicaSet's scale. Deterministic
+# (no metrics/load needed). Run with KEEP=1 to inspect.
+run_rollback() {
+  step "Rollback — a version promoted back to latest drops its operator HPA"
+  deploy_version v1
+  wait_until "v1 Ready (registered)" 180 rd_ready || warn "v1 not Ready; continuing"
+
+  # Keep v1 active (idle) so it qualifies for an operator HPA once non-latest.
+  local ka; ka="$(keepalive_on_current)" || { fail "keep-alive not accepted"; return; }
+  info "keep-alive pinned to v1: ${ka}"
+  sleep 5
+
+  info "bumping to v2 — v1 becomes non-latest and, kept alive, gets an operator HPA…"
+  deploy_version v2
+  wait_until "operator HPA for draining v1 to appear" 180 hpa_count_is 1 \
+    || { fail "v1 never got an operator HPA (rollback precondition not met)"; return; }
+  local hpa rs
+  hpa="$(operator_hpa_names | head -n1)"
+  rs="$(kc -n "$APP_NS" get hpa "$hpa" -o jsonpath='{.spec.scaleTargetRef.name}')"
+  pass "v1 (${rs}) is draining with operator HPA ${hpa}"
+
+  info "rolling back to v1 (identical spec → re-adopts ${rs} as latest again)…"
+  deploy_version v1
+
+  # The fix: ${rs} is latest again, so its leftover operator HPA must be removed.
+  # Assert on this specific HPA, not a total count — the (separate, unfixed)
+  # registration desync can legitimately leave v2 with its own HPA.
+  if wait_until "v1's leftover operator HPA (${rs}) to be removed" 90 hpa_absent "$rs"; then
+    pass "operator HPA on ${rs} removed once it was promoted back to latest"
+  else
+    fail "${rs} still has an operator HPA after rollback (the leftover-HPA bug)"
+  fi
+
+  # And its scale must be stable — no flap between propagate-replicas and a leftover HPA.
+  info "checking ${rs} replicas are stable (no flap)…"
+  local stable=1 prev="" r
+  for _ in $(seq 1 8); do
+    r="$(rs_replicas "$rs")"; r="${r:-?}"
+    info "  ${rs} replicas=${r}"
+    if [[ -n "$prev" && "$r" != "$prev" ]]; then stable=0; fi
+    prev="$r"
+    sleep 6
+  done
+  if (( stable == 1 )); then
+    pass "${rs} replicas stable after rollback (no flap)"
+  else
+    fail "${rs} replicas flapped after rollback"
+  fi
+}
+
+if [[ "${RUN_ROLLBACK:-0}" == "1" ]]; then
+  run_rollback
+  step "Rollback results"
+  echo "  ${GREEN}${PASSES} passed${RST}, ${RED}${FAILS} failed${RST}"
+  [[ "${KEEP:-0}" == "1" ]] || warn "cluster will be torn down; re-run with KEEP=1 to inspect"
+  exit $(( FAILS > 0 ? 1 : 0 ))
+fi
+
 # ===========================================================================
 step "Scenario 1 — v1 latest: no operator HPA"
 deploy_version v1
