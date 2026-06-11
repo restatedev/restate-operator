@@ -836,12 +836,7 @@ impl RestateDeployment {
 
         // Only set labelSelector for ReplicaSet mode (Knative manages pods directly)
         if !is_knative {
-            let selector: Option<Selector> = self
-                .spec
-                .selector
-                .as_ref()
-                .and_then(|s| s.clone().try_into().ok());
-            rsd_status.label_selector = selector.as_ref().map(Selector::to_string);
+            rsd_status.label_selector = latest_version_label_selector(self);
         }
         rsd_status.observed_generation = self.metadata.generation;
 
@@ -1068,6 +1063,31 @@ impl RestateDeployment {
 
         Ok(Action::await_change())
     }
+}
+
+/// Build the `.status.labelSelector` for a ReplicaSet-mode RestateDeployment,
+/// scoped to the latest version's pods by appending the pod-template-hash.
+///
+/// An HPA targeting the RD scale subresource reads this selector to decide which
+/// pods' metrics to aggregate. Without the hash it would also match old
+/// ReplicaSets still draining pinned invocations, polluting the averaged metric
+/// for the whole (potentially multi-hour) drain window and under-provisioning
+/// the genuinely-busy latest version. The hash is computed the same way as the
+/// latest versioned ReplicaSet, so the selector matches exactly that RS's pods.
+/// See #139.
+fn latest_version_label_selector(rsd: &RestateDeployment) -> Option<String> {
+    let pod_template_annotation = reconcilers::replicaset::pod_template_annotation(rsd);
+    let latest_hash =
+        reconcilers::replicaset::generate_pod_template_hash(rsd, &pod_template_annotation);
+
+    let mut label_selector = rsd.spec.selector.clone().unwrap_or_default();
+    label_selector
+        .match_labels
+        .get_or_insert_default()
+        .insert(POD_TEMPLATE_HASH_LABEL.to_owned(), latest_hash);
+
+    let selector: Option<Selector> = label_selector.try_into().ok();
+    selector.as_ref().map(Selector::to_string)
 }
 
 fn status_from_replica_set(
@@ -1331,4 +1351,116 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         .filter_map(|x| async move { Result::ok(x) })
         .for_each(|_| futures::future::ready(()))
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Build a minimal ReplicaSet-mode RestateDeployment for selector tests.
+    fn make_rsd(match_labels: Option<&[(&str, &str)]>, image: &str) -> RestateDeployment {
+        let selector = match_labels.map(|labels| {
+            let map: serde_json::Map<String, serde_json::Value> = labels
+                .iter()
+                .map(|(k, v)| (k.to_string(), json!(v)))
+                .collect();
+            json!({ "matchLabels": map })
+        });
+
+        let spec = serde_json::from_value(json!({
+            "replicas": 1,
+            "revisionHistoryLimit": 10,
+            "selector": selector,
+            "template": {
+                "metadata": null,
+                "spec": { "containers": [{ "name": "main", "image": image }] }
+            },
+            "restate": {
+                "register": { "cluster": null, "cloud": null, "service": null, "url": "http://localhost:9070/" },
+                "servicePath": null,
+                "useHttp11": null,
+                "drainDelaySeconds": null
+            }
+        }))
+        .expect("test RestateDeploymentSpec deserializes");
+
+        RestateDeployment::new("greeter", spec)
+    }
+
+    /// The hash the latest versioned ReplicaSet would use, recomputed independently.
+    fn latest_hash(rsd: &RestateDeployment) -> String {
+        let annotation = reconcilers::replicaset::pod_template_annotation(rsd);
+        reconcilers::replicaset::generate_pod_template_hash(rsd, &annotation)
+    }
+
+    #[test]
+    fn label_selector_appends_pod_template_hash_when_no_user_selector() {
+        let rsd = make_rsd(None, "greeter:v1");
+        let selector = latest_version_label_selector(&rsd).expect("selector is set");
+
+        // With no user selector the result is exactly the version scoping.
+        assert_eq!(
+            selector,
+            format!("{}={}", POD_TEMPLATE_HASH_LABEL, latest_hash(&rsd))
+        );
+    }
+
+    #[test]
+    fn label_selector_preserves_user_match_labels() {
+        let rsd = make_rsd(Some(&[("app", "greeter")]), "greeter:v1");
+        let selector = latest_version_label_selector(&rsd).expect("selector is set");
+
+        // Both the user's label and the version scoping must be present (order
+        // is not guaranteed by Selector::to_string).
+        assert!(
+            selector.contains("app=greeter"),
+            "user label missing from {selector:?}"
+        );
+        assert!(
+            selector.contains(&format!(
+                "{}={}",
+                POD_TEMPLATE_HASH_LABEL,
+                latest_hash(&rsd)
+            )),
+            "pod-template-hash missing from {selector:?}"
+        );
+    }
+
+    #[test]
+    fn label_selector_hash_matches_latest_replicaset_name() {
+        // The core #139 guarantee: the hash baked into the status selector is the
+        // same one used to name/select the latest versioned ReplicaSet, so the
+        // HPA aggregates exactly that RS's pods and not old draining versions'.
+        let rsd = make_rsd(Some(&[("app", "greeter")]), "greeter:v1");
+        let selector = latest_version_label_selector(&rsd).expect("selector is set");
+
+        let versioned_name = format!("{}-{}", rsd.name_any(), latest_hash(&rsd));
+        let hash = versioned_name
+            .rsplit_once('-')
+            .map(|(_, h)| h)
+            .expect("versioned name has a hash suffix");
+
+        assert!(
+            selector.contains(&format!("{}={}", POD_TEMPLATE_HASH_LABEL, hash)),
+            "selector {selector:?} does not scope to latest RS hash {hash}"
+        );
+    }
+
+    #[test]
+    fn label_selector_changes_with_pod_template() {
+        // A different pod template => different version => different selector,
+        // so the status selector actually tracks the current version.
+        let v1 = make_rsd(Some(&[("app", "greeter")]), "greeter:v1");
+        let v2 = make_rsd(Some(&[("app", "greeter")]), "greeter:v2");
+
+        let s1 = latest_version_label_selector(&v1).expect("v1 selector");
+        let s2 = latest_version_label_selector(&v2).expect("v2 selector");
+
+        assert_ne!(s1, s2, "selector should differ across pod templates");
+
+        // ...and it is deterministic for the same template.
+        let s1_again = latest_version_label_selector(&v1).expect("v1 selector again");
+        assert_eq!(s1, s1_again, "selector should be deterministic");
+    }
 }
