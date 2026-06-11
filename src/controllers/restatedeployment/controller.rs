@@ -207,6 +207,26 @@ fn error_policy<K, C>(_rs: Arc<K>, _: &Error, _ctx: C) -> Action {
 }
 
 impl RestateDeployment {
+    /// Resolve the RestateCloudEnvironment values a `tunnelMode: in-process`
+    /// deployment derives its identity from (None for every other mode). They feed
+    /// the revision hash, the env vars injected into the pods, the registered URL,
+    /// and the status labelSelector — all of which must agree.
+    fn in_process_tunnel_params(&self, ctx: &Context) -> Result<Option<InProcessTunnelParams>> {
+        if !self.spec.restate.is_in_process_tunnel() {
+            return Ok(None);
+        }
+        let Some(cloud) = self.spec.restate.register.cloud.as_deref() else {
+            return Err(Error::InvalidRestateConfig(
+                "tunnelMode: in-process requires registering against a RestateCloudEnvironment (spec.restate.register.cloud)"
+                    .into(),
+            ));
+        };
+        let Some(rce) = ctx.rce_store.get(&ObjectRef::new(cloud)) else {
+            return Err(Error::RestateCloudEnvironmentNotFound(cloud.into()));
+        };
+        Ok(Some(InProcessTunnelParams::from_rce(rce.as_ref())?))
+    }
+
     // Reconcile (for non-finalizer related changes)
     async fn reconcile(
         &self,
@@ -220,20 +240,7 @@ impl RestateDeployment {
         // tunnelMode: in-process needs the RestateCloudEnvironment values up front:
         // they feed the revision hash, the env vars injected into the pods, and the
         // registered URL, all of which must agree within one reconcile.
-        let in_process_tunnel = if self.spec.restate.is_in_process_tunnel() {
-            let Some(cloud) = self.spec.restate.register.cloud.as_deref() else {
-                return Err(Error::InvalidRestateConfig(
-                    "tunnelMode: in-process requires registering against a RestateCloudEnvironment (spec.restate.register.cloud)"
-                        .into(),
-                ));
-            };
-            let Some(rce) = ctx.rce_store.get(&ObjectRef::new(cloud)) else {
-                return Err(Error::RestateCloudEnvironmentNotFound(cloud.into()));
-            };
-            Some(InProcessTunnelParams::from_rce(rce.as_ref())?)
-        } else {
-            None
-        };
+        let in_process_tunnel = self.in_process_tunnel_params(&ctx)?;
 
         let pod_template_annotation = reconcilers::replicaset::pod_template_annotation(self);
 
@@ -836,7 +843,14 @@ impl RestateDeployment {
 
         // Only set labelSelector for ReplicaSet mode (Knative manages pods directly)
         if !is_knative {
-            rsd_status.label_selector = latest_version_label_selector(self);
+            // The selector hash must use the same inputs as the latest ReplicaSet's
+            // hash, including the in-process tunnel params. If those can't be
+            // resolved the reconcile above already failed; keep the previous
+            // selector rather than scoping to a hash no ReplicaSet has.
+            if let Ok(in_process_tunnel) = self.in_process_tunnel_params(&ctx) {
+                rsd_status.label_selector =
+                    latest_version_label_selector(self, in_process_tunnel.as_ref());
+            }
         }
         rsd_status.observed_generation = self.metadata.generation;
 
@@ -1073,12 +1087,19 @@ impl RestateDeployment {
 /// ReplicaSets still draining pinned invocations, polluting the averaged metric
 /// for the whole (potentially multi-hour) drain window and under-provisioning
 /// the genuinely-busy latest version. The hash is computed the same way as the
-/// latest versioned ReplicaSet, so the selector matches exactly that RS's pods.
+/// latest versioned ReplicaSet, so the selector matches exactly that RS's pods —
+/// which is why it takes the same in-process tunnel params as the hash.
 /// See #139.
-fn latest_version_label_selector(rsd: &RestateDeployment) -> Option<String> {
+fn latest_version_label_selector(
+    rsd: &RestateDeployment,
+    in_process_tunnel: Option<&InProcessTunnelParams>,
+) -> Option<String> {
     let pod_template_annotation = reconcilers::replicaset::pod_template_annotation(rsd);
-    let latest_hash =
-        reconcilers::replicaset::generate_pod_template_hash(rsd, &pod_template_annotation);
+    let latest_hash = reconcilers::replicaset::generate_pod_template_hash(
+        rsd,
+        &pod_template_annotation,
+        in_process_tunnel,
+    );
 
     let mut label_selector = rsd.spec.selector.clone().unwrap_or_default();
     label_selector
@@ -1391,13 +1412,13 @@ mod tests {
     /// The hash the latest versioned ReplicaSet would use, recomputed independently.
     fn latest_hash(rsd: &RestateDeployment) -> String {
         let annotation = reconcilers::replicaset::pod_template_annotation(rsd);
-        reconcilers::replicaset::generate_pod_template_hash(rsd, &annotation)
+        reconcilers::replicaset::generate_pod_template_hash(rsd, &annotation, None)
     }
 
     #[test]
     fn label_selector_appends_pod_template_hash_when_no_user_selector() {
         let rsd = make_rsd(None, "greeter:v1");
-        let selector = latest_version_label_selector(&rsd).expect("selector is set");
+        let selector = latest_version_label_selector(&rsd, None).expect("selector is set");
 
         // With no user selector the result is exactly the version scoping.
         assert_eq!(
@@ -1409,7 +1430,7 @@ mod tests {
     #[test]
     fn label_selector_preserves_user_match_labels() {
         let rsd = make_rsd(Some(&[("app", "greeter")]), "greeter:v1");
-        let selector = latest_version_label_selector(&rsd).expect("selector is set");
+        let selector = latest_version_label_selector(&rsd, None).expect("selector is set");
 
         // Both the user's label and the version scoping must be present (order
         // is not guaranteed by Selector::to_string).
@@ -1433,7 +1454,7 @@ mod tests {
         // same one used to name/select the latest versioned ReplicaSet, so the
         // HPA aggregates exactly that RS's pods and not old draining versions'.
         let rsd = make_rsd(Some(&[("app", "greeter")]), "greeter:v1");
-        let selector = latest_version_label_selector(&rsd).expect("selector is set");
+        let selector = latest_version_label_selector(&rsd, None).expect("selector is set");
 
         let versioned_name = format!("{}-{}", rsd.name_any(), latest_hash(&rsd));
         let hash = versioned_name
@@ -1448,19 +1469,49 @@ mod tests {
     }
 
     #[test]
+    fn label_selector_tracks_in_process_tunnel_params() {
+        // The #139 guarantee must hold for tunnelMode: in-process too: the selector
+        // hash incorporates the same tunnel params as the latest ReplicaSet's hash —
+        // computed without them it would scope the HPA to a hash no RS has.
+        use crate::resources::restatecloudenvironments::InProcessTunnelParams;
+
+        let rsd = make_rsd(Some(&[("app", "greeter")]), "greeter:v1");
+        let params = InProcessTunnelParams {
+            environment_id: "env_123".into(),
+            region: "us".into(),
+            signing_public_key: "publickeyv1_abc".into(),
+        };
+
+        let annotation = reconcilers::replicaset::pod_template_annotation(&rsd);
+        let rs_hash =
+            reconcilers::replicaset::generate_pod_template_hash(&rsd, &annotation, Some(&params));
+
+        let selector = latest_version_label_selector(&rsd, Some(&params)).expect("selector is set");
+        assert!(
+            selector.contains(&format!("{}={}", POD_TEMPLATE_HASH_LABEL, rs_hash)),
+            "selector {selector:?} does not scope to the in-process RS hash {rs_hash}"
+        );
+        assert_ne!(
+            selector,
+            latest_version_label_selector(&rsd, None).expect("selector without params"),
+            "params must change the selector, or the two hash sites have diverged"
+        );
+    }
+
+    #[test]
     fn label_selector_changes_with_pod_template() {
         // A different pod template => different version => different selector,
         // so the status selector actually tracks the current version.
         let v1 = make_rsd(Some(&[("app", "greeter")]), "greeter:v1");
         let v2 = make_rsd(Some(&[("app", "greeter")]), "greeter:v2");
 
-        let s1 = latest_version_label_selector(&v1).expect("v1 selector");
-        let s2 = latest_version_label_selector(&v2).expect("v2 selector");
+        let s1 = latest_version_label_selector(&v1, None).expect("v1 selector");
+        let s2 = latest_version_label_selector(&v2, None).expect("v2 selector");
 
         assert_ne!(s1, s2, "selector should differ across pod templates");
 
         // ...and it is deterministic for the same template.
-        let s1_again = latest_version_label_selector(&v1).expect("v1 selector again");
+        let s1_again = latest_version_label_selector(&v1, None).expect("v1 selector again");
         assert_eq!(s1, s1_again, "selector should be deterministic");
     }
 }
