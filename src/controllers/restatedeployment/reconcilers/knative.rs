@@ -240,8 +240,9 @@ fn determine_tag(rsd: &RestateDeployment) -> Result<String> {
         Ok(tag.clone())
     } else {
         // Default: template hash (enables versioned updates)
+        // (tunnelMode: in-process is rejected in Knative mode, so no tunnel params here)
         let pod_template = serde_json::to_string(&rsd.spec.template)?;
-        Ok(generate_pod_template_hash(rsd, &pod_template))
+        Ok(generate_pod_template_hash(rsd, &pod_template, None))
     }
 }
 
