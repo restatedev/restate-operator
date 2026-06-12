@@ -183,14 +183,22 @@ impl InProcessTunnelParams {
         }
         let environment_id = format!("env_{unprefixed}");
 
+        // The region becomes DNS labels in `tunnel.{region}.restate.cloud`, so it
+        // may be multi-label — e.g. a BYOC region like
+        // "inl4edhpbxasp9yuz1n0yvvkme.byoc". Allow lowercase letters, digits, '-'
+        // and '.', but reject empty labels (leading/trailing or consecutive dots)
+        // which would yield an invalid tunnel hostname.
         let region = rce.spec.region.clone();
-        if region.is_empty()
-            || !region
+        let region_ok = !region.is_empty()
+            && !region.starts_with('.')
+            && !region.ends_with('.')
+            && !region.contains("..")
+            && region
                 .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-        {
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.');
+        if !region_ok {
             return Err(crate::Error::InvalidRestateConfig(format!(
-                "tunnelMode: in-process requires RestateCloudEnvironment '{rce_name}' to have a lowercase region (letters, digits, '-'), got {:?}",
+                "tunnelMode: in-process requires RestateCloudEnvironment '{rce_name}' to have a lowercase DNS-style region (letters, digits, '-', '.'), got {:?}",
                 rce.spec.region,
             )));
         }
@@ -415,6 +423,23 @@ mod tests {
     }
 
     #[test]
+    fn from_rce_accepts_multi_label_byoc_region() {
+        // BYOC environments use a multi-label region (dots); it still forms a
+        // valid tunnel.{region}.restate.cloud host.
+        let params = InProcessTunnelParams::from_rce(&rce(
+            "env_123abc",
+            "inl4edhpbxasp9yuz1n0yvvkme.byoc",
+            "publickeyv1_abc",
+        ))
+        .unwrap();
+        assert_eq!(params.region, "inl4edhpbxasp9yuz1n0yvvkme.byoc");
+        assert_eq!(
+            params.tunnel_url("greeter-5b8c7d", None).unwrap().as_str(),
+            "https://tunnel.inl4edhpbxasp9yuz1n0yvvkme.byoc.restate.cloud:9080/123abc/greeter-5b8c7d/http/in-process/9080/"
+        );
+    }
+
+    #[test]
     fn from_rce_rejects_values_in_process_clients_would_crash_on() {
         // in-process tunnel clients validate these on startup; a bad value must
         // fail the reconcile instead of crash-looping the pods
@@ -425,6 +450,9 @@ mod tests {
             ("env_123abc", "", "publickeyv1_abc"),
             ("env_123abc", "US", "publickeyv1_abc"),
             ("env_123abc", "us/extra", "publickeyv1_abc"),
+            ("env_123abc", ".us", "publickeyv1_abc"),
+            ("env_123abc", "us.", "publickeyv1_abc"),
+            ("env_123abc", "us..eu", "publickeyv1_abc"),
             ("env_123abc", "us", "not-a-key"),
         ] {
             let err = InProcessTunnelParams::from_rce(&rce(id, region, key))
