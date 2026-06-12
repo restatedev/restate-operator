@@ -652,6 +652,7 @@ mod tests {
                     tunnel_mode,
                     drain_delay_seconds: None,
                 },
+                autoscaling: None,
             },
         )
     }
