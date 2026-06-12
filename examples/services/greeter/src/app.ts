@@ -95,6 +95,68 @@ const greeter = restate.service({
 
       return response;
     },
+
+    /**
+     * CPU burn - keeps a pod busy for `durationSeconds`, used to demonstrate
+     * HorizontalPodAutoscaler scale-up/down of a *draining* version. Start
+     * several of these one-way (`/Greeter/burn/send`) against a version BEFORE
+     * bumping to a newer version: they stay pinned to (and executing on) the old
+     * version, driving its CPU up so the operator-managed HPA scales it beyond
+     * the floor, then back down once they finish.
+     *
+     * Burns CPU in short slices, yielding to the event loop between them so the
+     * HTTP/2 connection stays responsive, and journals a periodic tick via
+     * ctx.run so Restate sees progress and does not hit the inactivity timeout.
+     *
+     * Usage:
+     *   curl localhost:8080/Greeter/burn/send -d '{"durationSeconds":180}'
+     */
+    burn: async (
+      ctx: restate.Context,
+      request: { durationSeconds?: number; tickSeconds?: number; startDelaySeconds?: number }
+    ): Promise<object> => {
+      const { durationSeconds = 120, tickSeconds = 4, startDelaySeconds = 0 } = request;
+
+      // Optionally stay pinned but idle (durable sleep, no CPU) before burning.
+      // Lets a demo observe the version sitting at its HPA floor first, then
+      // scale up when the burn kicks in.
+      if (startDelaySeconds > 0) {
+        console.log(`[${VERSION}/${POD_NAME}] burn idle for ${startDelaySeconds}s before load`);
+        await ctx.sleep(startDelaySeconds * 1000);
+      }
+
+      const end = Date.now() + durationSeconds * 1000;
+      let round = 0;
+
+      console.log(`[${VERSION}/${POD_NAME}] burn start for ${durationSeconds}s`);
+
+      while (Date.now() < end) {
+        const tickEnd = Math.min(end, Date.now() + tickSeconds * 1000);
+        // Busy-loop in ~20ms slices, yielding between them.
+        while (Date.now() < tickEnd) {
+          const sliceEnd = Date.now() + 20;
+          let x = 0;
+          while (Date.now() < sliceEnd) {
+            x += Math.sqrt(Math.random() * 1e9);
+          }
+          if (x < 0) console.log(x); // keep x from being optimized away
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+        // Journal progress so Restate registers activity (no suspension).
+        round += 1;
+        await ctx.run(`tick-${round}`, async () => round);
+      }
+
+      console.log(`[${VERSION}/${POD_NAME}] burn done after ${durationSeconds}s (${round} ticks)`);
+
+      return {
+        message: `Burned ${durationSeconds}s`,
+        version: VERSION,
+        pod: POD_NAME,
+        durationSeconds,
+        ticks: round,
+      };
+    },
   },
 });
 

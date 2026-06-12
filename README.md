@@ -504,6 +504,7 @@ For the full schema as a [Pkl](https://pkl-lang.org/) template see [`crd/Restate
 | `restate` | `object` | **Required**. Restate-specific configuration. See details below. |
 | `minReadySeconds` | `integer` | Minimum seconds a new pod should be ready before it's considered available. Defaults to 0. |
 | `revisionHistoryLimit`| `integer` | Number of old ReplicaSets to retain for rollbacks. Defaults to 10. |
+| `autoscaling` | `object` | Optional. Per-version `HorizontalPodAutoscaler` template for draining (non-latest) versions. ReplicaSet mode only. See details below. |
 
 ---
 
@@ -555,6 +556,61 @@ The `register` field must specify exactly one of `cluster`, `service`, or `url`.
 | `namespace` | `string` | **Required**. The namespace of the service. |
 | `path` | `string` | An optional URL path to be prepended to admin API paths. Should not end with a `/`. |
 | `port` | `integer` | The port on the service that hosts the admin API. Defaults to 9070. |
+
+---
+
+#### `spec.autoscaling`
+
+Optional. ReplicaSet mode only. When set, the operator creates one `HorizontalPodAutoscaler` per **non-latest** version that still has active invocations, so old versions shed compute as their load drains instead of holding their full `replicas` for the entire (potentially multi-hour) drain window. The HPA is removed — and the version then scaled to zero by the operator — once Restate reports the version has no remaining invocations.
+
+The field is a pass-through `HorizontalPodAutoscaler` `.spec`: provide `minReplicas`, `maxReplicas`, `metrics` and optionally `behavior`. The operator injects `scaleTargetRef` per version, so it must be omitted. The HPA is owned by the `RestateDeployment` and garbage-collected with it.
+
+The **latest** version is not covered here — autoscale it as usual with your own `HorizontalPodAutoscaler` targeting the `RestateDeployment` scale subresource.
+
+Notes:
+- `minReplicas` is floored at 1 — there is no scale-to-zero in ReplicaSet mode (use Knative mode if you need it).
+- CPU/memory metrics require container resource `requests` to be set; prefer CPU (memory does not scale back down).
+- If you run the operator with your own RBAC (not the bundled Helm chart), grant it `get,list,watch,create,patch,delete` on `horizontalpodautoscalers` in the `autoscaling` API group.
+
+**On the scaling signal:** CPU (or memory) is a coarse proxy for a draining version's real demand — load on an old version is bursty, and an invocation pinned to it can be suspended (awaiting a timer, call, or external event) and so consume no CPU while still requiring the version to stay available. The ideal trigger would be a per-**deployment** metric exposed by Restate itself — the number of in-flight/pending invocations pinned to that specific Restate deployment (note: *deployment*, i.e. a single registered version, not the whole service) — consumed via the custom/external metrics API and targeted per version. Restate does not expose such a metric today; CPU is a pragmatic default until it does, with the caveat that a concurrency-bound but low-CPU version may under-scale.
+
+```yaml
+apiVersion: restate.dev/v1beta1
+kind: RestateDeployment
+metadata:
+  name: greeter
+spec:
+  replicas: 3
+  restate:
+    register:
+      cluster: restate
+  autoscaling:
+    minReplicas: 1
+    maxReplicas: 10
+    metrics:
+      - type: Resource
+        resource:
+          name: cpu
+          target:
+            type: Utilization
+            averageUtilization: 70
+  selector:
+    matchLabels:
+      app: greeter
+  template:
+    metadata:
+      labels:
+        app: greeter
+    spec:
+      containers:
+        - name: service
+          image: my-greeter:1.0.0
+          ports:
+            - containerPort: 9080
+          resources:
+            requests:
+              cpu: 100m
+```
 
 ### `RestateCloudEnvironment`
 

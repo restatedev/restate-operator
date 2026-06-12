@@ -6,6 +6,7 @@ use chrono::Utc;
 use futures::StreamExt;
 
 use k8s_openapi::api::apps::v1::{ReplicaSet, ReplicaSetStatus};
+use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
 use k8s_openapi::api::core::v1::{Secret, Service};
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
@@ -70,6 +71,8 @@ pub(super) struct Context {
     pub revision_store: Store<Revision>,
     /// Store for Knative Configurations
     pub configuration_store: Store<Configuration>,
+    /// Store for operator-managed per-version HorizontalPodAutoscalers
+    pub hpa_store: Store<HorizontalPodAutoscaler>,
     /// The namespace in which this operator runs
     pub operator_namespace: String,
     /// The cluster DNS suffix (e.g. "cluster.local")
@@ -91,6 +94,7 @@ impl Context {
         secret_store: Store<Secret>,
         revision_store: Store<Revision>,
         configuration_store: Store<Configuration>,
+        hpa_store: Store<HorizontalPodAutoscaler>,
         metrics: Metrics,
         state: State,
     ) -> Arc<Context> {
@@ -102,6 +106,7 @@ impl Context {
             secret_store,
             revision_store,
             configuration_store,
+            hpa_store,
             operator_namespace: state.operator_namespace,
             cluster_dns: state.cluster_dns,
             metrics,
@@ -370,6 +375,21 @@ impl RestateDeployment {
             }
             Err(err) => return Err(err),
         };
+
+        // The latest version is scaled via the RD scale subresource (the operator
+        // propagates spec.replicas to its ReplicaSet), never by a per-version HPA.
+        // If a draining version becomes latest again — a rollback, or a reintroduced
+        // identical spec re-adopting its ReplicaSet via the AlreadyExists path above —
+        // it can still carry the operator HPA stamped while it drained. Remove it,
+        // otherwise that HPA and propagate-replicas would fight over the ReplicaSet's
+        // scale every reconcile. Gated on the owned-HPA cache so it's a no-op (no API
+        // call) in the common case.
+        let latest_hpa =
+            ObjectRef::<HorizontalPodAutoscaler>::new(&versioned_name).within(namespace);
+        if ctx.hpa_store.get(&latest_hpa).is_some() {
+            reconcilers::autoscaling::delete_version_hpa(&ctx.client, namespace, &versioned_name)
+                .await?;
+        }
 
         let mut service_labels = self.labels().clone();
         service_labels.insert(
@@ -1233,6 +1253,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     let rce: Api<RestateCloudEnvironment> = Api::all(client.clone());
     let secrets: Api<Secret> = Api::namespaced(client.clone(), &state.operator_namespace);
     let services: Api<Service> = Api::all(client.clone());
+    let hpas: Api<HorizontalPodAutoscaler> = Api::all(client.clone());
 
     if let Err(e) = services.list(&ListParams::default().limit(1)).await {
         error!("RestateDeployment is not queryable; {e:?}. Is the CRD installed?");
@@ -1251,6 +1272,15 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     )
     .touched_objects()
     .default_backoff();
+
+    // A reflector (rather than `.owns(...)`) also gives a queryable cache, so we can
+    // check whether a draining version still has an HPA before issuing a delete —
+    // avoiding a wasted API call every reconcile.
+    let (hpa_store, hpa_writer) = kube::runtime::reflector::store();
+    let hpa_reflector =
+        kube::runtime::reflector(hpa_writer, kube::runtime::watcher(hpas, cfg.clone()))
+            .touched_objects()
+            .default_backoff();
 
     let (rce_store, rce_writer) = kube::runtime::reflector::store();
     let rce_reflector = kube::runtime::reflector(
@@ -1355,6 +1385,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         .watches_stream(rce_reflector, |_| std::iter::empty())
         .watches_stream(secret_reflector, |_| std::iter::empty())
         .owns(services, cfg.clone())
+        .owns_stream(hpa_reflector)
         .run(
             reconcile,
             error_policy,
@@ -1365,6 +1396,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
                 secret_store,
                 revision_store,
                 configuration_store,
+                hpa_store,
                 metrics,
                 state,
             ),

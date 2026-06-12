@@ -55,6 +55,30 @@ spec:
               It maintains ReplicaSets and Services for each version to support Restate's versioning requirements,
               ensuring old versions remain available until all invocations against them are complete.
             properties:
+              autoscaling:
+                description: |-
+                  Optional autoscaling for draining (non-latest) versions. ReplicaSet mode only.
+
+                  When set, the operator creates one HorizontalPodAutoscaler per non-latest
+                  version that still has active invocations, so old versions shed compute as
+                  their load falls instead of holding full replicas for the entire (possibly
+                  multi-hour) drain window. The HPA is removed — and the version then scaled
+                  to zero by the operator — once Restate reports the version has no remaining
+                  invocations.
+
+                  This is a pass-through HorizontalPodAutoscaler `.spec`: provide
+                  `minReplicas`, `maxReplicas`, `metrics` and optionally `behavior`. The
+                  operator injects `scaleTargetRef` per version, so it must be omitted.
+
+                  Notes:
+                  - The latest version is autoscaled separately, via an HPA targeting the
+                    RestateDeployment scale subresource; it is not covered here.
+                  - `minReplicas` is floored at 1 (there is no scale-to-zero in ReplicaSet
+                    mode); a value below 1 is raised to 1.
+                  - CPU/memory metrics require container resource `requests` to be set;
+                    prefer CPU over memory (memory does not scale back down).
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
               deploymentMode:
                 description: |-
                   Deployment mode: replicaset (default) or knative.
@@ -310,6 +334,9 @@ spec:
             - restate
             - template
             type: object
+            x-kubernetes-validations:
+            - message: spec.autoscaling is only supported in replicaset mode (not knative)
+              rule: '!has(self.autoscaling) || !has(self.deploymentMode) || self.deploymentMode != ''knative'''
           status:
             description: |-
               Status of the RestateDeployment

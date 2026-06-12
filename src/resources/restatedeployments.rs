@@ -110,6 +110,12 @@ pub struct KnativeDeploymentSpec {
 )]
 #[kube(status = "RestateDeploymentStatus", shortname = "rsd")]
 #[serde(rename_all = "camelCase")]
+// Per-version autoscaling is only wired into the ReplicaSet path; in Knative mode
+// Knative's own autoscaler handles scaling, so reject the field rather than
+// silently ignoring it.
+#[x_kube(validation = Rule::new(
+    "!has(self.autoscaling) || !has(self.deploymentMode) || self.deploymentMode != 'knative'"
+).message("spec.autoscaling is only supported in replicaset mode (not knative)"))]
 pub struct RestateDeploymentSpec {
     /// Deployment mode: replicaset (default) or knative.
     /// This field is immutable after creation.
@@ -149,10 +155,45 @@ pub struct RestateDeploymentSpec {
 
     /// Restate specific configuration
     pub restate: RestateSpec,
+
+    /// Optional autoscaling for draining (non-latest) versions. ReplicaSet mode only.
+    ///
+    /// When set, the operator creates one HorizontalPodAutoscaler per non-latest
+    /// version that still has active invocations, so old versions shed compute as
+    /// their load falls instead of holding full replicas for the entire (possibly
+    /// multi-hour) drain window. The HPA is removed — and the version then scaled
+    /// to zero by the operator — once Restate reports the version has no remaining
+    /// invocations.
+    ///
+    /// This is a pass-through HorizontalPodAutoscaler `.spec`: provide
+    /// `minReplicas`, `maxReplicas`, `metrics` and optionally `behavior`. The
+    /// operator injects `scaleTargetRef` per version, so it must be omitted.
+    ///
+    /// Notes:
+    /// - The latest version is autoscaled separately, via an HPA targeting the
+    ///   RestateDeployment scale subresource; it is not covered here.
+    /// - `minReplicas` is floored at 1 (there is no scale-to-zero in ReplicaSet
+    ///   mode); a value below 1 is raised to 1.
+    /// - CPU/memory metrics require container resource `requests` to be set;
+    ///   prefer CPU over memory (memory does not scale back down).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "autoscaling_schema")]
+    pub autoscaling: Option<serde_json::Value>,
 }
 
 fn default_replicas() -> i32 {
     1
+}
+
+fn autoscaling_schema(_g: &mut schemars::SchemaGenerator) -> Schema {
+    // `type: object` makes the field structurally known (so the spec-level CEL
+    // rule can reference `self.autoscaling`), while preserve-unknown keeps its
+    // contents a free-form pass-through HPA spec. An HPA `.spec` is always an
+    // object, so this is also simply the more accurate schema.
+    schemars::json_schema!({
+        "type": "object",
+        "x-kubernetes-preserve-unknown-fields": true
+    })
 }
 
 fn default_revision_history_limit() -> i32 {
