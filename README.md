@@ -78,7 +78,7 @@ spec:
   cluster:
     autoProvision: true
   compute:
-    image: restatedev/restate:1.5
+    image: restatedev/restate:1.7
   storage:
     storageRequestBytes: 2147483648 # 2 GiB
   config: |
@@ -272,7 +272,7 @@ spec:
     autoProvision: true
   compute:
     replicas: 3
-    image: restatedev/restate:1.5
+    image: restatedev/restate:1.7
   storage:
     storageRequestBytes: 2147483648 # 2 GiB
   config: |
@@ -310,7 +310,7 @@ spec:
     autoProvision: true
   compute:
     replicas: 3
-    image: restatedev/restate:1.5
+    image: restatedev/restate:1.7
   storage:
     storageRequestBytes: 2147483648 # 2 GiB
   security:

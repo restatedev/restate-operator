@@ -10,7 +10,7 @@ The `cluster.yaml` manifest creates a single-node Restate cluster with:
 - **Replicas**: 1 (single node)
 - **Storage**: 2 GiB persistent volume
 - **Metadata**: Local Raft-based (no S3 required)
-- **Image**: `restatedev/restate:1.5`
+- **Image**: `restatedev/restate:1.7`
 
 ## Prerequisites
 
@@ -194,7 +194,7 @@ For a multi-node cluster, update the manifest:
 ```yaml
 spec:
   compute:
-    image: restatedev/restate:1.5
+    image: restatedev/restate:1.7
     replicas: 3  # 3 or more nodes recommended
 ```
 
@@ -205,7 +205,7 @@ Use S3 for metadata storage (as an alternative to Raft-based metadata):
 ```yaml
 spec:
   compute:
-    image: restatedev/restate:1.5
+    image: restatedev/restate:1.7
     replicas: 3
   storage:
     storageRequestBytes: 2147483648
