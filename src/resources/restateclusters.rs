@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use k8s_openapi::api::core::v1::{
     Affinity, Container, EnvVar, Lifecycle, LocalObjectReference, PodDNSConfig,
-    ResourceRequirements, Toleration, TopologySpreadConstraint,
+    ResourceRequirements, Toleration, TopologySpreadConstraint, Volume, VolumeMount,
 };
 use k8s_openapi::api::networking::v1;
 use k8s_openapi::api::networking::v1::{NetworkPolicyPeer, NetworkPolicyPort};
@@ -163,6 +163,15 @@ pub struct RestateClusterCompute {
     pub sidecars: Option<Vec<Container>>,
     /// Optional duration in seconds the pod needs to terminate gracefully. Defaults to 60.
     pub termination_grace_period_seconds: Option<i64>,
+    /// Additional volumes to add to the Restate pod, on top of those the operator manages. These can
+    /// be mounted into the Restate container via extraVolumeMounts or into sidecar containers.
+    /// Names must not collide with operator-managed volumes ("storage", "tmp", "config", and, when the
+    /// respective features are enabled, the trustedCaCerts and requestSigningPrivateKey volumes); a
+    /// duplicate name is rejected when the StatefulSet is applied.
+    pub extra_volumes: Option<Vec<Volume>>,
+    /// Additional volume mounts for the Restate container. The referenced volumes must be declared in
+    /// extraVolumes (or be operator-managed).
+    pub extra_volume_mounts: Option<Vec<VolumeMount>>,
 }
 
 fn env_schema(g: &mut schemars::SchemaGenerator) -> Schema {

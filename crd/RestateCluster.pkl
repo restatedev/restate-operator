@@ -9,6 +9,8 @@ extends "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/K8sResource.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/apimachinery/pkg/apis/meta/v1/ObjectMeta.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/PodSpec.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/EnvVar.pkl"
+import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/VolumeMount.pkl"
+import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/Volume.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/LocalObjectReference.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/Lifecycle.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/ResourceRequirements.pkl"
@@ -89,6 +91,17 @@ class Compute {
 
   /// List of environment variables to set in the container; these may override defaults
   env: Listing<EnvVar>?
+
+  /// Additional volume mounts for the Restate container. The referenced volumes must be declared in
+  /// extraVolumes (or be operator-managed).
+  extraVolumeMounts: Listing<VolumeMount>?
+
+  /// Additional volumes to add to the Restate pod, on top of those the operator manages. These can be
+  /// mounted into the Restate container via extraVolumeMounts or into sidecar containers. Names must not
+  /// collide with operator-managed volumes ("storage", "tmp", "config", and, when the respective
+  /// features are enabled, the trustedCaCerts and requestSigningPrivateKey volumes); a duplicate name is
+  /// rejected when the StatefulSet is applied.
+  extraVolumes: Listing<Volume>?
 
   /// Container image name. More info: https://kubernetes.io/docs/concepts/containers/images.
   image: String

@@ -520,6 +520,16 @@ fn restate_statefulset(
 
     let init_containers = (!init_containers.is_empty()).then_some(init_containers);
 
+    // Append user-defined extras last, so they can reference (but not shadow) the operator-managed
+    // volumes/mounts. extraVolumeMounts apply to the Restate container; sidecars carry their own
+    // mounts and share these pod-level extraVolumes.
+    if let Some(extra) = spec.compute.extra_volume_mounts.clone() {
+        volume_mounts.extend(extra);
+    }
+    if let Some(extra) = spec.compute.extra_volumes.clone() {
+        volumes.extend(extra);
+    }
+
     StatefulSet {
         metadata,
         spec: Some(StatefulSetSpec {
@@ -1697,6 +1707,47 @@ mod tests {
         let sidecar = &pod.init_containers.as_ref().unwrap()[0];
         assert_eq!(sidecar.name, "logger");
         assert_eq!(sidecar.restart_policy.as_deref(), Some("Always"));
+    }
+
+    #[test]
+    fn extra_volumes_and_mounts_passed_through() {
+        let ss = statefulset_for_compute(RestateClusterCompute {
+            image: "restate".into(),
+            extra_volumes: Some(vec![Volume {
+                name: "hooks".into(),
+                config_map: Some(ConfigMapVolumeSource {
+                    name: "node-state-control".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }]),
+            extra_volume_mounts: Some(vec![VolumeMount {
+                name: "hooks".into(),
+                mount_path: "/node-state-control".into(),
+                read_only: Some(true),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+        let pod = pod_spec(&ss);
+
+        // extra volume is present alongside the operator-managed ones
+        assert!(
+            pod.volumes
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|v| v.name == "hooks")
+        );
+        // and the Restate container mounts it
+        let mount = pod.containers[0]
+            .volume_mounts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|m| m.name == "hooks")
+            .expect("hooks mount present on restate container");
+        assert_eq!(mount.mount_path, "/node-state-control");
     }
 
     #[test]

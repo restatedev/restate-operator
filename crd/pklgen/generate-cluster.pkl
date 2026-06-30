@@ -7,6 +7,8 @@ import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/EnvVar.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/Toleration.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/LocalObjectReference.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/Lifecycle.pkl"
+import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/Volume.pkl"
+import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/VolumeMount.pkl"
 
 source = "./crd/restateclusters.yaml"
 
@@ -19,6 +21,8 @@ converters {
     [List("spec", "compute", "affinity")] = PodSpec.Affinity
     [List("spec", "compute", "lifecycle")] = Lifecycle
     [List("spec", "compute", "sidecars", "[]")] = PodSpec.Container
+    [List("spec", "compute", "extraVolumes", "[]")] = Volume
+    [List("spec", "compute", "extraVolumeMounts", "[]")] = VolumeMount
     [List("spec", "compute", "tolerations", "[]")] = Toleration
     [List("spec", "compute", "topologySpreadConstraints", "[]")] = PodSpec.TopologySpreadConstraint
     [List("spec", "security", "networkEgressRules", "[]")] = NetworkPolicy.NetworkPolicyEgressRule
