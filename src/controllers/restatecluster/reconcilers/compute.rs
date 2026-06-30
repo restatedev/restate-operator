@@ -649,29 +649,58 @@ fn restate_pvc_resources(storage: &RestateClusterStorage) -> VolumeResourceRequi
     }
 }
 
-/// Reject duplicate pod volume names up front with a clear error instead of letting the API server
-/// reject the StatefulSet with an opaque "Duplicate value" message. This catches a user-supplied
-/// `extraVolumes` name colliding with an operator-managed volume (storage/tmp/config, the CA-cert
-/// volumes, or the signing-key volumes) as well as duplicates within `extraVolumes` itself.
-fn validate_unique_volume_names(stateful_set: &StatefulSet) -> Result<(), Error> {
-    let Some(volumes) = stateful_set
-        .spec
-        .as_ref()
-        .and_then(|s| s.template.spec.as_ref())
-        .and_then(|p| p.volumes.as_ref())
-    else {
+/// Reject colliding pod volumes/mounts up front with a clear error instead of letting the API server
+/// reject the StatefulSet with an opaque "Duplicate value" message.
+///
+/// Catches a user-supplied `extraVolumes` name colliding with an operator-managed volume
+/// (storage/tmp/config, the CA-cert volumes, or the signing-key volumes) or with another extra volume,
+/// and an `extraVolumeMounts` entry reusing an operator mountPath on the Restate container. Note that
+/// `storage` is a volumeClaimTemplate, not a `template.spec.volumes` entry, so its name is seeded
+/// explicitly. Duplicate mount *paths* (not names) are the API-server error for mounts, since the same
+/// volume may legitimately be mounted at multiple paths.
+fn validate_pod_volumes(stateful_set: &StatefulSet) -> Result<(), Error> {
+    let Some(spec) = stateful_set.spec.as_ref() else {
         return Ok(());
     };
 
-    let mut seen = HashSet::with_capacity(volumes.len());
-    for volume in volumes {
-        if !seen.insert(volume.name.as_str()) {
+    // volumeClaimTemplates inject a pod volume named after each claim (e.g. "storage") that never
+    // appears in template.spec.volumes; seed those so an extraVolume can't silently shadow them.
+    let mut volume_names: HashSet<&str> = HashSet::new();
+    for vct in spec.volume_claim_templates.iter().flatten() {
+        if let Some(name) = vct.metadata.name.as_deref() {
+            volume_names.insert(name);
+        }
+    }
+
+    let pod = spec.template.spec.as_ref();
+
+    for volume in pod.and_then(|p| p.volumes.as_ref()).into_iter().flatten() {
+        if !volume_names.insert(volume.name.as_str()) {
             return Err(Error::InvalidRestateConfig(format!(
                 "duplicate pod volume name {:?}: spec.compute.extraVolumes must not reuse a name \
                  already used by another volume (operator-managed names include \"storage\", \"tmp\", \
                  \"config\", \"combined-ca-certs\", \"trusted-ca-<n>\", and \
                  \"request-signing-private-key-secret\"/\"-provider\")",
                 volume.name
+            )));
+        }
+    }
+
+    // The Restate container is containers[0]; reject duplicate mountPaths there so an extraVolumeMount
+    // shadowing an operator mount (e.g. /restate-data, /tmp, /config) fails with a clear error.
+    let mut mount_paths: HashSet<&str> = HashSet::new();
+    for mount in pod
+        .and_then(|p| p.containers.first())
+        .and_then(|c| c.volume_mounts.as_ref())
+        .into_iter()
+        .flatten()
+    {
+        if !mount_paths.insert(mount.mount_path.as_str()) {
+            return Err(Error::InvalidRestateConfig(format!(
+                "duplicate volume mountPath {:?} on the Restate container: \
+                 spec.compute.extraVolumeMounts must not reuse a path the operator already mounts \
+                 (e.g. /restate-data, /tmp, /config)",
+                mount.mount_path
             )));
         }
     }
@@ -935,7 +964,7 @@ pub async fn reconcile_compute(
         cm_name,
         &ctx.canary_image,
     );
-    validate_unique_volume_names(&stateful_set)?;
+    validate_pod_volumes(&stateful_set)?;
     let ss = apply_stateful_set(name, &ss_api, stateful_set).await?;
 
     // Handle cluster provisioning if enabled
@@ -1778,20 +1807,25 @@ mod tests {
     }
 
     #[test]
-    fn extra_volume_name_collision_is_rejected() {
-        // unique names validate
+    fn extra_volume_collisions_are_rejected() {
+        // unique names/paths validate
         let ok = statefulset_for_compute(RestateClusterCompute {
             image: "restate".into(),
             extra_volumes: Some(vec![Volume {
                 name: "hooks".into(),
                 ..Default::default()
             }]),
+            extra_volume_mounts: Some(vec![VolumeMount {
+                name: "hooks".into(),
+                mount_path: "/hooks".into(),
+                ..Default::default()
+            }]),
             ..Default::default()
         });
-        assert!(validate_unique_volume_names(&ok).is_ok());
+        assert!(validate_pod_volumes(&ok).is_ok());
 
-        // colliding with an operator-managed volume ("config") is rejected with a clear error
-        let bad = statefulset_for_compute(RestateClusterCompute {
+        // colliding with an in-list operator volume ("config")
+        let dup_config = statefulset_for_compute(RestateClusterCompute {
             image: "restate".into(),
             extra_volumes: Some(vec![Volume {
                 name: "config".into(),
@@ -1799,9 +1833,40 @@ mod tests {
             }]),
             ..Default::default()
         });
-        let err = validate_unique_volume_names(&bad).expect_err("collision must be rejected");
+        let err = validate_pod_volumes(&dup_config).expect_err("config collision must be rejected");
         assert!(matches!(err, Error::InvalidRestateConfig(_)));
-        assert!(err.to_string().contains("config"));
+
+        // colliding with "storage" -- which is a volumeClaimTemplate, not a template.spec.volumes
+        // entry, so this is the case the earlier name-only check missed.
+        let dup_storage = statefulset_for_compute(RestateClusterCompute {
+            image: "restate".into(),
+            extra_volumes: Some(vec![Volume {
+                name: "storage".into(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+        let err =
+            validate_pod_volumes(&dup_storage).expect_err("storage collision must be rejected");
+        assert!(err.to_string().contains("storage"));
+
+        // reusing an operator mountPath ("/config") on the Restate container
+        let dup_path = statefulset_for_compute(RestateClusterCompute {
+            image: "restate".into(),
+            extra_volumes: Some(vec![Volume {
+                name: "hooks".into(),
+                ..Default::default()
+            }]),
+            extra_volume_mounts: Some(vec![VolumeMount {
+                name: "hooks".into(),
+                mount_path: "/config".into(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+        let err =
+            validate_pod_volumes(&dup_path).expect_err("mountPath collision must be rejected");
+        assert!(err.to_string().contains("/config"));
     }
 
     #[test]
