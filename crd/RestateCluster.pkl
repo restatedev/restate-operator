@@ -10,6 +10,7 @@ import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/apimachinery/pkg/apis/meta
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/PodSpec.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/EnvVar.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/LocalObjectReference.pkl"
+import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/Lifecycle.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/ResourceRequirements.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/Toleration.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/networking/v1/NetworkPolicy.pkl"
@@ -105,6 +106,9 @@ class Compute {
   /// sets (app.kubernetes.io/name, etc.).
   labels: Mapping<String, String>?
 
+  /// Lifecycle hooks (postStart / preStop) for the Restate container.
+  lifecycle: Lifecycle?
+
   /// If specified, a node selector for the pod
   nodeSelector: Mapping<String, String>?
 
@@ -118,6 +122,14 @@ class Compute {
   /// Compute Resources for the Restate container. More info:
   /// https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
   resources: ResourceRequirements?
+
+  /// Native sidecar containers to run alongside the Restate container. Each is started before the
+  /// Restate container and terminated after it. The operator forces restartPolicy to "Always" so these
+  /// behave as sidecars rather than plain init containers.
+  sidecars: Listing<PodSpec.Container>?
+
+  /// Optional duration in seconds the pod needs to terminate gracefully. Defaults to 60.
+  terminationGracePeriodSeconds: Int?
 
   /// If specified, the pod's tolerations.
   tolerations: Listing<Toleration>?

@@ -484,7 +484,12 @@ fn restate_statefulset(
         .and_then(|s| s.trusted_ca_certs.as_deref())
         .unwrap_or_default();
 
-    let init_containers = if !trusted_ca_certs.is_empty() {
+    // init_containers holds (in order) the trusted-CA setup container followed by any user-defined
+    // native sidecars. Sidecars get restartPolicy: Always forced so they run alongside the Restate
+    // container rather than degrading into startup-blocking plain init containers.
+    let mut init_containers = Vec::new();
+
+    if !trusted_ca_certs.is_empty() {
         let (ca_volumes, init_container) =
             trusted_ca_init_container(trusted_ca_certs, canary_image);
         volumes.extend(ca_volumes);
@@ -503,10 +508,17 @@ fn restate_statefulset(
             value_from: None,
         });
 
-        Some(vec![init_container])
-    } else {
-        None
-    };
+        init_containers.push(init_container);
+    }
+
+    if let Some(sidecars) = spec.compute.sidecars.clone() {
+        init_containers.extend(sidecars.into_iter().map(|mut sidecar| {
+            sidecar.restart_policy = Some("Always".into());
+            sidecar
+        }));
+    }
+
+    let init_containers = (!init_containers.is_empty()).then_some(init_containers);
 
     StatefulSet {
         metadata,
@@ -533,6 +545,7 @@ fn restate_statefulset(
                         image_pull_policy: spec.compute.image_pull_policy.clone(),
                         command: spec.compute.command.clone(),
                         args: spec.compute.args.clone(),
+                        lifecycle: spec.compute.lifecycle.clone(),
                         env: Some(env),
                         ports: Some(vec![
                             ContainerPort {
@@ -581,7 +594,9 @@ fn restate_statefulset(
                         ..Default::default()
                     }),
                     service_account_name: Some("restate".into()),
-                    termination_grace_period_seconds: Some(60),
+                    termination_grace_period_seconds: Some(
+                        spec.compute.termination_grace_period_seconds.unwrap_or(60),
+                    ),
                     volumes: Some(volumes),
                     tolerations: spec.compute.tolerations.clone(),
                     node_selector: spec.compute.node_selector.clone(),
@@ -1584,6 +1599,105 @@ mod tests {
     use crate::resources::iampolicymembers::{IAMPolicyMemberCondition, IAMPolicyMemberStatus};
     use crate::resources::restateclusters::RestateClusterCompute;
     use k8s_openapi::api::batch::v1::{JobCondition, JobStatus};
+    use k8s_openapi::api::core::v1::{ExecAction, Lifecycle, LifecycleHandler};
+
+    fn statefulset_for_compute(compute: RestateClusterCompute) -> StatefulSet {
+        let base_metadata = ObjectMeta {
+            name: Some("test".into()),
+            namespace: Some("test".into()),
+            ..Default::default()
+        };
+        let spec = RestateClusterSpec {
+            compute,
+            ..Default::default()
+        };
+        restate_statefulset(
+            &base_metadata,
+            &spec,
+            None,
+            None,
+            "test-config".into(),
+            "alpine:3.21",
+        )
+    }
+
+    fn pod_spec(ss: &StatefulSet) -> &PodSpec {
+        ss.spec.as_ref().unwrap().template.spec.as_ref().unwrap()
+    }
+
+    #[test]
+    fn pod_lifecycle_fields_default_when_unset() {
+        let ss = statefulset_for_compute(RestateClusterCompute {
+            image: "restate".into(),
+            ..Default::default()
+        });
+        let pod = pod_spec(&ss);
+
+        assert_eq!(pod.termination_grace_period_seconds, Some(60));
+        assert!(pod.init_containers.is_none());
+        assert!(pod.containers[0].lifecycle.is_none());
+    }
+
+    #[test]
+    fn pod_lifecycle_fields_passed_through() {
+        let lifecycle = Lifecycle {
+            post_start: Some(LifecycleHandler {
+                exec: Some(ExecAction {
+                    command: Some(vec!["/bin/true".into()]),
+                }),
+                ..Default::default()
+            }),
+            pre_stop: Some(LifecycleHandler {
+                exec: Some(ExecAction {
+                    command: Some(vec!["/bin/sleep".into(), "5".into()]),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let ss = statefulset_for_compute(RestateClusterCompute {
+            image: "restate".into(),
+            lifecycle: Some(lifecycle.clone()),
+            termination_grace_period_seconds: Some(120),
+            sidecars: Some(vec![Container {
+                name: "logger".into(),
+                image: Some("busybox".into()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+        let pod = pod_spec(&ss);
+
+        assert_eq!(pod.termination_grace_period_seconds, Some(120));
+        assert_eq!(pod.containers[0].lifecycle.as_ref(), Some(&lifecycle));
+
+        let init_containers = pod.init_containers.as_ref().expect("sidecar present");
+        let sidecar = init_containers
+            .iter()
+            .find(|c| c.name == "logger")
+            .expect("logger sidecar present");
+        assert_eq!(sidecar.restart_policy.as_deref(), Some("Always"));
+    }
+
+    #[test]
+    fn sidecar_restart_policy_is_forced_to_always() {
+        let ss = statefulset_for_compute(RestateClusterCompute {
+            image: "restate".into(),
+            sidecars: Some(vec![Container {
+                name: "logger".into(),
+                image: Some("busybox".into()),
+                restart_policy: Some("Never".into()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+        let pod = pod_spec(&ss);
+
+        let sidecar = &pod.init_containers.as_ref().unwrap()[0];
+        assert_eq!(sidecar.name, "logger");
+        assert_eq!(sidecar.restart_policy.as_deref(), Some("Always"));
+    }
 
     #[test]
     fn test_parse_gcp_project_from_sa_email() {

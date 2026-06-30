@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use k8s_openapi::api::core::v1::{
-    Affinity, EnvVar, LocalObjectReference, PodDNSConfig, ResourceRequirements, Toleration,
-    TopologySpreadConstraint,
+    Affinity, Container, EnvVar, Lifecycle, LocalObjectReference, PodDNSConfig,
+    ResourceRequirements, Toleration, TopologySpreadConstraint,
 };
 use k8s_openapi::api::networking::v1;
 use k8s_openapi::api::networking::v1::{NetworkPolicyPeer, NetworkPolicyPort};
@@ -155,6 +155,14 @@ pub struct RestateClusterCompute {
     pub topology_spread_constraints: Option<Vec<TopologySpreadConstraint>>,
     /// If specified, the pod's priority. PriorityClassName indicates the name of the PriorityClass that should be applied to the Restate pods.
     pub priority_class_name: Option<String>,
+    /// Lifecycle hooks (postStart / preStop) for the Restate container.
+    pub lifecycle: Option<Lifecycle>,
+    /// Native sidecar containers to run alongside the Restate container. Each is started before the
+    /// Restate container and terminated after it. The operator forces restartPolicy to "Always" so
+    /// these behave as sidecars rather than plain init containers.
+    pub sidecars: Option<Vec<Container>>,
+    /// Optional duration in seconds the pod needs to terminate gracefully. Defaults to 60.
+    pub termination_grace_period_seconds: Option<i64>,
 }
 
 fn env_schema(g: &mut schemars::SchemaGenerator) -> Schema {
