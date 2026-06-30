@@ -763,11 +763,12 @@ spec:
                     type: array
                   extraVolumes:
                     description: |-
-                      Additional volumes to add to the Restate pod, on top of those the operator manages. These can
-                      be mounted into the Restate container via extraVolumeMounts or into sidecar containers.
-                      Names must not collide with operator-managed volumes ("storage", "tmp", "config", and, when the
-                      respective features are enabled, the trustedCaCerts and requestSigningPrivateKey volumes); a
-                      duplicate name is rejected when the StatefulSet is applied.
+                      Additional volumes to add to the Restate pod, on top of those the operator manages. These can be
+                      mounted into the Restate container via extraVolumeMounts or into sidecar containers. Names must
+                      not collide with operator-managed volumes: "storage", "tmp", and "config" always, plus
+                      "combined-ca-certs" and "trusted-ca-<n>" when trustedCaCerts is set, and
+                      "request-signing-private-key-secret"/"request-signing-private-key-secret-provider" when
+                      requestSigningPrivateKey is set. The operator rejects a colliding name with a clear error.
                     items:
                       description: Volume represents a named volume in a pod that may be accessed by any container in the pod.
                       properties:
@@ -2015,7 +2016,11 @@ spec:
                     nullable: true
                     type: object
                   lifecycle:
-                    description: Lifecycle hooks (postStart / preStop) for the Restate container.
+                    description: |-
+                      Lifecycle hooks (postStart / preStop) for the Restate container. Note: Kubernetes runs the
+                      postStart hook concurrently with the container entrypoint and gives no ordering guarantee
+                      relative to the Restate process starting, so it is not a reliable "before Restate starts" hook.
+                      For strict pre-start ordering, wrap the entrypoint via command/args instead.
                     nullable: true
                     properties:
                       postStart:
@@ -2216,7 +2221,8 @@ spec:
                     description: |-
                       Native sidecar containers to run alongside the Restate container. Each is started before the
                       Restate container and terminated after it. The operator forces restartPolicy to "Always" so
-                      these behave as sidecars rather than plain init containers.
+                      these behave as sidecars rather than plain init containers. Native sidecars require Kubernetes
+                      1.29+ (GA in 1.33); older clusters reject restartPolicy on init containers.
                     items:
                       description: A single application container that you want to run within a pod.
                       properties:
@@ -3112,7 +3118,9 @@ spec:
                     nullable: true
                     type: array
                   terminationGracePeriodSeconds:
-                    description: Optional duration in seconds the pod needs to terminate gracefully. Defaults to 60.
+                    description: |-
+                      Optional duration in seconds the pod needs to terminate gracefully. Defaults to 60. A value of 0
+                      terminates immediately (SIGKILL, skipping any preStop hook).
                     format: int64
                     nullable: true
                     type: integer

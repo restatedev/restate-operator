@@ -649,6 +649,36 @@ fn restate_pvc_resources(storage: &RestateClusterStorage) -> VolumeResourceRequi
     }
 }
 
+/// Reject duplicate pod volume names up front with a clear error instead of letting the API server
+/// reject the StatefulSet with an opaque "Duplicate value" message. This catches a user-supplied
+/// `extraVolumes` name colliding with an operator-managed volume (storage/tmp/config, the CA-cert
+/// volumes, or the signing-key volumes) as well as duplicates within `extraVolumes` itself.
+fn validate_unique_volume_names(stateful_set: &StatefulSet) -> Result<(), Error> {
+    let Some(volumes) = stateful_set
+        .spec
+        .as_ref()
+        .and_then(|s| s.template.spec.as_ref())
+        .and_then(|p| p.volumes.as_ref())
+    else {
+        return Ok(());
+    };
+
+    let mut seen = HashSet::with_capacity(volumes.len());
+    for volume in volumes {
+        if !seen.insert(volume.name.as_str()) {
+            return Err(Error::InvalidRestateConfig(format!(
+                "duplicate pod volume name {:?}: spec.compute.extraVolumes must not reuse a name \
+                 already used by another volume (operator-managed names include \"storage\", \"tmp\", \
+                 \"config\", \"combined-ca-certs\", \"trusted-ca-<n>\", and \
+                 \"request-signing-private-key-secret\"/\"-provider\")",
+                volume.name
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 pub async fn reconcile_compute(
     ctx: &Context,
     // name of the RestateCluster is also the namespace
@@ -897,19 +927,16 @@ pub async fn reconcile_compute(
     )
     .await?;
 
-    let ss = apply_stateful_set(
-        name,
-        &ss_api,
-        restate_statefulset(
-            base_metadata,
-            spec,
-            pod_annotations,
-            signing_key,
-            cm_name,
-            &ctx.canary_image,
-        ),
-    )
-    .await?;
+    let stateful_set = restate_statefulset(
+        base_metadata,
+        spec,
+        pod_annotations,
+        signing_key,
+        cm_name,
+        &ctx.canary_image,
+    );
+    validate_unique_volume_names(&stateful_set)?;
+    let ss = apply_stateful_set(name, &ss_api, stateful_set).await?;
 
     // Handle cluster provisioning if enabled
     // This must happen BEFORE validate_stateful_set_status because pods only become Ready
@@ -1748,6 +1775,33 @@ mod tests {
             .find(|m| m.name == "hooks")
             .expect("hooks mount present on restate container");
         assert_eq!(mount.mount_path, "/node-state-control");
+    }
+
+    #[test]
+    fn extra_volume_name_collision_is_rejected() {
+        // unique names validate
+        let ok = statefulset_for_compute(RestateClusterCompute {
+            image: "restate".into(),
+            extra_volumes: Some(vec![Volume {
+                name: "hooks".into(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+        assert!(validate_unique_volume_names(&ok).is_ok());
+
+        // colliding with an operator-managed volume ("config") is rejected with a clear error
+        let bad = statefulset_for_compute(RestateClusterCompute {
+            image: "restate".into(),
+            extra_volumes: Some(vec![Volume {
+                name: "config".into(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+        let err = validate_unique_volume_names(&bad).expect_err("collision must be rejected");
+        assert!(matches!(err, Error::InvalidRestateConfig(_)));
+        assert!(err.to_string().contains("config"));
     }
 
     #[test]

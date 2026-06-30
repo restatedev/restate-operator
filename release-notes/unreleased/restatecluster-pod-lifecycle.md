@@ -50,7 +50,7 @@ spec:
     lifecycle:
       preStop:
         exec:
-          command: ["/node-state-control/pre-stop.sh"]
+          command: ["/bin/sh", "/node-state-control/pre-stop.sh"]
     sidecars:
       - name: log-shipper
         image: log-shipper:latest
