@@ -26,7 +26,10 @@ After changing a CRD struct, regenerate in this order (or run `just generate-all
 - The generators set `source = "./crd/<name>.yaml"` (a CWD-relative path; the recipe runs from the repo
   root). pkl rewrites this to an absolute `file://` URI in the generated header comment, so the recipe
   normalizes it back to the repo-relative form -- keep that `sed` step.
-- Tested with pkl 0.31.1.
+- Use **pkl 0.31.x** (the committed bindings were generated with 0.31.1). The generator *package* is
+  hash-pinned, but the pkl CLI is not, and other CLI versions can emit spurious diffs. The pinned
+  version lives in the justfile as `pkl_version`, and `just generate-pkl` / `generate-examples` warn
+  if your CLI differs.
 
 ## Release Notes
 

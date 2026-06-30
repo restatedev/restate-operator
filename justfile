@@ -48,9 +48,18 @@ _target-option := if _resolved_target != "" { "--target " + _resolved_target } e
 # Code generation. Everything under crd/ is generated from the Rust structs in src/resources/*.rs.
 # Never hand-edit files under crd/ -- always regenerate. See AGENTS.md for the full workflow.
 
+# The pkl CLI version the committed Pkl bindings/examples were generated with. The generator *package*
+# is hash-pinned in crd/pklgen/*.pkl, but the pkl CLI that runs it is not, and other versions may emit
+# spurious diffs (formatting, type naming). Regenerate with this version, or bump this pin deliberately.
+pkl_version := "0.31.1"
+
 # Regenerate every generated artifact after a CRD struct change (CRD YAML, then Pkl, then examples).
 # Requires `pkl` on PATH for the pkl/examples steps.
 generate-all: generate generate-pkl generate-examples
+
+# Warn (don't fail) if the local pkl CLI differs from the pinned version used to generate the bindings.
+_check-pkl:
+  @pkl --version | grep -q "{{pkl_version}}" || echo "WARNING: this repo's Pkl artifacts were generated with pkl {{pkl_version}}; you have '$(pkl --version)'. Regenerated output may differ -- see AGENTS.md."
 
 # Regenerate the CRD YAML schemas -- the authoritative contract shipped in the Helm chart.
 # Always run and commit this after changing a CRD struct. Pure Rust codegen; no external tools.
@@ -61,8 +70,8 @@ generate:
 
 # Regenerate the Pkl bindings (a convenience for Pkl users) from the CRD YAML. Requires `pkl`;
 # run `just generate` first so the YAML is current. The generator package is pinned by version and
-# sha256 in crd/pklgen/*.pkl for reproducibility.
-generate-pkl:
+# sha256 in crd/pklgen/*.pkl for reproducibility. Use the pinned pkl CLI (see pkl_version above).
+generate-pkl: _check-pkl
   pkl eval crd/pklgen/generate-cluster.pkl -m crd
   pkl eval crd/pklgen/generate-deployment.pkl -m crd
   pkl eval crd/pklgen/generate-cloud.pkl -m crd
@@ -71,7 +80,7 @@ generate-pkl:
   sed -i.bak -E 's#<file://[^ ]*/\./crd/#<file:./crd/#' crd/RestateCluster.pkl crd/RestateDeployment.pkl crd/RestateCloudEnvironment.pkl
   rm -f crd/*.pkl.bak
 
-generate-examples:
+generate-examples: _check-pkl
   pkl eval crd/examples/restatedeployment.pkl > crd/examples/restatedeployment.yaml
   pkl eval crd/examples/restatecluster.pkl > crd/examples/restatecluster.yaml
 
