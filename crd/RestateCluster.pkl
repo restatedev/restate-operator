@@ -1,6 +1,7 @@
 /// RestateCluster describes the configuration and status of a Restate cluster.
 ///
-/// This module was generated from the CustomResourceDefinition at <file:./crd/restateclusters.yaml>.
+/// This module was generated from the CustomResourceDefinition at
+/// <file:./crd/restateclusters.yaml>.
 module dev.restate.v1.RestateCluster
 
 extends "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/K8sResource.pkl"
@@ -31,11 +32,11 @@ status: Status?
 
 /// Represents the configuration of a Restate Cluster
 class Spec {
-  /// clusterName sets the RESTATE_CLUSTER_NAME environment variable. Defaults to the object name.
-  clusterName: String?
-
   /// Cluster-wide configuration options
   cluster: Cluster?
+
+  /// clusterName sets the RESTATE_CLUSTER_NAME environment variable. Defaults to the object name.
+  clusterName: String?
 
   /// Compute configuration
   compute: Compute
@@ -52,9 +53,11 @@ class Spec {
 
 /// Cluster-wide configuration options
 class Cluster {
-  /// Whether the operator should automatically provision the cluster.
-  /// When enabled, the operator will call the Restate gRPC ProvisionCluster API after pods are running.
-  /// Defaults to false for backwards compatibility.
+  /// Whether the operator should automatically provision the cluster. When enabled, the operator will
+  /// call the Restate gRPC ProvisionCluster API after pods are running. Defaults to false for backwards
+  /// compatibility.
+  ///
+  /// Default if undefined: `false`
   autoProvision: Boolean?
 }
 
@@ -62,6 +65,10 @@ class Cluster {
 class Compute {
   /// If specified, pod affinity
   affinity: PodSpec.Affinity?
+
+  /// Annotations to set on the Restate pod template. These are merged with any annotations the operator
+  /// sets internally (e.g. for workload identity, trusted CA certs).
+  annotations: Mapping<String, String>?
 
   /// Arguments to the entrypoint. The container image's CMD is used if this is not provided.
   args: Listing<String>?
@@ -94,8 +101,16 @@ class Compute {
   /// info: https://kubernetes.io/docs/concepts/containers/images#specifying-imagepullsecrets-on-a-pod
   imagePullSecrets: Listing<LocalObjectReference>?
 
+  /// Labels to set on the Restate pod template. These are merged with the standard labels the operator
+  /// sets (app.kubernetes.io/name, etc.).
+  labels: Mapping<String, String>?
+
   /// If specified, a node selector for the pod
   nodeSelector: Mapping<String, String>?
+
+  /// If specified, the pod's priority. PriorityClassName indicates the name of the PriorityClass that
+  /// should be applied to the Restate pods.
+  priorityClassName: String?
 
   /// replicas is the desired number of Restate nodes. If unspecified, defaults to 1.
   replicas: Int?
@@ -110,10 +125,6 @@ class Compute {
   /// TopologySpreadConstraints describes how a group of pods ought to spread across topology domains.
   /// Scheduler will schedule pods in a way which abides by the constraints.
   topologySpreadConstraints: Listing<PodSpec.TopologySpreadConstraint>?
-
-  /// If specified, the pod's priority. PriorityClassName indicates the name of the PriorityClass that
-  /// should be applied to the Restate pods.
-  priorityClassName: String?
 }
 
 /// Security configuration
@@ -150,12 +161,12 @@ class Security {
   /// Annotations to set on the ServiceAccount created for Restate
   serviceAccountAnnotations: Mapping<String, String>?
 
-  /// Optional list of Secrets containing trusted CA certificates.
-  /// Each cert is appended to the system CA bundle via an init container.
-  trustedCaCerts: Listing<TrustedCACert>?
-
   /// Annotations to set on the Service created for Restate
   serviceAnnotations: Mapping<String, String>?
+
+  /// Optional list of Secrets containing trusted CA certificates. Each cert is appended to the system CA
+  /// bundle via an init container.
+  trustedCaCerts: Listing<TrustedCaCert>?
 }
 
 /// Network peers to allow inbound access to restate ports If unset, will not allow any new traffic. Set
@@ -165,12 +176,12 @@ class NetworkPeers {
 
   ingress: Listing<NetworkPolicy.NetworkPolicyPeer>?
 
-  /// Network peers to allow inbound access to the node port (5122).
-  /// This is used for inter-cluster communication and operator access for provisioning.
-  node: Listing<NetworkPolicy.NetworkPolicyPeer>?
-
   /// Deprecated: use `node` instead. If both are set, `node` takes precedence.
   metrics: Listing<NetworkPolicy.NetworkPolicyPeer>?
+
+  /// Network peers to allow inbound access to the node port (5122). This is used for inter-cluster
+  /// communication and operator access for provisioning.
+  node: Listing<NetworkPolicy.NetworkPolicyPeer>?
 }
 
 /// If set, configure the use of a private key to sign outbound requests from this cluster
@@ -206,13 +217,12 @@ class SecretProvider {
   provider: String?
 }
 
-/// A reference to a Secret containing a trusted CA certificate.
-class TrustedCACert {
-  /// Name of the Secret containing the CA certificate
-  secretName: String
-
+class TrustedCaCert {
   /// Key within the Secret that contains the PEM-encoded certificate
   key: String
+
+  /// Name of the Secret containing the CA certificate
+  secretName: String
 }
 
 /// Storage configuration
@@ -234,8 +244,8 @@ class Storage {
 class Status {
   conditions: Listing<Condition>?
 
-  /// Whether the cluster has been provisioned by the operator.
-  /// This is set to true after successful provisioning to avoid repeated provisioning attempts.
+  /// Whether the cluster has been provisioned by the operator. This is set to true after successful
+  /// provisioning to avoid repeated provisioning attempts.
   provisioned: Boolean?
 }
 

@@ -1,9 +1,9 @@
-amends "package://pkg.pkl-lang.org/pkl-pantry/k8s.contrib.crd@1.0.13#/generate.pkl"
+amends "package://pkg.pkl-lang.org/pkl-pantry/k8s.contrib.crd@2.0.2::sha256:8e07ae25589d38613ce466d2af1cec7609721c34c7e7e5fe301e9efd4de2d462#/generate.pkl"
 
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/PodTemplateSpec.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/apimachinery/pkg/apis/meta/v1/LabelSelector.pkl"
 
-source = "file:./crd/restatedeployments.yaml"
+source = "./crd/restatedeployments.yaml"
 
 converters {
   ["restatedeployments.restate.dev"] {

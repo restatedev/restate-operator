@@ -45,15 +45,31 @@ target := _arch + "-" + _os_target + if _os == "linux" { "-" + libc } else { "" 
 _resolved_target := if target != _default_target { target } else { "" }
 _target-option := if _resolved_target != "" { "--target " + _resolved_target } else { "" }
 
+# Code generation. Everything under crd/ is generated from the Rust structs in src/resources/*.rs.
+# Never hand-edit files under crd/ -- always regenerate. See AGENTS.md for the full workflow.
+
+# Regenerate every generated artifact after a CRD struct change (CRD YAML, then Pkl, then examples).
+# Requires `pkl` on PATH for the pkl/examples steps.
+generate-all: generate generate-pkl generate-examples
+
+# Regenerate the CRD YAML schemas -- the authoritative contract shipped in the Helm chart.
+# Always run and commit this after changing a CRD struct. Pure Rust codegen; no external tools.
 generate:
   cargo run --bin cluster_crdgen | grep -vF 'categories: []' > crd/restateclusters.yaml
   cargo run --bin deployment_crdgen | grep -vF 'categories: []' > crd/restatedeployments.yaml
   cargo run --bin cloud_crdgen | grep -vF 'categories: []' > crd/restatecloudenvironments.yaml
 
+# Regenerate the Pkl bindings (a convenience for Pkl users) from the CRD YAML. Requires `pkl`;
+# run `just generate` first so the YAML is current. The generator package is pinned by version and
+# sha256 in crd/pklgen/*.pkl for reproducibility.
 generate-pkl:
-  cargo run --bin cluster_schemagen | pkl eval crd/pklgen/generate-cluster.pkl -m crd
-  cargo run --bin deployment_schemagen | pkl eval crd/pklgen/generate-deployment.pkl -m crd
-  cargo run --bin cloud_schemagen | pkl eval crd/pklgen/generate-cloud.pkl -m crd
+  pkl eval crd/pklgen/generate-cluster.pkl -m crd
+  pkl eval crd/pklgen/generate-deployment.pkl -m crd
+  pkl eval crd/pklgen/generate-cloud.pkl -m crd
+  # pkl resolves the relative `source` to an absolute file:// URI in the generated header comment;
+  # rewrite it back to the repo-relative form so the committed files stay portable.
+  sed -i.bak -E 's#<file://[^ ]*/\./crd/#<file:./crd/#' crd/RestateCluster.pkl crd/RestateDeployment.pkl crd/RestateCloudEnvironment.pkl
+  rm -f crd/*.pkl.bak
 
 generate-examples:
   pkl eval crd/examples/restatedeployment.pkl > crd/examples/restatedeployment.yaml
