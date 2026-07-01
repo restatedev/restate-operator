@@ -1,4 +1,4 @@
-amends "package://pkg.pkl-lang.org/pkl-pantry/k8s.contrib.crd@1.0.13#/generate.pkl"
+amends "package://pkg.pkl-lang.org/pkl-pantry/k8s.contrib.crd@2.0.2::sha256:8e07ae25589d38613ce466d2af1cec7609721c34c7e7e5fe301e9efd4de2d462#/generate.pkl"
 
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/ResourceRequirements.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/PodSpec.pkl"
@@ -6,18 +6,18 @@ import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/networking/v1/NetworkP
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/EnvVar.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/Toleration.pkl"
 
-source = "file:./crd/restatecloudenvironments.yaml"
+source = "./crd/restatecloudenvironments.yaml"
 
 converters {
   ["restatecloudenvironments.restate.dev"] {
-    [List("spec", "tunnel", "env", "env")] = EnvVar
+    [List("spec", "tunnel", "env", "[]")] = EnvVar
     [List("spec", "tunnel", "resources")] = ResourceRequirements
     [List("spec", "tunnel", "dnsConfig")] = PodSpec.PodDNSConfig
     [List("spec", "tunnel", "affinity")] = PodSpec.Affinity
-    [List("spec", "tunnel", "tolerations", "toleration")] = Toleration
-    [List("spec", "security", "networkEgressRules", "networkEgressRule")] = NetworkPolicy.NetworkPolicyEgressRule
-    [List("spec", "security", "networkPeers", "admin", "admin")] = NetworkPolicy.NetworkPolicyPeer
-    [List("spec", "security", "networkPeers", "ingress", "ingres")] = NetworkPolicy.NetworkPolicyPeer
-    [List("spec", "security", "networkPeers", "metrics", "metric")] = NetworkPolicy.NetworkPolicyPeer
+    [List("spec", "tunnel", "tolerations", "[]")] = Toleration
+    [List("spec", "security", "networkEgressRules", "[]")] = NetworkPolicy.NetworkPolicyEgressRule
+    [List("spec", "security", "networkPeers", "admin", "[]")] = NetworkPolicy.NetworkPolicyPeer
+    [List("spec", "security", "networkPeers", "ingress", "[]")] = NetworkPolicy.NetworkPolicyPeer
+    [List("spec", "security", "networkPeers", "metrics", "[]")] = NetworkPolicy.NetworkPolicyPeer
   }
 }
