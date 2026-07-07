@@ -119,6 +119,11 @@ More examples are available just below the spec that follows.
 | `tolerations` | `array` | Standard Kubernetes tolerations. |
 | `dnsPolicy` | `string` | Pod DNS policy. |
 | `dnsConfig` | `object` | Pod DNS configuration. |
+| `lifecycle` | `object` | Lifecycle hooks (`postStart` / `preStop`) for the Restate container. Note: `postStart` runs concurrently with the entrypoint and is not a reliable pre-start hook. |
+| `sidecars` | `array` | Native sidecar containers run alongside Restate (appended as init containers with `restartPolicy: Always`). Requires Kubernetes 1.29+. |
+| `terminationGracePeriodSeconds` | `integer` | Pod termination grace period. Defaults to 60. `0` means immediate SIGKILL (skips `preStop`). |
+| `extraVolumes` | `array` | Additional pod volumes. Names must not collide with operator-managed volumes (`storage`, `tmp`, `config`, and the trusted-CA / request-signing volumes); a collision is rejected with a clear error. |
+| `extraVolumeMounts` | `array` | Additional volume mounts for the Restate container. Referenced volumes must be declared in `extraVolumes` (or be operator-managed). |
 
 **Pod annotation and label merge ordering**: User-specified `annotations` and `labels` are
 merged with values the operator sets internally (e.g. for workload identity hashes, trusted

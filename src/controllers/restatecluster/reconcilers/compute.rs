@@ -484,7 +484,12 @@ fn restate_statefulset(
         .and_then(|s| s.trusted_ca_certs.as_deref())
         .unwrap_or_default();
 
-    let init_containers = if !trusted_ca_certs.is_empty() {
+    // init_containers holds (in order) the trusted-CA setup container followed by any user-defined
+    // native sidecars. Sidecars get restartPolicy: Always forced so they run alongside the Restate
+    // container rather than degrading into startup-blocking plain init containers.
+    let mut init_containers = Vec::new();
+
+    if !trusted_ca_certs.is_empty() {
         let (ca_volumes, init_container) =
             trusted_ca_init_container(trusted_ca_certs, canary_image);
         volumes.extend(ca_volumes);
@@ -503,10 +508,27 @@ fn restate_statefulset(
             value_from: None,
         });
 
-        Some(vec![init_container])
-    } else {
-        None
-    };
+        init_containers.push(init_container);
+    }
+
+    if let Some(sidecars) = spec.compute.sidecars.clone() {
+        init_containers.extend(sidecars.into_iter().map(|mut sidecar| {
+            sidecar.restart_policy = Some("Always".into());
+            sidecar
+        }));
+    }
+
+    let init_containers = (!init_containers.is_empty()).then_some(init_containers);
+
+    // Append user-defined extras last, so they can reference (but not shadow) the operator-managed
+    // volumes/mounts. extraVolumeMounts apply to the Restate container; sidecars carry their own
+    // mounts and share these pod-level extraVolumes.
+    if let Some(extra) = spec.compute.extra_volume_mounts.clone() {
+        volume_mounts.extend(extra);
+    }
+    if let Some(extra) = spec.compute.extra_volumes.clone() {
+        volumes.extend(extra);
+    }
 
     StatefulSet {
         metadata,
@@ -533,6 +555,7 @@ fn restate_statefulset(
                         image_pull_policy: spec.compute.image_pull_policy.clone(),
                         command: spec.compute.command.clone(),
                         args: spec.compute.args.clone(),
+                        lifecycle: spec.compute.lifecycle.clone(),
                         env: Some(env),
                         ports: Some(vec![
                             ContainerPort {
@@ -581,7 +604,9 @@ fn restate_statefulset(
                         ..Default::default()
                     }),
                     service_account_name: Some("restate".into()),
-                    termination_grace_period_seconds: Some(60),
+                    termination_grace_period_seconds: Some(
+                        spec.compute.termination_grace_period_seconds.unwrap_or(60),
+                    ),
                     volumes: Some(volumes),
                     tolerations: spec.compute.tolerations.clone(),
                     node_selector: spec.compute.node_selector.clone(),
@@ -622,6 +647,65 @@ fn restate_pvc_resources(storage: &RestateClusterStorage) -> VolumeResourceRequi
         )])),
         limits: None,
     }
+}
+
+/// Reject colliding pod volumes/mounts up front with a clear error instead of letting the API server
+/// reject the StatefulSet with an opaque "Duplicate value" message.
+///
+/// Catches a user-supplied `extraVolumes` name colliding with an operator-managed volume
+/// (storage/tmp/config, the CA-cert volumes, or the signing-key volumes) or with another extra volume,
+/// and an `extraVolumeMounts` entry reusing an operator mountPath on the Restate container. Note that
+/// `storage` is a volumeClaimTemplate, not a `template.spec.volumes` entry, so its name is seeded
+/// explicitly. Duplicate mount *paths* (not names) are the API-server error for mounts, since the same
+/// volume may legitimately be mounted at multiple paths.
+fn validate_pod_volumes(stateful_set: &StatefulSet) -> Result<(), Error> {
+    let Some(spec) = stateful_set.spec.as_ref() else {
+        return Ok(());
+    };
+
+    // volumeClaimTemplates inject a pod volume named after each claim (e.g. "storage") that never
+    // appears in template.spec.volumes; seed those so an extraVolume can't silently shadow them.
+    let mut volume_names: HashSet<&str> = HashSet::new();
+    for vct in spec.volume_claim_templates.iter().flatten() {
+        if let Some(name) = vct.metadata.name.as_deref() {
+            volume_names.insert(name);
+        }
+    }
+
+    let pod = spec.template.spec.as_ref();
+
+    for volume in pod.and_then(|p| p.volumes.as_ref()).into_iter().flatten() {
+        if !volume_names.insert(volume.name.as_str()) {
+            return Err(Error::InvalidRestateConfig(format!(
+                "duplicate pod volume name {:?}: spec.compute.extraVolumes must not reuse a name \
+                 already used by another volume (operator-managed names include \"storage\", \"tmp\", \
+                 \"config\", \"combined-ca-certs\", \"trusted-ca-<n>\", and \
+                 \"request-signing-private-key-secret\"/\"-provider\")",
+                volume.name
+            )));
+        }
+    }
+
+    // The Restate container is containers[0]; reject duplicate mountPaths there so an extraVolumeMount
+    // shadowing an operator mount (e.g. /restate-data, /tmp, /config) fails with a clear error.
+    let mut mount_paths: HashSet<&str> = HashSet::new();
+    for mount in pod
+        .and_then(|p| p.containers.first())
+        .and_then(|c| c.volume_mounts.as_ref())
+        .into_iter()
+        .flatten()
+    {
+        if !mount_paths.insert(mount.mount_path.as_str()) {
+            return Err(Error::InvalidRestateConfig(format!(
+                "duplicate volume mountPath {:?} on the Restate container: \
+                 spec.compute.extraVolumeMounts must not reuse a path the operator already mounts \
+                 (e.g. /restate-data, /tmp, /config)",
+                mount.mount_path
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 pub async fn reconcile_compute(
@@ -872,19 +956,16 @@ pub async fn reconcile_compute(
     )
     .await?;
 
-    let ss = apply_stateful_set(
-        name,
-        &ss_api,
-        restate_statefulset(
-            base_metadata,
-            spec,
-            pod_annotations,
-            signing_key,
-            cm_name,
-            &ctx.canary_image,
-        ),
-    )
-    .await?;
+    let stateful_set = restate_statefulset(
+        base_metadata,
+        spec,
+        pod_annotations,
+        signing_key,
+        cm_name,
+        &ctx.canary_image,
+    );
+    validate_pod_volumes(&stateful_set)?;
+    let ss = apply_stateful_set(name, &ss_api, stateful_set).await?;
 
     // Handle cluster provisioning if enabled
     // This must happen BEFORE validate_stateful_set_status because pods only become Ready
@@ -1584,6 +1665,209 @@ mod tests {
     use crate::resources::iampolicymembers::{IAMPolicyMemberCondition, IAMPolicyMemberStatus};
     use crate::resources::restateclusters::RestateClusterCompute;
     use k8s_openapi::api::batch::v1::{JobCondition, JobStatus};
+    use k8s_openapi::api::core::v1::{ExecAction, Lifecycle, LifecycleHandler};
+
+    fn statefulset_for_compute(compute: RestateClusterCompute) -> StatefulSet {
+        let base_metadata = ObjectMeta {
+            name: Some("test".into()),
+            namespace: Some("test".into()),
+            ..Default::default()
+        };
+        let spec = RestateClusterSpec {
+            compute,
+            ..Default::default()
+        };
+        restate_statefulset(
+            &base_metadata,
+            &spec,
+            None,
+            None,
+            "test-config".into(),
+            "alpine:3.21",
+        )
+    }
+
+    fn pod_spec(ss: &StatefulSet) -> &PodSpec {
+        ss.spec.as_ref().unwrap().template.spec.as_ref().unwrap()
+    }
+
+    #[test]
+    fn pod_lifecycle_fields_default_when_unset() {
+        let ss = statefulset_for_compute(RestateClusterCompute {
+            image: "restate".into(),
+            ..Default::default()
+        });
+        let pod = pod_spec(&ss);
+
+        assert_eq!(pod.termination_grace_period_seconds, Some(60));
+        assert!(pod.init_containers.is_none());
+        assert!(pod.containers[0].lifecycle.is_none());
+    }
+
+    #[test]
+    fn pod_lifecycle_fields_passed_through() {
+        let lifecycle = Lifecycle {
+            post_start: Some(LifecycleHandler {
+                exec: Some(ExecAction {
+                    command: Some(vec!["/bin/true".into()]),
+                }),
+                ..Default::default()
+            }),
+            pre_stop: Some(LifecycleHandler {
+                exec: Some(ExecAction {
+                    command: Some(vec!["/bin/sleep".into(), "5".into()]),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let ss = statefulset_for_compute(RestateClusterCompute {
+            image: "restate".into(),
+            lifecycle: Some(lifecycle.clone()),
+            termination_grace_period_seconds: Some(120),
+            sidecars: Some(vec![Container {
+                name: "logger".into(),
+                image: Some("busybox".into()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+        let pod = pod_spec(&ss);
+
+        assert_eq!(pod.termination_grace_period_seconds, Some(120));
+        assert_eq!(pod.containers[0].lifecycle.as_ref(), Some(&lifecycle));
+
+        let init_containers = pod.init_containers.as_ref().expect("sidecar present");
+        let sidecar = init_containers
+            .iter()
+            .find(|c| c.name == "logger")
+            .expect("logger sidecar present");
+        assert_eq!(sidecar.restart_policy.as_deref(), Some("Always"));
+    }
+
+    #[test]
+    fn sidecar_restart_policy_is_forced_to_always() {
+        let ss = statefulset_for_compute(RestateClusterCompute {
+            image: "restate".into(),
+            sidecars: Some(vec![Container {
+                name: "logger".into(),
+                image: Some("busybox".into()),
+                restart_policy: Some("Never".into()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+        let pod = pod_spec(&ss);
+
+        let sidecar = &pod.init_containers.as_ref().unwrap()[0];
+        assert_eq!(sidecar.name, "logger");
+        assert_eq!(sidecar.restart_policy.as_deref(), Some("Always"));
+    }
+
+    #[test]
+    fn extra_volumes_and_mounts_passed_through() {
+        let ss = statefulset_for_compute(RestateClusterCompute {
+            image: "restate".into(),
+            extra_volumes: Some(vec![Volume {
+                name: "hooks".into(),
+                config_map: Some(ConfigMapVolumeSource {
+                    name: "node-state-control".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }]),
+            extra_volume_mounts: Some(vec![VolumeMount {
+                name: "hooks".into(),
+                mount_path: "/node-state-control".into(),
+                read_only: Some(true),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+        let pod = pod_spec(&ss);
+
+        // extra volume is present alongside the operator-managed ones
+        assert!(
+            pod.volumes
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|v| v.name == "hooks")
+        );
+        // and the Restate container mounts it
+        let mount = pod.containers[0]
+            .volume_mounts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|m| m.name == "hooks")
+            .expect("hooks mount present on restate container");
+        assert_eq!(mount.mount_path, "/node-state-control");
+    }
+
+    #[test]
+    fn extra_volume_collisions_are_rejected() {
+        // unique names/paths validate
+        let ok = statefulset_for_compute(RestateClusterCompute {
+            image: "restate".into(),
+            extra_volumes: Some(vec![Volume {
+                name: "hooks".into(),
+                ..Default::default()
+            }]),
+            extra_volume_mounts: Some(vec![VolumeMount {
+                name: "hooks".into(),
+                mount_path: "/hooks".into(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+        assert!(validate_pod_volumes(&ok).is_ok());
+
+        // colliding with an in-list operator volume ("config")
+        let dup_config = statefulset_for_compute(RestateClusterCompute {
+            image: "restate".into(),
+            extra_volumes: Some(vec![Volume {
+                name: "config".into(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+        let err = validate_pod_volumes(&dup_config).expect_err("config collision must be rejected");
+        assert!(matches!(err, Error::InvalidRestateConfig(_)));
+
+        // colliding with "storage" -- which is a volumeClaimTemplate, not a template.spec.volumes
+        // entry, so this is the case the earlier name-only check missed.
+        let dup_storage = statefulset_for_compute(RestateClusterCompute {
+            image: "restate".into(),
+            extra_volumes: Some(vec![Volume {
+                name: "storage".into(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+        let err =
+            validate_pod_volumes(&dup_storage).expect_err("storage collision must be rejected");
+        assert!(err.to_string().contains("storage"));
+
+        // reusing an operator mountPath ("/config") on the Restate container
+        let dup_path = statefulset_for_compute(RestateClusterCompute {
+            image: "restate".into(),
+            extra_volumes: Some(vec![Volume {
+                name: "hooks".into(),
+                ..Default::default()
+            }]),
+            extra_volume_mounts: Some(vec![VolumeMount {
+                name: "hooks".into(),
+                mount_path: "/config".into(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+        let err =
+            validate_pod_volumes(&dup_path).expect_err("mountPath collision must be rejected");
+        assert!(err.to_string().contains("/config"));
+    }
 
     #[test]
     fn test_parse_gcp_project_from_sa_email() {

@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use k8s_openapi::api::core::v1::{
-    Affinity, EnvVar, LocalObjectReference, PodDNSConfig, ResourceRequirements, Toleration,
-    TopologySpreadConstraint,
+    Affinity, Container, EnvVar, Lifecycle, LocalObjectReference, PodDNSConfig,
+    ResourceRequirements, Toleration, TopologySpreadConstraint, Volume, VolumeMount,
 };
 use k8s_openapi::api::networking::v1;
 use k8s_openapi::api::networking::v1::{NetworkPolicyPeer, NetworkPolicyPort};
@@ -155,6 +155,29 @@ pub struct RestateClusterCompute {
     pub topology_spread_constraints: Option<Vec<TopologySpreadConstraint>>,
     /// If specified, the pod's priority. PriorityClassName indicates the name of the PriorityClass that should be applied to the Restate pods.
     pub priority_class_name: Option<String>,
+    /// Lifecycle hooks (postStart / preStop) for the Restate container. Note: Kubernetes runs the
+    /// postStart hook concurrently with the container entrypoint and gives no ordering guarantee
+    /// relative to the Restate process starting, so it is not a reliable "before Restate starts" hook.
+    /// For strict pre-start ordering, wrap the entrypoint via command/args instead.
+    pub lifecycle: Option<Lifecycle>,
+    /// Native sidecar containers to run alongside the Restate container. Each is started before the
+    /// Restate container and terminated after it. The operator forces restartPolicy to "Always" so
+    /// these behave as sidecars rather than plain init containers. Native sidecars require Kubernetes
+    /// 1.29+ (GA in 1.33); older clusters reject restartPolicy on init containers.
+    pub sidecars: Option<Vec<Container>>,
+    /// Optional duration in seconds the pod needs to terminate gracefully. Defaults to 60. A value of 0
+    /// terminates immediately (SIGKILL, skipping any preStop hook).
+    pub termination_grace_period_seconds: Option<i64>,
+    /// Additional volumes to add to the Restate pod, on top of those the operator manages. These can be
+    /// mounted into the Restate container via extraVolumeMounts or into sidecar containers. Names must
+    /// not collide with operator-managed volumes: "storage", "tmp", and "config" always, plus
+    /// "combined-ca-certs" and "trusted-ca-<n>" when trustedCaCerts is set, and
+    /// "request-signing-private-key-secret"/"request-signing-private-key-secret-provider" when
+    /// requestSigningPrivateKey is set. The operator rejects a colliding name with a clear error.
+    pub extra_volumes: Option<Vec<Volume>>,
+    /// Additional volume mounts for the Restate container. The referenced volumes must be declared in
+    /// extraVolumes (or be operator-managed).
+    pub extra_volume_mounts: Option<Vec<VolumeMount>>,
 }
 
 fn env_schema(g: &mut schemars::SchemaGenerator) -> Schema {

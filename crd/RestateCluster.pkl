@@ -9,7 +9,10 @@ extends "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/K8sResource.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/apimachinery/pkg/apis/meta/v1/ObjectMeta.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/PodSpec.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/EnvVar.pkl"
+import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/VolumeMount.pkl"
+import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/Volume.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/LocalObjectReference.pkl"
+import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/Lifecycle.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/ResourceRequirements.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/core/v1/Toleration.pkl"
 import "package://pkg.pkl-lang.org/pkl-k8s/k8s@1.0.1#/api/networking/v1/NetworkPolicy.pkl"
@@ -89,6 +92,18 @@ class Compute {
   /// List of environment variables to set in the container; these may override defaults
   env: Listing<EnvVar>?
 
+  /// Additional volume mounts for the Restate container. The referenced volumes must be declared in
+  /// extraVolumes (or be operator-managed).
+  extraVolumeMounts: Listing<VolumeMount>?
+
+  /// Additional volumes to add to the Restate pod, on top of those the operator manages. These can be
+  /// mounted into the Restate container via extraVolumeMounts or into sidecar containers. Names must not
+  /// collide with operator-managed volumes: "storage", "tmp", and "config" always, plus
+  /// "combined-ca-certs" and "trusted-ca-<n>" when trustedCaCerts is set, and
+  /// "request-signing-private-key-secret"/"request-signing-private-key-secret-provider" when
+  /// requestSigningPrivateKey is set. The operator rejects a colliding name with a clear error.
+  extraVolumes: Listing<Volume>?
+
   /// Container image name. More info: https://kubernetes.io/docs/concepts/containers/images.
   image: String
 
@@ -105,6 +120,12 @@ class Compute {
   /// sets (app.kubernetes.io/name, etc.).
   labels: Mapping<String, String>?
 
+  /// Lifecycle hooks (postStart / preStop) for the Restate container. Note: Kubernetes runs the
+  /// postStart hook concurrently with the container entrypoint and gives no ordering guarantee relative
+  /// to the Restate process starting, so it is not a reliable "before Restate starts" hook. For strict
+  /// pre-start ordering, wrap the entrypoint via command/args instead.
+  lifecycle: Lifecycle?
+
   /// If specified, a node selector for the pod
   nodeSelector: Mapping<String, String>?
 
@@ -118,6 +139,16 @@ class Compute {
   /// Compute Resources for the Restate container. More info:
   /// https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
   resources: ResourceRequirements?
+
+  /// Native sidecar containers to run alongside the Restate container. Each is started before the
+  /// Restate container and terminated after it. The operator forces restartPolicy to "Always" so these
+  /// behave as sidecars rather than plain init containers. Native sidecars require Kubernetes 1.29+ (GA
+  /// in 1.33); older clusters reject restartPolicy on init containers.
+  sidecars: Listing<PodSpec.Container>?
+
+  /// Optional duration in seconds the pod needs to terminate gracefully. Defaults to 60. A value of 0
+  /// terminates immediately (SIGKILL, skipping any preStop hook).
+  terminationGracePeriodSeconds: Int?
 
   /// If specified, the pod's tolerations.
   tolerations: Listing<Toleration>?
