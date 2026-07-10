@@ -472,8 +472,6 @@ fn restate_statefulset(
         volumes.push(volume);
         absolute_path.push(relative_path);
         env.push(EnvVar {
-            // Nested config path worker.invoker.request-identity-private-key-pem-file; the flat
-            // top-level alias is deprecated in restate-server and warns at startup.
             name: "RESTATE_WORKER__INVOKER__REQUEST_IDENTITY_PRIVATE_KEY_PEM_FILE".into(),
             value: Some(absolute_path.to_str().unwrap().into()),
             value_from: None,
@@ -1903,8 +1901,6 @@ mod tests {
         let pod = pod_spec(&ss);
         let env = pod.containers[0].env.as_ref().expect("env present");
 
-        // Must emit the nested worker.invoker.* config path, not the deprecated flat alias
-        // that makes restate-server warn at startup.
         assert!(
             env.iter()
                 .any(|e| e.name == "RESTATE_WORKER__INVOKER__REQUEST_IDENTITY_PRIVATE_KEY_PEM_FILE"),
