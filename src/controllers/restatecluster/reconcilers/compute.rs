@@ -472,7 +472,9 @@ fn restate_statefulset(
         volumes.push(volume);
         absolute_path.push(relative_path);
         env.push(EnvVar {
-            name: "RESTATE_REQUEST_IDENTITY_PRIVATE_KEY_PEM_FILE".into(),
+            // Nested config path worker.invoker.request-identity-private-key-pem-file; the flat
+            // top-level alias is deprecated in restate-server and warns at startup.
+            name: "RESTATE_WORKER__INVOKER__REQUEST_IDENTITY_PRIVATE_KEY_PEM_FILE".into(),
             value: Some(absolute_path.to_str().unwrap().into()),
             value_from: None,
         })
@@ -1867,6 +1869,52 @@ mod tests {
         let err =
             validate_pod_volumes(&dup_path).expect_err("mountPath collision must be rejected");
         assert!(err.to_string().contains("/config"));
+    }
+
+    #[test]
+    fn signing_key_uses_nested_invoker_config_env_var() {
+        let base_metadata = ObjectMeta {
+            name: Some("test".into()),
+            namespace: Some("test".into()),
+            ..Default::default()
+        };
+        let spec = RestateClusterSpec {
+            compute: RestateClusterCompute {
+                image: "restate".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let signing_key = (
+            Volume {
+                name: "request-signing-private-key-secret".into(),
+                ..Default::default()
+            },
+            PathBuf::from("private.pem"),
+        );
+        let ss = restate_statefulset(
+            &base_metadata,
+            &spec,
+            None,
+            Some(signing_key),
+            "test-config".into(),
+            "alpine:3.21",
+        );
+        let pod = pod_spec(&ss);
+        let env = pod.containers[0].env.as_ref().expect("env present");
+
+        // Must emit the nested worker.invoker.* config path, not the deprecated flat alias
+        // that makes restate-server warn at startup.
+        assert!(
+            env.iter()
+                .any(|e| e.name == "RESTATE_WORKER__INVOKER__REQUEST_IDENTITY_PRIVATE_KEY_PEM_FILE"),
+            "expected nested invoker signing-key env var"
+        );
+        assert!(
+            !env.iter()
+                .any(|e| e.name == "RESTATE_REQUEST_IDENTITY_PRIVATE_KEY_PEM_FILE"),
+            "deprecated flat signing-key env var must not be emitted"
+        );
     }
 
     #[test]
