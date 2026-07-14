@@ -1373,6 +1373,11 @@ fn restate_iam_policy_member(
             member: format!("serviceAccount:{gcp_project}.svc.id.goog[{ns}/restate]"),
             role: "roles/iam.workloadIdentityUser".into(),
             resource_ref: IAMPolicyMemberResourceRef {
+                // Emit the apiVersion that Config Connector defaults on
+                // create. Without it, server-side apply strips the field
+                // from the existing object and the immutability webhook
+                // rejects every subsequent reconcile.
+                api_version: Some("iam.cnrm.cloud.google.com/v1beta1".into()),
                 kind: "IAMServiceAccount".into(),
                 external: Some(format!(
                     "projects/{gcp_project}/serviceAccounts/{gcp_service_account_email}"
@@ -1912,6 +1917,7 @@ mod tests {
                 member: "test".into(),
                 role: "test".into(),
                 resource_ref: IAMPolicyMemberResourceRef {
+                    api_version: None,
                     kind: "IAMServiceAccount".into(),
                     external: None,
                     name: None,
@@ -1960,6 +1966,7 @@ mod tests {
                 member: "test".into(),
                 role: "test".into(),
                 resource_ref: IAMPolicyMemberResourceRef {
+                    api_version: None,
                     kind: "IAMServiceAccount".into(),
                     external: None,
                     name: None,
@@ -2028,6 +2035,13 @@ mod tests {
             "sa@proj.iam.gserviceaccount.com",
         );
         assert_eq!(ipm.spec.resource_ref.kind, "IAMServiceAccount");
+        assert_eq!(
+            ipm.spec.resource_ref.api_version.as_deref(),
+            Some("iam.cnrm.cloud.google.com/v1beta1"),
+            "resourceRef.apiVersion must be emitted so server-side apply \
+             does not strip Config Connector's defaulted value and trip \
+             the deny-immutable-field-updates webhook",
+        );
         assert_eq!(
             ipm.spec.resource_ref.external.as_deref(),
             Some("projects/proj/serviceAccounts/sa@proj.iam.gserviceaccount.com")
