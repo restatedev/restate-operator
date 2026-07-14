@@ -1,0 +1,6 @@
+dependencies:
+- name: restate-operator-crds
+  repository: file://../restate-operator-crds
+  version: 2.8.1
+digest: sha256:2c8960ffeb831c853f0bdca1265b1f8c56898c210575b133681c098fb5a8c4c9
+generated: "2026-07-14T16:40:45.737059+02:00"

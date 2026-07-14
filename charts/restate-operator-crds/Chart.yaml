@@ -1,0 +1,5 @@
+apiVersion: v2
+name: restate-operator-crds
+description: Restate operator CustomResourceDefinitions (RestateCluster, RestateDeployment, RestateCloudEnvironment)
+type: application
+version: "2.8.1"

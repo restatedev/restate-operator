@@ -1,6 +1,0 @@
-{{- if .Values.installCrds }}
-{{- range $path, $_ := .Files.Glob "crd-manifests/*.yaml" }}
----
-{{ $.Files.Get $path }}
-{{- end }}
-{{- end }}

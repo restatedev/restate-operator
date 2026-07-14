@@ -2,8 +2,7 @@ replicaCount: 1
 nameOverride: "restate-operator"
 version: "" # pin a specific version
 
-# install the chart's CRDs; set false if they are managed elsewhere (e.g. a separate manifest) to avoid duplicate ownership
-# note: templated CRDs are updated on `helm upgrade` but removed on `helm uninstall` (which deletes existing custom resources)
+# install the Restate CRDs (shipped as an optional subchart via Helm's native crds/ directory); set false to manage them out-of-band (e.g. BYOC vendors them)
 installCrds: true
 
 image:
