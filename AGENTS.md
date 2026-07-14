@@ -35,6 +35,20 @@ After changing a CRD struct, regenerate in this order (or run `just generate-all
 
 When making changes, check whether the change warrants a release note by reviewing the guidelines in `release-notes/README.md`. If it does, create a release note file in `release-notes/unreleased/` as part of the same change.
 
+## Releasing
+
+The release workflow (`.github/workflows/release.yml`) is tag-driven: pushing a
+`v<version>` tag builds and publishes the docker image and helm chart under that
+version. It bumps nothing. In the release commit you must therefore bump all three
+version files together to the new version:
+
+- `Cargo.toml`
+- `Cargo.lock` (the `restate-operator` package entry — via `cargo check`, not by hand)
+- `charts/restate-operator-helm/Chart.yaml`
+
+Then consolidate the `release-notes/unreleased/` files into `v<version>.md`. See
+`release-notes/README.md` for the full, authoritative release process (bump → consolidate → delete → merge → tag).
+
 ## Trusted CA Certs Init Container
 
 The trusted CA certs feature (`spec.security.trustedCaCerts`) uses an init container that reads the system CA bundle from `/etc/ssl/certs/ca-certificates.crt` (Debian/Alpine path). If the Restate server base image is changed to a different distro (e.g. RHEL uses `/etc/pki/tls/certs/ca-bundle.crt`), the `SYSTEM_CA_BUNDLE` constant in `src/controllers/restatecluster/reconcilers/compute.rs` must be updated.
