@@ -2,12 +2,8 @@ replicaCount: 1
 nameOverride: "restate-operator"
 version: "" # pin a specific version
 
-# Install the operator's CRDs as part of this release.
-# Default true so a standalone `helm install` still ships the CRDs. Unlike the
-# special `crds/` directory (which Helm never touched again), these CRDs are now
-# templated: they are updated on `helm upgrade` but also removed on `helm uninstall`.
-# Set to false when the CRDs are managed externally (a separate manifest / GitOps)
-# to avoid duplicate server-side-apply ownership conflicts on `.spec.versions`.
+# install the chart's CRDs; set false if they are managed elsewhere (e.g. a separate manifest) to avoid duplicate ownership
+# note: templated CRDs are updated on `helm upgrade` but removed on `helm uninstall` (which deletes existing custom resources)
 installCrds: true
 
 image:
