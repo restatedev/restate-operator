@@ -9,7 +9,8 @@ use tracing::*;
 use url::Url;
 
 use crate::controllers::restatedeployment::controller::{
-    Context, RESTATE_DEPLOYMENT_ID_ANNOTATION,
+    Context, DeploymentState, RESTATE_DEPLOYMENT_ID_ANNOTATION, RegistrationAction,
+    registration_action,
 };
 use crate::controllers::restatedeployment::reconcilers::replicaset::generate_pod_template_hash;
 use crate::resources::knative::{
@@ -640,14 +641,19 @@ async fn register_or_lookup_deployment(
     config: &Configuration,
     route: &Route,
 ) -> Result<String> {
-    // Check if Configuration already has deployment-id annotation
-    if let Some(annotations) = &config.metadata.annotations
-        && let Some(deployment_id) = annotations.get(RESTATE_DEPLOYMENT_ID_ANNOTATION)
-    {
-        trace!(
-            deployment_id = %deployment_id,
-            "Found existing deployment ID in Configuration annotation"
-        );
+    let existing_deployment_id = config
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.get(RESTATE_DEPLOYMENT_ID_ANNOTATION));
+    let deployments = rsd.list_deployments(ctx).await?;
+    let action = registration_action(
+        existing_deployment_id.map(String::as_str),
+        existing_deployment_id.and_then(|id| deployments.get(id)),
+    );
+    if action == RegistrationAction::Reuse {
+        let deployment_id = existing_deployment_id.expect("reuse requires deployment ID");
+        trace!(deployment_id = %deployment_id, "Reusing latest deployment ID");
         return Ok(deployment_id.clone());
     }
 
@@ -669,8 +675,16 @@ async fn register_or_lookup_deployment(
         .register
         .maybe_tunnel_url(&ctx.rce_store, url)?;
 
+    let RegistrationAction::Register { force } = action else {
+        unreachable!("reuse returned above")
+    };
     let deployment_id = rsd
-        .register_service_with_restate(ctx, &url, rsd.spec.restate.use_http11.as_ref().cloned())
+        .register_service_with_restate(
+            ctx,
+            &url,
+            rsd.spec.restate.use_http11.as_ref().cloned(),
+            force,
+        )
         .await?;
 
     Ok(deployment_id)
@@ -743,7 +757,7 @@ pub async fn cleanup_old_configurations(
     ctx: &Context,
     rsd_uid: &str,
     rsd: &RestateDeployment,
-    deployments: &std::collections::HashMap<String, bool>,
+    deployments: &std::collections::HashMap<String, DeploymentState>,
     active_tag: Option<&str>,
 ) -> Result<(i32, Option<chrono::DateTime<chrono::Utc>>)> {
     // Use reflector cache instead of API list() call
@@ -821,7 +835,7 @@ pub async fn cleanup_old_configurations(
         let deployment = config_deployment_id
             .and_then(|config_deployment_id| deployments.get(config_deployment_id).cloned());
         let deployment_exists = deployment.is_some();
-        let deployment_active = deployment.unwrap_or(false);
+        let deployment_active = deployment.is_some_and(|state| state.active);
 
         if deployment_active {
             active_count += 1;

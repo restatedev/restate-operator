@@ -56,6 +56,29 @@ pub(super) const RESTATE_DEPLOYMENT_ID_ANNOTATION: &str = "restate.dev/deploymen
 pub(super) const OWNED_BY_LABEL: &str = "restate.dev/owned-by";
 pub(super) const APP_MANAGED_BY_LABEL: &str = "app.kubernetes.io/managed-by";
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct DeploymentState {
+    pub(super) active: bool,
+    pub(super) latest: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RegistrationAction {
+    Register { force: bool },
+    Reuse,
+}
+
+pub(super) fn registration_action(
+    existing_deployment_id: Option<&str>,
+    state: Option<&DeploymentState>,
+) -> RegistrationAction {
+    match (existing_deployment_id, state) {
+        (Some(_), Some(state)) if state.latest => RegistrationAction::Reuse,
+        (Some(_), Some(_)) => RegistrationAction::Register { force: true },
+        _ => RegistrationAction::Register { force: false },
+    }
+}
+
 pub(super) struct Context {
     /// Kubernetes client
     pub client: Client,
@@ -438,13 +461,11 @@ impl RestateDeployment {
             .annotations()
             .get(RESTATE_DEPLOYMENT_ID_ANNOTATION);
 
-        // if the repliceset doesn't have a deployment id, or its deployment id is not active, register it
-        if existing_deployment_id.is_none_or(|existing_deployment_id| {
-            !deployments
-                .get(existing_deployment_id)
-                .cloned()
-                .unwrap_or_default()
-        }) {
+        let registration_action = registration_action(
+            existing_deployment_id.map(String::as_str),
+            existing_deployment_id.and_then(|id| deployments.get(id)),
+        );
+        if let RegistrationAction::Register { force } = registration_action {
             let valid = async {
                 if let Some(cluster_name) = &self.spec.restate.register.cluster {
                     // wait for the cluster to be ready before registering to it
@@ -492,11 +513,18 @@ impl RestateDeployment {
                     &ctx,
                     &service_endpoint,
                     self.spec.restate.use_http11.as_ref().cloned(),
+                    force,
                 )
                 .await?;
             // if registration succeeded, treat this as an active endpoint
             // if we fail after this point we will re-register and should get the same deployment id
-            deployments.insert(deployment_id.clone(), true);
+            deployments.insert(
+                deployment_id.clone(),
+                DeploymentState {
+                    active: true,
+                    latest: true,
+                },
+            );
 
             debug!(
                 "Updating deployment-id annotation of ReplicaSet/Service {versioned_name} in namespace {namespace}"
@@ -899,6 +927,7 @@ impl RestateDeployment {
         ctx: &Context,
         service_endpoint: &Url,
         use_http11: Option<bool>,
+        force: bool,
     ) -> Result<String> {
         debug!(
             "Registering endpoint '{service_endpoint}' to Restate at '{}'",
@@ -918,8 +947,13 @@ impl RestateDeployment {
             payload["use_http_11"] = serde_json::Value::Bool(use_http11);
         }
 
+        let path = if force {
+            "/deployments?force=true"
+        } else {
+            "/deployments"
+        };
         let resp = ctx
-            .request(Method::POST, &self.spec.restate.register, "/deployments")?
+            .request(Method::POST, &self.spec.restate.register, path)?
             .json(&payload)
             .send()
             .await
@@ -940,22 +974,27 @@ impl RestateDeployment {
         Ok(resp.id)
     }
 
-    pub(super) async fn list_deployments(&self, ctx: &Context) -> Result<HashMap<String, bool>> {
+    pub(super) async fn list_deployments(
+        &self,
+        ctx: &Context,
+    ) -> Result<HashMap<String, DeploymentState>> {
         // This query finds deployments, noting those that are the latest for a particular service, or have an active invocation
         let sql_query = r#"
-            WITH active_deployments AS (
+            WITH latest_deployments AS (
                 SELECT DISTINCT deployment_id as id
                 FROM sys_service
                 WHERE deployment_id IS NOT NULL
-                UNION
+            ), active_invocations AS (
                 SELECT DISTINCT pinned_deployment_id as id
                 FROM sys_invocation_status
                 WHERE pinned_deployment_id IS NOT NULL AND status != 'completed'
             )
             SELECT d.id as deployment_id,
-                   a.id IS NOT NULL as active
+                   l.id IS NOT NULL OR a.id IS NOT NULL as active,
+                   l.id IS NOT NULL as latest
             FROM sys_deployment d
-            LEFT JOIN active_deployments a ON d.id = a.id;
+            LEFT JOIN latest_deployments l ON d.id = l.id
+            LEFT JOIN active_invocations a ON d.id = a.id;
         "#;
 
         #[derive(Deserialize)]
@@ -967,6 +1006,7 @@ impl RestateDeployment {
         struct DeploymentQueryResultRow {
             deployment_id: String,
             active: bool,
+            latest: bool,
         }
 
         let resp = ctx
@@ -984,19 +1024,23 @@ impl RestateDeployment {
             .await
             .map_err(Error::AdminCallFailed)?;
 
-        let mut endpoints = HashMap::with_capacity(response.rows.len());
+        let mut endpoints: HashMap<String, DeploymentState> =
+            HashMap::with_capacity(response.rows.len());
 
         for row in response.rows {
+            let state = DeploymentState {
+                active: row.active,
+                latest: row.latest,
+            };
             match endpoints.entry(row.deployment_id) {
                 std::collections::hash_map::Entry::Occupied(mut entry) => {
                     // two rows with same deployment id shouldnt happen...
                     // we treat the deployment as active if any row is active
-                    if !entry.get() {
-                        entry.insert(row.active);
-                    }
+                    entry.get_mut().active |= state.active;
+                    entry.get_mut().latest |= state.latest;
                 }
                 std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(row.active);
+                    entry.insert(state);
                 }
             }
         }
@@ -1410,6 +1454,43 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn registration_converges_an_old_version_to_latest() {
+        let active_latest = DeploymentState {
+            active: true,
+            latest: true,
+        };
+        let active_old = DeploymentState {
+            active: true,
+            latest: false,
+        };
+        let inactive_old = DeploymentState {
+            active: false,
+            latest: false,
+        };
+
+        assert_eq!(
+            registration_action(Some("dp_latest"), Some(&active_latest)),
+            RegistrationAction::Reuse
+        );
+        assert_eq!(
+            registration_action(Some("dp_old"), Some(&active_old)),
+            RegistrationAction::Register { force: true }
+        );
+        assert_eq!(
+            registration_action(Some("dp_inactive_old"), Some(&inactive_old)),
+            RegistrationAction::Register { force: true }
+        );
+        assert_eq!(
+            registration_action(Some("dp_gone"), None),
+            RegistrationAction::Register { force: false }
+        );
+        assert_eq!(
+            registration_action(None, None),
+            RegistrationAction::Register { force: false }
+        );
+    }
 
     /// Build a minimal ReplicaSet-mode RestateDeployment for selector tests.
     fn make_rsd(match_labels: Option<&[(&str, &str)]>, image: &str) -> RestateDeployment {
