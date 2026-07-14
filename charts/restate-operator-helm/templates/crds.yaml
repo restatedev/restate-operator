@@ -1,9 +1,0 @@
-{{- if .Values.installCrds }}
-{{- range $path, $_ := .Files.Glob "crd-manifests/*.yaml" }}
-{{- $crd := $.Files.Get $path | fromYaml }}
-{{- $meta := $crd.metadata }}
-{{- $_ := set $meta "annotations" (merge (dict "helm.sh/resource-policy" "keep") (default (dict) $meta.annotations)) }}
----
-{{ $crd | toYaml }}
-{{- end }}
-{{- end }}

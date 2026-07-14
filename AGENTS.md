@@ -10,8 +10,10 @@ Never hand-edit files in `crd/` -- always regenerate.
 After changing a CRD struct, regenerate in this order (or run `just generate-all`):
 
 1. `just generate` -- regenerates the CRD YAML (`crd/*.yaml`). This is the authoritative schema and the
-   only artifact shipped to users (the Helm chart symlinks it). Pure Rust; no external tools. Always
-   run and commit it.
+   only artifact shipped to users. The `restate-operator-crds` subchart
+   (`charts/restate-operator-crds/crds/`) symlinks these files into Helm's native `crds/` directory,
+   and the operator Helm chart pulls that subchart in as an optional dependency (gated by
+   `installCrds`). Pure Rust; no external tools. Always run and commit it.
 2. `just generate-pkl` -- regenerates the Pkl bindings (`crd/*.pkl`), a convenience for Pkl users.
    Requires the `pkl` CLI on PATH; reads the CRD YAML, so run step 1 first.
 3. `just generate-examples` -- regenerates `crd/examples/*.yaml` from the Pkl examples. Requires `pkl`.
@@ -44,7 +46,22 @@ version files together to the new version:
 
 - `Cargo.toml`
 - `Cargo.lock` (the `restate-operator` package entry — via `cargo check`, not by hand)
-- `charts/restate-operator-helm/Chart.yaml`
+- `charts/restate-operator-helm/Chart.yaml` (the chart version *and* the `restate-operator-crds`
+  dependency version)
+- `charts/restate-operator-crds/Chart.yaml`
+
+The CRDs ship as the optional `restate-operator-crds` subchart, vendored into the operator chart as a
+committed `charts/restate-operator-helm/charts/restate-operator-crds-<version>.tgz` (the release pipeline
+does not run `helm dependency build`, so the vendored tgz + `Chart.lock` are what make the published OCI
+chart self-contained). After bumping the versions above — or any time `crd/*.yaml` changes the CRD schema —
+re-vendor so the published chart carries the current CRDs:
+
+```bash
+helm dependency update charts/restate-operator-helm
+```
+
+and commit the updated `charts/restate-operator-helm/charts/restate-operator-crds-<version>.tgz` and
+`charts/restate-operator-helm/Chart.lock`.
 
 Then consolidate the `release-notes/unreleased/` files into `v<version>.md`. See
 `release-notes/README.md` for the full, authoritative release process (bump → consolidate → delete → merge → tag).

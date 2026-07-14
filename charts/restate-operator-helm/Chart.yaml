@@ -3,3 +3,9 @@ name: restate-operator-helm
 description: An operator for Restate clusters
 type: application
 version: "2.8.1"
+
+dependencies:
+  - name: restate-operator-crds
+    version: "2.8.1"
+    repository: "file://../restate-operator-crds"
+    condition: installCrds
