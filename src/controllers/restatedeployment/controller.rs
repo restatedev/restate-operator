@@ -39,7 +39,7 @@ use crate::resources::knative::{Configuration, Revision, Route};
 use crate::resources::restatecloudenvironments::{InProcessTunnelParams, RestateCloudEnvironment};
 use crate::resources::restateclusters::RestateCluster;
 use crate::resources::restatedeployments::{
-    RESTATE_DEPLOYMENT_FINALIZER, RestateAdminEndpoint, RestateDeployment,
+    RESTATE_DEPLOYMENT_FINALIZER, RegisterPolicy, RestateAdminEndpoint, RestateDeployment,
     RestateDeploymentCondition, RestateDeploymentStatus,
 };
 use crate::telemetry;
@@ -55,6 +55,10 @@ use super::reconcilers::replicaset::{
 pub(super) const RESTATE_DEPLOYMENT_ID_ANNOTATION: &str = "restate.dev/deployment-id";
 pub(super) const OWNED_BY_LABEL: &str = "restate.dev/owned-by";
 pub(super) const APP_MANAGED_BY_LABEL: &str = "app.kubernetes.io/managed-by";
+
+pub(super) fn registration_is_held(policy: RegisterPolicy) -> bool {
+    policy == RegisterPolicy::Held
+}
 
 pub(super) struct Context {
     /// Kubernetes client
@@ -438,6 +442,10 @@ impl RestateDeployment {
             .annotations()
             .get(RESTATE_DEPLOYMENT_ID_ANNOTATION);
 
+        if registration_is_held(self.spec.restate.register.policy) {
+            return Err(Error::RegistrationHeld);
+        }
+
         // if the repliceset doesn't have a deployment id, or its deployment id is not active, register it
         if existing_deployment_id.is_none_or(|existing_deployment_id| {
             !deployments
@@ -695,6 +703,12 @@ impl RestateDeployment {
                         "False".into(),
                     )
                 }
+                Err(Error::RegistrationHeld) => (
+                    Ok(Action::await_change()),
+                    "Workload is ready; registration is held by policy".into(),
+                    "Held".into(),
+                    "False".into(),
+                ),
                 Err(err) => {
                     let message = err.to_string();
                     (
@@ -774,6 +788,12 @@ impl RestateDeployment {
                         "False".into(),
                     )
                 }
+                Err(Error::RegistrationHeld) => (
+                    Ok(Action::await_change()),
+                    "Workload is ready; registration is held by policy".into(),
+                    "Held".into(),
+                    "False".into(),
+                ),
                 Err(Error::AdminCallFailed(ref err)) => {
                     let message = format!("Failed to make Restate admin API call: {}", err);
                     let requeue_after = Duration::from_secs(30);
@@ -1410,6 +1430,14 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn registration_policy_defaults_to_auto_and_holds_explicitly() {
+        let rsd = make_rsd(None, "greeter:v1");
+        assert_eq!(rsd.spec.restate.register.policy, RegisterPolicy::Auto);
+        assert!(!registration_is_held(rsd.spec.restate.register.policy));
+        assert!(registration_is_held(RegisterPolicy::Held));
+    }
 
     /// Build a minimal ReplicaSet-mode RestateDeployment for selector tests.
     fn make_rsd(match_labels: Option<&[(&str, &str)]>, image: &str) -> RestateDeployment {

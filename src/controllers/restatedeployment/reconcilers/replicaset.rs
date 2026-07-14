@@ -642,6 +642,7 @@ mod tests {
                 },
                 restate: RestateSpec {
                     register: RestateAdminEndpoint {
+                        policy: Default::default(),
                         cluster: None,
                         cloud: Some("my-env".into()),
                         service: None,

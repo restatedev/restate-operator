@@ -9,7 +9,7 @@ use tracing::*;
 use url::Url;
 
 use crate::controllers::restatedeployment::controller::{
-    Context, RESTATE_DEPLOYMENT_ID_ANNOTATION,
+    Context, RESTATE_DEPLOYMENT_ID_ANNOTATION, registration_is_held,
 };
 use crate::controllers::restatedeployment::reconcilers::replicaset::generate_pod_template_hash;
 use crate::resources::knative::{
@@ -640,6 +640,10 @@ async fn register_or_lookup_deployment(
     config: &Configuration,
     route: &Route,
 ) -> Result<String> {
+    if registration_is_held(rsd.spec.restate.register.policy) {
+        return Err(Error::RegistrationHeld);
+    }
+
     // Check if Configuration already has deployment-id annotation
     if let Some(annotations) = &config.metadata.annotations
         && let Some(deployment_id) = annotations.get(RESTATE_DEPLOYMENT_ID_ANNOTATION)

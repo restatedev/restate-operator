@@ -67,6 +67,9 @@ pub enum Error {
     #[error("Encountered a hash collision, will retry with a new template hash")]
     HashCollision,
 
+    #[error("RestateDeployment registration is held")]
+    RegistrationHeld,
+
     #[error(
         "This RestateDeployment is backing active versions in Restate. If you want to delete the RestateDeployment, either register new endpoints for the relevant services or delete the Restate versions."
     )]
@@ -114,6 +117,7 @@ impl Error {
             Error::AdminCallFailed(_) => "AdminCallFailed",
             Error::AdminCallRejected { .. } => "AdminCallRejected",
             Error::HashCollision => "HashCollision",
+            Error::RegistrationHeld => "RegistrationHeld",
             Error::DeploymentInUse => "DeploymentInUse",
             Error::DeploymentDraining { .. } => "DeploymentDraining",
             Error::ConfigurationNotReady { .. } => "ConfigurationNotReady",

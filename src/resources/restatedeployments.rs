@@ -348,6 +348,9 @@ fn tunnel_mode_schema(_g: &mut schemars::SchemaGenerator) -> Schema {
 #[derive(Deserialize, Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct RestateAdminEndpoint {
+    /// Controls whether a ready workload is registered with Restate.
+    #[serde(default)]
+    pub policy: RegisterPolicy,
     /// The name of a RestateCluster against which to register the deployment.
     /// Exactly one of `cluster`, `cloud`, `service` or `url` must be specified
     pub cluster: Option<String>,
@@ -360,6 +363,13 @@ pub struct RestateAdminEndpoint {
     /// A url of the restate admin endpoint against which to register the deployment
     /// Exactly one of `cluster`, `cloud`, `service` or `url` must be specified
     pub url: Option<Url>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, Default, JsonSchema, PartialEq, Eq)]
+pub enum RegisterPolicy {
+    #[default]
+    Auto,
+    Held,
 }
 
 impl Display for RestateAdminEndpoint {
@@ -387,6 +397,12 @@ impl JsonSchema for RestateAdminEndpoint {
         schemars::json_schema!({
             "description": "The location of the Restate Admin API to register this deployment against",
             "properties": {
+                "policy": {
+                    "default": "Auto",
+                    "description": "Auto registers ready versions; Held keeps a ready version unregistered until explicitly flipped.",
+                    "enum": ["Auto", "Held"],
+                    "type": "string"
+                },
                 "cluster": {
                     "description": "The name of a RestateCluster against which to register the deployment. Exactly one of `cluster`, `cloud`, `service` or `url` must be specified",
                     "type": "string"
