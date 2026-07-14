@@ -6,7 +6,7 @@ spec:
   cluster:
     autoProvision: true
   compute:
-    image: restatedev/restate:1.5.3
+    image: restatedev/restate:1.7
     env:
       # If you want to support restate replication like {zone: 2}, you need to set the location env var.
       # If topology.kubernetes.io/zone pod label exists, POD_ZONE will be set automatically by the operator.

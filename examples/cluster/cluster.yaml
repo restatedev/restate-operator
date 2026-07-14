@@ -6,7 +6,7 @@ metadata:
 spec:
   compute:
     # Use latest stable Restate version
-    image: restatedev/restate:1.5
+    image: restatedev/restate:1.7
 
   storage:
     # 2 GiB storage (sufficient for testing)
