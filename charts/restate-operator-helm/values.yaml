@@ -2,6 +2,10 @@ replicaCount: 1
 nameOverride: "restate-operator"
 version: "" # pin a specific version
 
+# install the chart's CRDs; set false if they are managed elsewhere (e.g. a separate manifest) to avoid duplicate ownership
+# note: templated CRDs are updated on `helm upgrade` but removed on `helm uninstall` (which deletes existing custom resources)
+installCrds: true
+
 image:
   repository: ghcr.io/restatedev/restate-operator
   pullPolicy: IfNotPresent
