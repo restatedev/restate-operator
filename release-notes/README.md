@@ -56,6 +56,30 @@ When making a significant change that affects users, create a release note file 
 
 ## Release Process
 
+> **CI is tag-driven and bumps nothing.** The release workflow
+> (`.github/workflows/release.yml`) derives the version from the pushed `v<version>`
+> tag and publishes the docker image and helm chart under that version. It does
+> **not** edit or commit `Cargo.toml`, `Cargo.lock`, or `Chart.yaml`. You must bump
+> those version files by hand in the release commit *before* tagging. A tag whose
+> version differs from `Chart.yaml`'s internal `version:` publishes a chart whose OCI
+> tag and internal metadata disagree.
+
+Release checklist (in order):
+
+1. **Bump the version in all three files, together, to the new version:**
+   - `Cargo.toml` — `version = "<version>"`
+   - `Cargo.lock` — the `restate-operator` package entry. Do **not** hand-edit it;
+     run `cargo check` after bumping `Cargo.toml` so the lockfile updates, then
+     confirm the `restate-operator` entry reads `version = "<version>"`.
+   - `charts/restate-operator-helm/Chart.yaml` — `version: "<version>"`
+2. **Consolidate release notes** into `v<version>.md` (see the detailed steps below).
+3. **Delete the individual `unreleased/` files** after consolidation (keep `.gitkeep`).
+4. **Merge the release PR** into `main`.
+5. **Tag `v<version>` on the merge commit** and push it to trigger the release
+   workflow, which builds and publishes the docker image and helm chart.
+
+The rest of this section details the consolidation step.
+
 When creating a new release:
 
 1. **Review all unreleased notes**: Check `unreleased/` for all pending release notes
