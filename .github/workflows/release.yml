@@ -23,6 +23,13 @@ jobs:
           VERSION=${GITHUB_REF_NAME#v}
           echo Version: $VERSION
           echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+      # Build the restate-operator-crds dependency from source into charts/ so the packaged
+      # operator chart is self-contained. The dependency is a local file:// path, so this is
+      # offline and deterministic -- we don't commit the built tgz or Chart.lock.
+      - name: Build chart dependencies
+        run: helm dependency update charts/restate-operator-helm
       - name: Push helm chart
         uses: appany/helm-oci-chart-releaser@v0.3.0
         with:
@@ -33,10 +40,32 @@ jobs:
           registry_username: ${{ github.actor }}
           registry_password: ${{ secrets.GITHUB_TOKEN }}
 
+  build-crds-helm-chart:
+    runs-on: ubuntu-latest
+    # Independent of the operator image: the CRD chart carries no runtime image.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Write release version
+        id: version
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          echo Version: $VERSION
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Push CRDs helm chart
+        uses: appany/helm-oci-chart-releaser@v0.3.0
+        with:
+          name: restate-operator-crds
+          repository: restatedev
+          tag: ${{ steps.version.outputs.VERSION }}
+          registry: ghcr.io
+          registry_username: ${{ github.actor }}
+          registry_password: ${{ secrets.GITHUB_TOKEN }}
+
   publish-release:
     name: Publish release
     runs-on: ubuntu-latest
-    needs: [build-docker-image, build-helm-chart]
+    needs: [build-docker-image, build-helm-chart, build-crds-helm-chart]
 
     steps:
       - name: Checkout

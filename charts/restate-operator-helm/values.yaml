@@ -2,7 +2,7 @@ replicaCount: 1
 nameOverride: "restate-operator"
 version: "" # pin a specific version
 
-# install the Restate CRDs (shipped as an optional subchart via Helm's native crds/ directory); set false to manage them out-of-band (e.g. BYOC vendors them)
+# install the Restate CRDs (shipped as the optional restate-operator-crds subchart, templated so `helm upgrade` updates the schema); set false to manage them out-of-band (e.g. via the standalone restate-operator-crds chart, or BYOC vendoring)
 installCrds: true
 
 image:

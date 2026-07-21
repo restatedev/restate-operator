@@ -1,0 +1,12 @@
+{{- /*
+Render the CRDs as templates rather than from Helm's native crds/ directory, so
+`helm upgrade` applies schema changes -- native crds/ are install-only (#167).
+crd-manifests/*.yaml are symlinks to the canonical crd/*.yaml; the fromYaml round
+trip only injects resource-policy: keep so custom resources survive uninstall.
+*/ -}}
+{{- range $path, $_ := .Files.Glob "crd-manifests/*.yaml" }}
+{{- $crd := $.Files.Get $path | fromYaml }}
+{{- $_ := set $crd.metadata "annotations" (merge (dict "helm.sh/resource-policy" "keep") (default (dict) $crd.metadata.annotations)) }}
+---
+{{ toYaml $crd }}
+{{- end }}

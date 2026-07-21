@@ -42,6 +42,26 @@ yq eval 'select(.kind != "CustomResourceDefinition")' manifests.yaml | \
   yq eval --split-exp '"k8s/base/" + (.kind | downcase) + ".yaml"' -
 ```
 
+### Managing the CRDs separately
+
+By default the operator chart installs the CRDs (via the bundled `restate-operator-crds` dependency,
+gated by `installCrds`). For GitOps workflows, or to keep the CRD lifecycle decoupled from the operator
+Deployment, install the CRD chart on its own and disable the bundled copy:
+
+```bash
+helm upgrade --install restate-operator-crds \
+  oci://ghcr.io/restatedev/restate-operator-crds
+
+helm install restate-operator \
+  oci://ghcr.io/restatedev/restate-operator-helm \
+  --namespace restate-operator --create-namespace \
+  --set installCrds=false
+```
+
+The CRD chart renders the CRDs as templates, so upgrading it applies schema changes — unlike Helm's
+native `crds/` directory, which is install-only. The CRDs are annotated `helm.sh/resource-policy: keep`,
+so they and their custom resources are retained on `helm uninstall`.
+
 ## Custom Resource Definitions
 
 The operator introduces three Custom Resource Definitions (CRDs): `RestateCluster`, `RestateDeployment`, and `RestateCloudEnvironment`.
