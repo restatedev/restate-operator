@@ -1,5 +1,9 @@
 target
 
+# Helm chart dependencies are built in CI (helm dependency update), not committed.
+charts/restate-operator-helm/charts/
+charts/restate-operator-helm/Chart.lock
+
 # Claude
 .claude/
 

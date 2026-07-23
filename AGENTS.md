@@ -10,10 +10,12 @@ Never hand-edit files in `crd/` -- always regenerate.
 After changing a CRD struct, regenerate in this order (or run `just generate-all`):
 
 1. `just generate` -- regenerates the CRD YAML (`crd/*.yaml`). This is the authoritative schema and the
-   only artifact shipped to users. The `restate-operator-crds` subchart
-   (`charts/restate-operator-crds/crds/`) symlinks these files into Helm's native `crds/` directory,
-   and the operator Helm chart pulls that subchart in as an optional dependency (gated by
-   `installCrds`). Pure Rust; no external tools. Always run and commit it.
+   only artifact shipped to users. The `restate-operator-crds` chart
+   (`charts/restate-operator-crds/crd-manifests/`) symlinks these files and renders them as templates
+   (`templates/crds.yaml`, with `helm.sh/resource-policy: keep` injected) so `helm upgrade` applies
+   schema changes. The operator Helm chart pulls that chart in as an optional dependency (gated by
+   `installCrds`), and it is also published standalone (see Releasing). Pure Rust; no external tools.
+   Always run and commit it.
 2. `just generate-pkl` -- regenerates the Pkl bindings (`crd/*.pkl`), a convenience for Pkl users.
    Requires the `pkl` CLI on PATH; reads the CRD YAML, so run step 1 first.
 3. `just generate-examples` -- regenerates `crd/examples/*.yaml` from the Pkl examples. Requires `pkl`.
@@ -40,9 +42,10 @@ When making changes, check whether the change warrants a release note by reviewi
 ## Releasing
 
 The release workflow (`.github/workflows/release.yml`) is tag-driven: pushing a
-`v<version>` tag builds and publishes the docker image and helm chart under that
-version. It bumps nothing. In the release commit you must therefore bump all three
-version files together to the new version:
+`v<version>` tag builds and publishes the docker image and **both** helm charts
+(`restate-operator-helm` and `restate-operator-crds`) under that version. It bumps
+nothing. In the release commit you must therefore bump all four version files
+together to the new version:
 
 - `Cargo.toml`
 - `Cargo.lock` (the `restate-operator` package entry — via `cargo check`, not by hand)
@@ -50,18 +53,16 @@ version files together to the new version:
   dependency version)
 - `charts/restate-operator-crds/Chart.yaml`
 
-The CRDs ship as the optional `restate-operator-crds` subchart, vendored into the operator chart as a
-committed `charts/restate-operator-helm/charts/restate-operator-crds-<version>.tgz` (the release pipeline
-does not run `helm dependency build`, so the vendored tgz + `Chart.lock` are what make the published OCI
-chart self-contained). After bumping the versions above — or any time `crd/*.yaml` changes the CRD schema —
-re-vendor so the published chart carries the current CRDs:
+The two charts are versioned and released in lockstep. `restate-operator-crds` is published standalone
+(for users who manage CRDs independently — the recommended GitOps path) and is *also* pulled into the
+operator chart as a dependency, so the operator chart stays self-contained.
 
-```bash
-helm dependency update charts/restate-operator-helm
-```
-
-and commit the updated `charts/restate-operator-helm/charts/restate-operator-crds-<version>.tgz` and
-`charts/restate-operator-helm/Chart.lock`.
+That dependency is **not** committed. The release workflow runs `helm dependency update
+charts/restate-operator-helm` before packaging, which builds the subchart from source (it's a local
+`file://` path, so this is offline and deterministic). The built `charts/*.tgz` and `Chart.lock` are
+git-ignored — the only thing the release commit touches is the version bump above. Locally, run the same
+command once if you want to `helm template`/`helm lint` the operator chart (its dependency must be built
+on disk first).
 
 Then consolidate the `release-notes/unreleased/` files into `v<version>.md`. See
 `release-notes/README.md` for the full, authoritative release process (bump → consolidate → delete → merge → tag).
