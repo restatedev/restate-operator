@@ -1,0 +1,15 @@
+# A minimal single-node RestateCluster for local Tilt development.
+# Image tag tracks the latest stable Restate server release
+# (https://github.com/restatedev/restate/releases).
+apiVersion: restate.dev/v1
+kind: RestateCluster
+metadata:
+  name: restate
+spec:
+  cluster:
+    autoProvision: true
+  compute:
+    image: docker.restate.dev/restatedev/restate:1.7.2
+  config: auto-provision = false
+  storage:
+    storageRequestBytes: 2147483648

@@ -112,3 +112,13 @@ lint:
     cargo clippy
 
 check: fmt lint
+
+# Local Tilt dev loop (kind + local registry + CRD hot reload). See hack/README.md.
+dev-up:
+    ./hack/kind-with-registry.sh
+
+dev-down:
+    ./hack/teardown.sh
+
+tilt:
+    tilt up
