@@ -15,6 +15,6 @@ They still carry `helm.sh/resource-policy: keep`, so `helm uninstall` won't take
 
 ## Upgrading
 
-If your CRDs came in through the old `crds/` directory (2.8.1 or earlier), Helm doesn't consider them managed yet, so the first upgrade needs a one-time ownership hand-off: either pass `--take-ownership` to the CRD chart, or label/annotate the three CRDs with `app.kubernetes.io/managed-by=Helm` plus the `meta.helm.sh/release-name`/`-namespace` metadata. ArgoCD does this for you on sync. Either way, no custom resources are deleted.
+If your CRDs came in through the old `crds/` directory (2.8.1 or earlier), Helm doesn't consider them managed yet, so the first upgrade needs a one-time ownership hand-off: either pass `--take-ownership` to the CRD chart (Helm >= 3.17.0), or, on older Helm, label/annotate the three CRDs with `app.kubernetes.io/managed-by=Helm` plus the `meta.helm.sh/release-name`/`-namespace` metadata. ArgoCD does this for you on sync. Either way, no custom resources are deleted.
 
 This doesn't touch #166 (the operator still exits if an optional CRD is missing at startup) — that's a separate binary-side fix.

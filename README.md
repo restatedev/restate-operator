@@ -50,10 +50,10 @@ Deployment, install the CRD chart on its own and disable the bundled copy:
 
 ```bash
 helm upgrade --install restate-operator-crds \
-  oci://ghcr.io/restatedev/restate-operator-crds
+  oci://ghcr.io/restatedev/restate-operator-crds --version <version>
 
 helm install restate-operator \
-  oci://ghcr.io/restatedev/restate-operator-helm \
+  oci://ghcr.io/restatedev/restate-operator-helm --version <version> \
   --namespace restate-operator --create-namespace \
   --set installCrds=false
 ```

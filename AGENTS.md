@@ -44,7 +44,7 @@ When making changes, check whether the change warrants a release note by reviewi
 The release workflow (`.github/workflows/release.yml`) is tag-driven: pushing a
 `v<version>` tag builds and publishes the docker image and **both** helm charts
 (`restate-operator-helm` and `restate-operator-crds`) under that version. It bumps
-nothing. In the release commit you must therefore bump all three version files
+nothing. In the release commit you must therefore bump all four version files
 together to the new version:
 
 - `Cargo.toml`

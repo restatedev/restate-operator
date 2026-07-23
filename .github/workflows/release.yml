@@ -52,6 +52,8 @@ jobs:
           VERSION=${GITHUB_REF_NAME#v}
           echo Version: $VERSION
           echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Install Helm
+        uses: azure/setup-helm@v4
       - name: Push CRDs helm chart
         uses: appany/helm-oci-chart-releaser@v0.3.0
         with:
