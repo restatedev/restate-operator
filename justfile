@@ -105,6 +105,18 @@ build *flags:
 docker:
     docker build . -f docker/Dockerfile --tag={{ image }} --progress='{{ DOCKER_PROGRESS }}' --load
 
+kind_cluster := "restate-operator"
+
+# Create the kind cluster (if absent) and start Tilt. See the repo-root Tiltfile.
+tilt-up:
+    kind get clusters | grep -qx {{ kind_cluster }} || kind create cluster --name {{ kind_cluster }} --config tilt/kind.yaml
+    tilt up
+
+# Stop Tilt and tear the kind cluster down.
+tilt-down:
+    -tilt down
+    -kind delete cluster --name {{ kind_cluster }}
+
 fmt:
     cargo fmt --all
 
