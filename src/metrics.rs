@@ -1,6 +1,8 @@
 use crate::Error;
 use kube::ResourceExt;
-use prometheus::{HistogramVec, IntCounter, IntCounterVec, Registry, histogram_opts, opts};
+use prometheus::{
+    HistogramVec, IntCounter, IntCounterVec, IntGaugeVec, Registry, histogram_opts, opts,
+};
 use tokio::time::Instant;
 
 #[derive(Clone)]
@@ -8,6 +10,11 @@ pub struct Metrics {
     pub reconciliations: IntCounter,
     pub failures: IntCounterVec,
     pub reconcile_duration: HistogramVec,
+    /// 1 while a controller is waiting for its CRD to show up, 0 once it is available.
+    ///
+    /// A CRD that never arrives leaves the operator waiting forever, which is otherwise
+    /// only visible in the logs; this makes it alertable.
+    pub crd_missing: IntGaugeVec,
 }
 
 impl Default for Metrics {
@@ -31,10 +38,19 @@ impl Default for Metrics {
         .unwrap();
         let reconciliations =
             IntCounter::new("restate_operator_reconciliations_total", "reconciliations").unwrap();
+        let crd_missing = IntGaugeVec::new(
+            opts!(
+                "restate_operator_crd_missing",
+                "1 while the operator is waiting for a CRD to appear in the apiserver's discovery information, 0 once it is available",
+            ),
+            &["crd"],
+        )
+        .unwrap();
         Metrics {
             reconciliations,
             failures,
             reconcile_duration,
+            crd_missing,
         }
     }
 }
@@ -45,6 +61,7 @@ impl Metrics {
         registry.register(Box::new(self.reconcile_duration.clone()))?;
         registry.register(Box::new(self.failures.clone()))?;
         registry.register(Box::new(self.reconciliations.clone()))?;
+        registry.register(Box::new(self.crd_missing.clone()))?;
         Ok(self)
     }
 

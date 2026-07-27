@@ -69,6 +69,24 @@ struct Arguments {
         default_value = "alpine:3.21"
     )]
     canary_image: String,
+
+    /// The name of the pod the operator is running in, used to attach operator-level events
+    /// to it. Unset when running outside a cluster, in which case no such events are emitted.
+    #[arg(
+        long = "operator-pod-name",
+        env = "OPERATOR_POD_NAME",
+        value_name = "POD_NAME"
+    )]
+    operator_pod_name: Option<String>,
+
+    /// The uid of the pod the operator is running in; without it, events attached to the pod
+    /// are still recorded but do not show up in `kubectl describe pod`.
+    #[arg(
+        long = "operator-pod-uid",
+        env = "OPERATOR_POD_UID",
+        value_name = "POD_UID"
+    )]
+    operator_pod_uid: Option<String>,
 }
 
 #[get("/metrics")]
@@ -80,9 +98,28 @@ async fn metrics(c: Data<State>, _req: HttpRequest) -> impl Responder {
     HttpResponse::Ok().body(buffer)
 }
 
+/// Liveness: the process is up and the web server is serving.
+///
+/// Deliberately says nothing about whether the controllers are reconciling — that is what
+/// `/ready` is for. Restarting the operator does not make a missing CRD appear, so a
+/// controller waiting for its CRD must not fail a liveness probe.
 #[get("/health")]
 async fn health(_: HttpRequest) -> impl Responder {
     HttpResponse::Ok().json("healthy")
+}
+
+/// Readiness: every controller has its CRD and has started reconciling.
+///
+/// Returns `503` with the list of controllers still waiting, so that an operator whose CRDs
+/// were never installed shows up as `NotReady` instead of sitting there looking healthy.
+#[get("/ready")]
+async fn ready(c: Data<State>, _req: HttpRequest) -> impl Responder {
+    let report = c.readiness.report().await;
+    if report.ready {
+        HttpResponse::Ok().json(report)
+    } else {
+        HttpResponse::ServiceUnavailable().json(report)
+    }
 }
 
 #[get("/")]
@@ -118,6 +155,8 @@ async fn main() -> anyhow::Result<()> {
         args.tunnel_client_default_image,
         args.cluster_dns,
         args.canary_image,
+        args.operator_pod_name,
+        args.operator_pod_uid,
     );
 
     let client = Client::try_default()
@@ -139,20 +178,33 @@ async fn main() -> anyhow::Result<()> {
         metric.clone(),
         state.clone(),
     );
-    let deployment_controller =
-        restate_operator::controllers::restatedeployment::run(client, metric, state.clone());
+    let deployment_controller = restate_operator::controllers::restatedeployment::run(
+        client.clone(),
+        metric,
+        state.clone(),
+    );
+    // The controllers wait for their CRDs independently; this reports all of them in one event
+    // rather than one per controller, and finishes once they are all reconciling.
+    let crd_wait_reporter =
+        restate_operator::controllers::report_pending_crds(client, state.clone());
 
     tokio::pin!(cluster_controller);
     tokio::pin!(cloud_environment_controller);
     tokio::pin!(deployment_controller);
+    tokio::pin!(crd_wait_reporter);
 
     // Start web server
     let server = HttpServer::new(move || {
         App::new()
             .app_data(Data::new(state.clone()))
-            .wrap(middleware::Logger::default().exclude("/health"))
+            .wrap(
+                middleware::Logger::default()
+                    .exclude("/health")
+                    .exclude("/ready"),
+            )
             .service(index)
             .service(health)
+            .service(ready)
             .service(metrics)
     })
     .bind("[::]:8080")?
@@ -162,12 +214,13 @@ async fn main() -> anyhow::Result<()> {
     tokio::pin!(server);
 
     // Both runtimes implements graceful shutdown, so poll until both are done
-    tokio::join!(
+    let (_, _, _, _, server_result) = tokio::join!(
         cluster_controller,
         cloud_environment_controller,
         deployment_controller,
+        crd_wait_reporter,
         server
-    )
-    .3?;
+    );
+    server_result?;
     Ok(())
 }

@@ -60,6 +60,16 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.labels['app']
+            # Identifies this pod so operator-level events (eg WaitingForCRD) can be
+            # attached to it; the uid is what makes them show up in `kubectl describe pod`.
+            - name: OPERATOR_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: OPERATOR_POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
           {{- if .Values.awsPodIdentityAssociationCluster }}
             - name: AWS_POD_IDENTITY_ASSOCIATION_CLUSTER
               value: {{ .Values.awsPodIdentityAssociationCluster }}
@@ -79,9 +89,19 @@ spec:
           {{- with .Values.env }}
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          readinessProbe:
+          # /health only says the process is serving; restarting the operator will not make
+          # a missing CRD appear, so it is a liveness probe and nothing more.
+          livenessProbe:
             httpGet:
               path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          # /ready is 503 until every controller has its CRD and is reconciling, so an
+          # operator whose CRDs were never installed shows up as NotReady.
+          readinessProbe:
+            httpGet:
+              path: /ready
               port: http
             initialDelaySeconds: 5
             periodSeconds: 5

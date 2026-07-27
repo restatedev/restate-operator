@@ -12,6 +12,10 @@ metadata:
   {{- end }}
 spec:
   type: {{ .Values.service.type }}
+  # This service exists to scrape /metrics and read /, and the operator is NotReady exactly
+  # when its CRDs are missing — which is when restate_operator_crd_missing matters most. Keep
+  # the endpoint published so that ServiceMonitor targets do not disappear at that point.
+  publishNotReadyAddresses: true
   ports:
     - port: {{ .Values.service.port }}
       targetPort: 8080

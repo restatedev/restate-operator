@@ -6,7 +6,7 @@ use futures::StreamExt;
 
 use k8s_openapi::api::apps::v1::Deployment;
 
-use kube::api::{Api, ListParams, ObjectMeta};
+use kube::api::{Api, ObjectMeta};
 use kube::client::Client;
 use kube::runtime::controller;
 use kube::runtime::controller::Action;
@@ -18,7 +18,7 @@ use kube::{Resource, ResourceExt};
 use tokio::sync::RwLock;
 use tracing::*;
 
-use crate::controllers::{Diagnostics, State};
+use crate::controllers::{CrdWait, Diagnostics, ReadinessGate, State, wait_for_crd};
 use crate::metrics::Metrics;
 use crate::resources::restatecloudenvironments::{
     RESTATE_CLOUD_ENVIRONMENT_FINALIZER, RestateCloudEnvironment,
@@ -169,9 +169,22 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     let rce: Api<RestateCloudEnvironment> = Api::all(client.clone());
     let deployments: Api<Deployment> = Api::namespaced(client.clone(), &state.operator_namespace);
 
-    if let Err(e) = rce.list(&ListParams::default().limit(1)).await {
-        error!("RestateCloudEnvironment is not queryable; {e:?}. Is the CRD installed?");
-        std::process::exit(1);
+    match wait_for_crd::<RestateCloudEnvironment>(
+        ReadinessGate::RestateCloudEnvironment,
+        &client,
+        &metrics,
+        &state,
+    )
+    .await
+    {
+        Ok(CrdWait::Available) => {}
+        Ok(CrdWait::ShuttingDown) => return,
+        Err(e) => {
+            error!(
+                "Could not determine whether the RestateCloudEnvironment CRD is installed; {e:?}"
+            );
+            std::process::exit(1);
+        }
     }
 
     // all resources we create have this label
