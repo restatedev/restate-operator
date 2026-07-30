@@ -341,7 +341,70 @@ pub async fn cleanup_old_replicasets(
         let deployment_exists = deployment.is_some();
         let deployment_active = deployment.unwrap_or(false);
 
-        if deployment_active {
+        // During deletion, once the drain period has passed for an active version,
+        // fall through to the force-delete path below (same as inactive versions).
+        let is_deleting = rsd.metadata.deletion_timestamp.is_some();
+        let drain_annotation = rs
+            .annotations()
+            .get(RESTATE_REMOVE_VERSION_AT_ANNOTATION)
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok().map(|t| t.to_utc()));
+        let drain_due = drain_annotation.is_some_and(|t| t < now);
+
+        if deployment_active && !(is_deleting && drain_due) {
+            if is_deleting {
+                // During deletion: schedule drain for active versions (latest-in-sys_service
+                // or still-pinned) so the finalizer can eventually complete. Don't reset any
+                // existing timer — unlike the rollback case, we're committed to removal.
+                match drain_annotation {
+                    None => {
+                        let drain_delay_seconds = rsd.spec.restate.drain_delay_seconds();
+                        info!(
+                            replicaset = %rs_name,
+                            namespace = %namespace,
+                            drain_delay_seconds,
+                            "RestateDeployment being deleted; scheduling active version for drain"
+                        );
+                        let remove_at = chrono::Utc::now()
+                            .checked_add_signed(chrono::TimeDelta::seconds(drain_delay_seconds))
+                            .expect("remove_version_at in bounds");
+
+                        rs_api
+                            .patch_metadata(
+                                &rs_name,
+                                &PatchParams::apply("restate-operator/remove-version-at").force(),
+                                &Patch::Apply(
+                                    ObjectMeta {
+                                        annotations: Some(
+                                            [(
+                                                RESTATE_REMOVE_VERSION_AT_ANNOTATION.to_string(),
+                                                remove_at.to_rfc3339(),
+                                            )]
+                                            .into(),
+                                        ),
+                                        ..Default::default()
+                                    }
+                                    .into_request_partial::<ReplicaSet>(),
+                                ),
+                            )
+                            .await?;
+
+                        next_removal = match next_removal {
+                            None => Some(remove_at),
+                            Some(nr) if nr > remove_at => Some(remove_at),
+                            els => els,
+                        };
+                    }
+                    Some(remove_at) => {
+                        next_removal = match next_removal {
+                            None => Some(remove_at),
+                            Some(nr) if nr > remove_at => Some(remove_at),
+                            els => els,
+                        };
+                    }
+                }
+                continue;
+            }
+
             active_count += 1;
 
             // Per-version autoscaling: a non-latest version has an operator HPA
@@ -350,7 +413,7 @@ pub async fn cleanup_old_replicasets(
             // handled unconditionally below, before scale-down.)
             match super::autoscaling::plan_active_version_hpa(
                 rsd.spec.autoscaling.is_some(),
-                rsd.metadata.deletion_timestamp.is_some(),
+                false, // not deleting (is_deleting is false here)
             ) {
                 HpaPlan::Ensure => {
                     if let Some(template) = rsd.spec.autoscaling.as_ref()
@@ -420,11 +483,7 @@ pub async fn cleanup_old_replicasets(
                 HpaPlan::Skip => {}
             }
 
-            if rs
-                .annotations()
-                .get(RESTATE_REMOVE_VERSION_AT_ANNOTATION)
-                .is_none()
-            {
+            if drain_annotation.is_none() {
                 // not scheduled for removal; all good.
                 continue;
             }
