@@ -19,7 +19,10 @@ pub static RESTATE_CLOUD_ENVIRONMENT_FINALIZER: &str = "cloudenvironments.restat
     kind = "RestateCloudEnvironment",
     group = "restate.dev",
     version = "v1beta1",
-    schema = "manual"
+    schema = "manual",
+    printcolumn = r#"{"name":"Environment", "type":"string", "jsonPath":".spec.environmentId"}"#,
+    printcolumn = r#"{"name":"Region", "type":"string", "jsonPath":".spec.region"}"#,
+    printcolumn = r#"{"name":"Age", "description": "CreationTimestamp is a timestamp representing the server time when this object was created. It is not guaranteed to be set in happens-before order across separate operations. Clients may not set this value. It is represented in RFC3339 form and is in UTC", "type":"date", "jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[kube(shortname = "rce")]
 #[serde(rename_all = "camelCase")]
