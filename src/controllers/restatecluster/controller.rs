@@ -20,7 +20,7 @@ use kube::runtime::reflector::{ObjectRef, Store};
 use kube::runtime::{Predicate, WatchStreamExt, metadata_watcher, reflector, watcher};
 use kube::{
     Resource,
-    api::{Api, ListParams, Patch, PatchParams, ResourceExt},
+    api::{Api, Patch, PatchParams, ResourceExt},
     client::Client,
     runtime::{
         controller::{Action, Controller},
@@ -34,7 +34,9 @@ use serde_json::json;
 use tokio::{sync::RwLock, time::Duration};
 use tracing::*;
 
-use crate::controllers::{Diagnostics, State};
+use crate::controllers::{
+    CrdWait, Diagnostics, ReadinessGate, State, wait_for_api_groups, wait_for_crd,
+};
 use crate::resources::iampolicymembers::IAMPolicyMember;
 use crate::resources::podidentityassociations::PodIdentityAssociation;
 use crate::resources::restateclusters::{
@@ -392,8 +394,9 @@ async fn apply_namespace(nss: &Api<Namespace>, ns: Namespace) -> std::result::Re
 
 // Initialize the controller and shared state (given the crd is installed)
 pub async fn run(client: Client, metrics: Metrics, state: State) {
-    let api_groups = match client.list_api_groups().await {
-        Ok(list) => list,
+    let api_groups = match wait_for_api_groups(&client).await {
+        Ok(Some(list)) => list,
+        Ok(None) => return,
         Err(e) => {
             error!("Could not list api groups: {e:?}");
             std::process::exit(1);
@@ -442,9 +445,15 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         std::process::exit(1);
     }
 
-    if let Err(e) = rc_api.list(&ListParams::default().limit(1)).await {
-        error!("RestateCluster is not queryable; {e:?}. Is the CRD installed?");
-        std::process::exit(1);
+    match wait_for_crd::<RestateCluster>(ReadinessGate::RestateCluster, &client, &metrics, &state)
+        .await
+    {
+        Ok(CrdWait::Available) => {}
+        Ok(CrdWait::ShuttingDown) => return,
+        Err(e) => {
+            error!("Could not determine whether the RestateCluster CRD is installed; {e:?}");
+            std::process::exit(1);
+        }
     }
 
     // all resources we create have this label

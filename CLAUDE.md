@@ -287,7 +287,8 @@ cargo run
 ### Viewing Logs
 
 The operator exposes HTTP endpoints on port 8080:
-- `/health` - Health check
+- `/health` - Liveness; always 200 once the web server is up. Says nothing about the controllers
+- `/ready` - Readiness; 200 once every controller has its CRD and is reconciling, otherwise 503 with the list of controllers still waiting (`{"ready":false,"pendingControllers":["RestateCluster"]}`)
 - `/metrics` - Prometheus metrics
 - `/` - Diagnostics (last event timestamp)
 

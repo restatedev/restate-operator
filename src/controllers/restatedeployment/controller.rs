@@ -10,9 +10,7 @@ use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
 use k8s_openapi::api::core::v1::{Secret, Service};
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
-use kube::api::{
-    Api, ListParams, ObjectMeta, PartialObjectMetaExt, Patch, PatchParams, ResourceExt,
-};
+use kube::api::{Api, ObjectMeta, PartialObjectMetaExt, Patch, PatchParams, ResourceExt};
 use kube::client::Client;
 use kube::core::Selector;
 use kube::core::subresource::Scale;
@@ -33,7 +31,9 @@ use tokio::sync::RwLock;
 use tracing::*;
 use url::Url;
 
-use crate::controllers::{Diagnostics, State, prewarmed_reflector};
+use crate::controllers::{
+    CrdWait, Diagnostics, ReadinessGate, State, prewarmed_reflector, wait_for_crd,
+};
 use crate::metrics::Metrics;
 use crate::resources::knative::{Configuration, Revision, Route};
 use crate::resources::restatecloudenvironments::{InProcessTunnelParams, RestateCloudEnvironment};
@@ -1255,9 +1255,20 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     let services: Api<Service> = Api::all(client.clone());
     let hpas: Api<HorizontalPodAutoscaler> = Api::all(client.clone());
 
-    if let Err(e) = services.list(&ListParams::default().limit(1)).await {
-        error!("RestateDeployment is not queryable; {e:?}. Is the CRD installed?");
-        std::process::exit(1);
+    match wait_for_crd::<RestateDeployment>(
+        ReadinessGate::RestateDeployment,
+        &client,
+        &metrics,
+        &state,
+    )
+    .await
+    {
+        Ok(CrdWait::Available) => {}
+        Ok(CrdWait::ShuttingDown) => return,
+        Err(e) => {
+            error!("Could not determine whether the RestateDeployment CRD is installed; {e:?}");
+            std::process::exit(1);
+        }
     }
 
     // all resources we create have this label
