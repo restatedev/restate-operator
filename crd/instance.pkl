@@ -6,7 +6,7 @@ cluster = (RestateCluster) {
   }
   spec {
     compute {
-      image = "restatedev/restate:1.5.3"
+      image = "restatedev/restate:1.7"
     }
     storage {
       storageRequestBytes = 2.gib.toUnit("b").value as Int

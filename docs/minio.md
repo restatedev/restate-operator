@@ -97,7 +97,7 @@ spec:
     enabled: true
   compute:
     replicas: 3
-    image: restatedev/restate:1.5
+    image: restatedev/restate:1.7
     env:
     - name: RESTATE_WORKER__SNAPSHOTS__AWS_ACCESS_KEY_ID
       valueFrom:
