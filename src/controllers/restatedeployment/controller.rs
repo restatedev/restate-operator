@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -47,7 +47,8 @@ use crate::{Error, Result};
 
 // Import our reconcilers
 use crate::controllers::restatedeployment::cleanup::{
-    CleanupMode, DeploymentUsage, DeploymentUsageMap, describe_blocking_versions,
+    CleanupMode, DeploymentUsage, DeploymentUsageMap, DeploymentUsageRows,
+    blocked_deletion_requeue, deployment_usage_query, describe_blocking_versions,
 };
 use crate::controllers::restatedeployment::reconcilers;
 
@@ -229,9 +230,15 @@ fn root_cause(err: &Error) -> &Error {
 fn error_policy<K, C>(_rs: Arc<K>, err: &Error, _ctx: C) -> Action {
     match root_cause(err) {
         // A drain knows its own deadline; the blanket interval would make a short
-        // drainDelaySeconds cost up to 30s per version anyway.
+        // drainDelaySeconds cost up to 30s per version anyway. A deletion blocked on
+        // in-flight invocations sets its own interval too, backing off as the wait grows
+        // so a long one stops re-running the admin query twice a minute forever.
         Error::DeploymentDraining {
             requeue_after: Some(requeue_after),
+        }
+        | Error::DeploymentInUse {
+            requeue_after: Some(requeue_after),
+            ..
         } => Action::requeue(*requeue_after),
         _ => Action::requeue(Duration::from_secs(30)),
     }
@@ -977,55 +984,7 @@ impl RestateDeployment {
         ctx: &Context,
         mode: CleanupMode,
     ) -> Result<DeploymentUsageMap> {
-        // The unpinned count is attributed through `sys_service.deployment_id`, the same
-        // column that sets `latest_for_service`, so a non-zero count implies that flag.
-        let count_unpinned = if mode.is_deleting() { "1 = 1" } else { "1 = 0" };
-
-        let sql_query = format!(
-            r#"
-            WITH latest AS (
-                SELECT DISTINCT deployment_id AS id
-                FROM sys_service
-                WHERE deployment_id IS NOT NULL
-            ),
-            pinned AS (
-                SELECT pinned_deployment_id AS id, COUNT(*) AS n
-                FROM sys_invocation_status
-                WHERE pinned_deployment_id IS NOT NULL AND status != 'completed'
-                GROUP BY pinned_deployment_id
-            ),
-            unpinned AS (
-                SELECT s.deployment_id AS id, COUNT(*) AS n
-                FROM sys_invocation_status i
-                JOIN sys_service s ON s.name = i.target_service_name
-                WHERE {count_unpinned}
-                  AND i.pinned_deployment_id IS NULL
-                  AND i.status != 'completed'
-                GROUP BY s.deployment_id
-            )
-            SELECT d.id AS deployment_id,
-                   l.id IS NOT NULL AS latest_for_service,
-                   COALESCE(p.n, 0) AS pinned_invocations,
-                   COALESCE(u.n, 0) AS unpinned_invocations
-            FROM sys_deployment d
-            LEFT JOIN latest l ON d.id = l.id
-            LEFT JOIN pinned p ON d.id = p.id
-            LEFT JOIN unpinned u ON d.id = u.id;
-        "#
-        );
-
-        #[derive(Deserialize)]
-        struct DeploymentQueryResult {
-            rows: Vec<DeploymentQueryResultRow>,
-        }
-
-        #[derive(Deserialize)]
-        struct DeploymentQueryResultRow {
-            deployment_id: String,
-            latest_for_service: bool,
-            pinned_invocations: i64,
-            unpinned_invocations: i64,
-        }
+        let sql_query = deployment_usage_query(mode);
 
         let resp = ctx
             .request(Method::POST, &self.spec.restate.register, "/query")?
@@ -1036,36 +995,24 @@ impl RestateDeployment {
             .send()
             .await
             .map_err(Error::AdminCallFailed)?;
-        let response: DeploymentQueryResult = check_admin_response(resp)
+        let response: DeploymentUsageRows = check_admin_response(resp)
             .await?
             .json()
             .await
             .map_err(Error::AdminCallFailed)?;
 
-        let mut endpoints: DeploymentUsageMap = HashMap::with_capacity(response.rows.len());
+        Ok(response.into_map())
+    }
 
-        for row in response.rows {
-            let usage = DeploymentUsage {
-                latest_for_service: row.latest_for_service,
-                pinned_invocations: row.pinned_invocations.max(0) as u64,
-                unpinned_invocations: row.unpinned_invocations.max(0) as u64,
-            };
-
-            match endpoints.entry(row.deployment_id) {
-                std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    // two rows for one deployment id shouldnt happen: `latest` is DISTINCT,
-                    // `pinned`/`unpinned` are grouped, sys_deployment holds one row per id,
-                    // and all three are LEFT JOINed. we take the most conservative view of
-                    // each fact if a future query shape ever does produce duplicates.
-                    entry.get_mut().merge(usage);
-                }
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(usage);
-                }
-            }
-        }
-
-        Ok(endpoints)
+    /// How long ago deletion was requested, for pacing the retries of a blocked one.
+    /// Zero for an object that is not being deleted, and for a clock that has gone
+    /// backwards since the deletion timestamp was stamped.
+    fn blocked_for(&self) -> Duration {
+        self.metadata
+            .deletion_timestamp
+            .as_ref()
+            .and_then(|deleted_at| (chrono::Utc::now() - deleted_at.0).to_std().ok())
+            .unwrap_or_default()
     }
 
     // Finalizer cleanup (the object was deleted, ensure nothing is orphaned)
@@ -1150,7 +1097,10 @@ impl RestateDeployment {
             // this as a Warning event, and it is the only place a stuck deletion explains
             // itself. Unpinned work includes scheduled invocations, whose execution time
             // can be arbitrarily far out, so "wait for it" is not always sound advice.
-            return Err(Error::DeploymentInUse { blocked_by });
+            return Err(Error::DeploymentInUse {
+                blocked_by,
+                requeue_after: Some(blocked_deletion_requeue(self.blocked_for())),
+            });
         }
 
         if let Some(next_removal) = next_removal {
@@ -1519,16 +1469,35 @@ mod tests {
         );
     }
 
+    /// A deletion held by in-flight invocations paces its own retries, so the interval it
+    /// computed has to survive the same wrapper.
     #[test]
-    fn unrelated_errors_keep_the_blanket_interval() {
+    fn blocked_deletion_backoff_survives_the_finalizer_wrapper() {
         let wrapped = Error::FinalizerError(Box::new(
             kube::runtime::finalizer::Error::CleanupFailed(Error::DeploymentInUse {
                 blocked_by: "greeter-abc123 (1 pinned, 0 unpinned invocations)".into(),
+                requeue_after: Some(Duration::from_secs(120)),
             }),
         ));
 
         assert_eq!(
             error_policy(Arc::new(()), &wrapped, ()),
+            Action::requeue(Duration::from_secs(120))
+        );
+    }
+
+    #[test]
+    fn unrelated_errors_keep_the_blanket_interval() {
+        let wrapped = Error::FinalizerError(Box::new(
+            kube::runtime::finalizer::Error::CleanupFailed(Error::HashCollision),
+        ));
+
+        assert_eq!(
+            error_policy(Arc::new(()), &wrapped, ()),
+            Action::requeue(Duration::from_secs(30))
+        );
+        assert_eq!(
+            error_policy(Arc::new(()), &Error::HashCollision, ()),
             Action::requeue(Duration::from_secs(30))
         );
     }

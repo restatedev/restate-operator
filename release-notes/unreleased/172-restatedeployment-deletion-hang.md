@@ -25,9 +25,15 @@ Alongside that:
 - **Unfinished invocations not yet bound to a deployment now count.** Paused, queued and
   scheduled work carries no `pinned_deployment_id`, so the old query scored it as zero and
   a deletion could tear the endpoint out from under it. It is now attributed through the
-  target service.
+  target service. Only a deletion asks: that attribution costs a second scan of
+  `sys_invocation_status` and a per-row decode of the invocation target, and during a
+  rollout it can only ever name the deployment that is already the service's endpoint. The
+  reconcile path's query is unchanged.
 - **A blocked deletion says what is blocking it.** The `DeploymentInUse` event now names
   each version and its pinned/unpinned invocation counts instead of a generic message.
+- **A blocked deletion backs off.** Retries start at the usual 30 seconds and stretch to
+  five minutes the longer the wait runs, so a deletion parked behind a scheduled invocation
+  days out stops re-running that query twice a minute for the duration.
 - **Drain deadlines are now honoured.** The requeue interval derived from a version's
   remove-at time was being discarded, because errors reach the controller's error policy
   wrapped by the finalizer machinery; a short `drainDelaySeconds` cost up to 30 seconds per
@@ -50,8 +56,7 @@ same hang.
 
 - **Existing deployments:** no configuration change. Deletions that were previously wedged
   will proceed the next time the operator reconciles them; ones whose finalizer was removed
-  by hand may have left a stale registration in Restate that needs deleting via the admin
-  API.
+  by hand may have left a stale registration behind in Restate.
 - **Deletion now takes at least `spec.restate.drainDelaySeconds` (default 300s).** The
   latest version is put through the same drain as any superseded version, so teardown waits
   out the drain window even when the deployment never served an invocation. This is the
@@ -59,8 +64,8 @@ same hang.
 - **Deletion still waits on unfinished invocations, and that wait has no upper bound.**
   Scheduled invocations are the sharp edge: a delayed call whose execution time is days out
   counts as unfinished and holds the deletion until it fires. The `DeploymentInUse` event
-  reports the counts so this is diagnosable; a `deletionPolicy` field to bound or skip the
-  wait is planned.
+  reports the counts so this is diagnosable. Bounding or skipping the wait is the job of the
+  planned `deletionPolicy` field, not of manual intervention.
 - **New deployments:** no impact.
 
 ### Migration Guidance

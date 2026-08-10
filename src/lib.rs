@@ -70,7 +70,10 @@ pub enum Error {
     #[error(
         "This RestateDeployment is backing active versions in Restate: {blocked_by}. If you want to delete the RestateDeployment, either register new endpoints for the relevant services or cancel/complete the outstanding invocations."
     )]
-    DeploymentInUse { blocked_by: String },
+    DeploymentInUse {
+        blocked_by: String,
+        requeue_after: Option<Duration>,
+    },
 
     #[error(
         "This RestateDeployment is backing recently-active versions in Restate. It will be removed after the drain delay period."

@@ -123,4 +123,7 @@ fmt:
 lint:
     cargo clippy
 
+test:
+    cargo test --all-targets
+
 check: fmt lint
