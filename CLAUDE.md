@@ -206,24 +206,24 @@ Both RestateCluster and RestateDeployment use finalizers for cleanup:
 
 ### Restate Invocation Lifecycle and Deployment Status
 
-**Important**: The operator aligns with Restate's invocation retention model when determining deployment activity:
+**Important**: `list_deployments` (`src/controllers/restatedeployment/controller.rs`) queries the admin API for two independent signals per registered deployment, returning them as a `DeploymentState`:
 
-- **Invocation retention**: Completed invocations remain in `sys_invocation_status` for 24 hours (default) before automatic purging
-- **Deployment status**: A deployment is considered "active" if it has ANY invocation in `sys_invocation_status`, including completed ones
-- **Cleanup timing**: Configurations tied to "active" deployments are retained until Restate purges the invocations
-- **Manual override**: Use `restate invocations purge <id>` to immediately purge completed invocations for testing
+- **`latest_endpoint`**: the deployment serves the latest revision of at least one service (`sys_service`)
+- **`has_pinned_invocations`**: at least one *non-completed* invocation is pinned to it (`sys_invocation_status WHERE status != 'completed'`)
 
-**Deployment states** (`restate deployments list`):
-- `Active`: Has latest service revision
-- `Draining`: Superseded but has pinned invocations (including completed)
-- `Drained`: Superseded and all invocations purged (active_inv == 0)
+Only one of them is a reason to wait, and which one depends on whether the RestateDeployment is being deleted:
+
+- **Normal reconcile**: either signal makes a version "active" — it is kept, and any pending removal timer is reset.
+- **Being deleted** (`deletion_timestamp` set): only `has_pinned_invocations` blocks. Nothing can supersede the latest endpoint once the object is going away, so waiting on it would wedge the finalizer forever (issue #172). A version with live pinned invocations is held for `spec.restate.drainDelaySeconds` and then force-deregistered; `spec.revisionHistoryLimit` is bypassed so every version is actually deregistered before the finalizer is released.
+
+Completed invocations do **not** keep a deployment alive — the operator does not wait for Restate's 24h retention purge (changed in #71). Note this differs from what `restate deployments list` reports: it shows a superseded deployment as `Draining` while completed invocations are still retained, and `Drained` only once they are purged.
 
 **SQL tables**:
-- `sys_invocation_status`: ALL invocations including completed (used by operator's `list_deployments` query)
-- `sys_invocation`: Same content as sys_invocation_status
-- Both tables include a `status` column to filter by invocation state
+- `sys_service`: current service revisions, one row per service
+- `sys_invocation_status`: ALL invocations including completed; the `status` column is what the operator filters on
+- `sys_invocation`: same content as `sys_invocation_status`
 
-The operator's cleanup logic intentionally waits for Restate's invocation purge before considering a deployment truly inactive, ensuring Configuration lifecycle aligns with Restate's internal state management.
+For testing, `restate invocations purge <id>` immediately purges a completed invocation.
 
 ## Helm Chart
 

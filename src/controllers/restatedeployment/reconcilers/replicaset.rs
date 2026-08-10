@@ -16,7 +16,8 @@ use serde_json::json;
 use tracing::*;
 
 use crate::controllers::restatedeployment::controller::{
-    APP_MANAGED_BY_LABEL, Context, OWNED_BY_LABEL, RESTATE_DEPLOYMENT_ID_ANNOTATION,
+    APP_MANAGED_BY_LABEL, Context, DeploymentState, OWNED_BY_LABEL,
+    RESTATE_DEPLOYMENT_ID_ANNOTATION,
 };
 use crate::resources::restatecloudenvironments::InProcessTunnelParams;
 use crate::resources::restatedeployments::RestateDeployment;
@@ -274,7 +275,7 @@ pub async fn cleanup_old_replicasets(
     rs_api: &Api<ReplicaSet>,
     rsd_uid: &str,
     rsd: &RestateDeployment,
-    deployments: &HashMap<String, bool>,
+    deployments: &HashMap<String, DeploymentState>,
     except_rs: Option<&str>,
 ) -> Result<(i32, Option<chrono::DateTime<chrono::Utc>>)> {
     let replicasets_cell = std::cell::Cell::new(Vec::new());
@@ -329,82 +330,31 @@ pub async fn cleanup_old_replicasets(
     let mut next_removal = None;
 
     let now = chrono::Utc::now();
+    let is_deleting = rsd.metadata.deletion_timestamp.is_some();
 
     for rs in replicasets {
         let rs_name = rs.name_any();
 
         let rs_deployment_id = rs.annotations().get(RESTATE_DEPLOYMENT_ID_ANNOTATION);
 
-        // Skip active deployments
         let deployment = rs_deployment_id
-            .and_then(|rs_deployment_id| deployments.get(rs_deployment_id).cloned());
+            .and_then(|rs_deployment_id| deployments.get(rs_deployment_id).copied());
         let deployment_exists = deployment.is_some();
-        let deployment_active = deployment.unwrap_or(false);
+        let deployment = deployment.unwrap_or_default();
 
-        // During deletion, once the drain period has passed for an active version,
-        // fall through to the force-delete path below (same as inactive versions).
-        let is_deleting = rsd.metadata.deletion_timestamp.is_some();
-        let drain_annotation = rs
+        let current_remove_at = rs
             .annotations()
             .get(RESTATE_REMOVE_VERSION_AT_ANNOTATION)
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok().map(|t| t.to_utc()));
-        let drain_due = drain_annotation.is_some_and(|t| t < now);
+            .and_then(|remove_at| {
+                chrono::DateTime::parse_from_rfc3339(remove_at)
+                    .map(|t| t.to_utc())
+                    .ok()
+            });
+        let current_remove_at_in_past = current_remove_at.is_some_and(|c| c < now);
+        let blocks_removal = deployment.blocks_removal(is_deleting);
 
-        if deployment_active && !(is_deleting && drain_due) {
-            if is_deleting {
-                // During deletion: schedule drain for active versions (latest-in-sys_service
-                // or still-pinned) so the finalizer can eventually complete. Don't reset any
-                // existing timer — unlike the rollback case, we're committed to removal.
-                match drain_annotation {
-                    None => {
-                        let drain_delay_seconds = rsd.spec.restate.drain_delay_seconds();
-                        info!(
-                            replicaset = %rs_name,
-                            namespace = %namespace,
-                            drain_delay_seconds,
-                            "RestateDeployment being deleted; scheduling active version for drain"
-                        );
-                        let remove_at = chrono::Utc::now()
-                            .checked_add_signed(chrono::TimeDelta::seconds(drain_delay_seconds))
-                            .expect("remove_version_at in bounds");
-
-                        rs_api
-                            .patch_metadata(
-                                &rs_name,
-                                &PatchParams::apply("restate-operator/remove-version-at").force(),
-                                &Patch::Apply(
-                                    ObjectMeta {
-                                        annotations: Some(
-                                            [(
-                                                RESTATE_REMOVE_VERSION_AT_ANNOTATION.to_string(),
-                                                remove_at.to_rfc3339(),
-                                            )]
-                                            .into(),
-                                        ),
-                                        ..Default::default()
-                                    }
-                                    .into_request_partial::<ReplicaSet>(),
-                                ),
-                            )
-                            .await?;
-
-                        next_removal = match next_removal {
-                            None => Some(remove_at),
-                            Some(nr) if nr > remove_at => Some(remove_at),
-                            els => els,
-                        };
-                    }
-                    Some(remove_at) => {
-                        next_removal = match next_removal {
-                            None => Some(remove_at),
-                            Some(nr) if nr > remove_at => Some(remove_at),
-                            els => els,
-                        };
-                    }
-                }
-                continue;
-            }
-
+        // Skip active deployments
+        if blocks_removal && !is_deleting {
             active_count += 1;
 
             // Per-version autoscaling: a non-latest version has an operator HPA
@@ -413,7 +363,7 @@ pub async fn cleanup_old_replicasets(
             // handled unconditionally below, before scale-down.)
             match super::autoscaling::plan_active_version_hpa(
                 rsd.spec.autoscaling.is_some(),
-                false, // not deleting (is_deleting is false here)
+                is_deleting,
             ) {
                 HpaPlan::Ensure => {
                     if let Some(template) = rsd.spec.autoscaling.as_ref()
@@ -483,7 +433,7 @@ pub async fn cleanup_old_replicasets(
                 HpaPlan::Skip => {}
             }
 
-            if drain_annotation.is_none() {
+            if current_remove_at.is_none() {
                 // not scheduled for removal; all good.
                 continue;
             }
@@ -515,6 +465,58 @@ pub async fn cleanup_old_replicasets(
             continue;
         }
 
+        // Deleting, and the only thing left worth waiting for: a version with live
+        // pinned invocations, which the force-deregistration below would kill. Hold
+        // it for the drain delay, then tear it down like any other version. Unlike
+        // the rollback case above we never reset an existing timer — we're committed.
+        if is_deleting && blocks_removal && !current_remove_at_in_past {
+            let remove_at = match current_remove_at {
+                Some(remove_at) => remove_at,
+                None => {
+                    let drain_delay_seconds = rsd.spec.restate.drain_delay_seconds();
+                    info!(
+                        replicaset = %rs_name,
+                        namespace = %namespace,
+                        drain_delay_seconds,
+                        "RestateDeployment being deleted; draining version with pinned invocations"
+                    );
+                    let remove_at = now
+                        .checked_add_signed(chrono::TimeDelta::seconds(drain_delay_seconds))
+                        .expect("remove_version_at in bounds");
+
+                    rs_api
+                        .patch_metadata(
+                            &rs_name,
+                            &PatchParams::apply("restate-operator/remove-version-at").force(),
+                            &Patch::Apply(
+                                ObjectMeta {
+                                    annotations: Some(
+                                        [(
+                                            RESTATE_REMOVE_VERSION_AT_ANNOTATION.to_string(),
+                                            remove_at.to_rfc3339(),
+                                        )]
+                                        .into(),
+                                    ),
+                                    ..Default::default()
+                                }
+                                .into_request_partial::<ReplicaSet>(),
+                            ),
+                        )
+                        .await?;
+
+                    remove_at
+                }
+            };
+
+            next_removal = match next_removal {
+                None => Some(remove_at),
+                Some(next_removal) if next_removal > remove_at => Some(remove_at),
+                els => els,
+            };
+
+            continue;
+        }
+
         // Non-active version: remove any operator HPA before scaling it down. Its
         // minReplicas floor (>= 1) would otherwise fight the operator scaling the
         // ReplicaSet to zero, and would hold the version at the floor through the
@@ -528,22 +530,11 @@ pub async fn cleanup_old_replicasets(
             super::autoscaling::delete_version_hpa(&ctx.client, namespace, &rs_name).await?;
         }
 
-        let current_remove_at = rs
-            .annotations()
-            .get(RESTATE_REMOVE_VERSION_AT_ANNOTATION)
-            .and_then(|remove_at| {
-                chrono::DateTime::parse_from_rfc3339(remove_at)
-                    .map(|t| t.to_utc())
-                    .ok()
-            });
+        // A deleting RestateDeployment never waits here: it either had nothing
+        // pinned, or its drain already elapsed above.
+        let teardown_due = current_remove_at_in_past || is_deleting;
 
-        let current_remove_at_in_past = current_remove_at.is_some_and(|c| c < now);
-
-        match (
-            current_remove_at,
-            current_remove_at_in_past,
-            deployment_exists,
-        ) {
+        match (current_remove_at, teardown_due, deployment_exists) {
             (_, true, _) | (_, _, false) => {
                 // we are past the remove at time, or the endpoint was removed by other means; can now scale it down
 
@@ -574,8 +565,11 @@ pub async fn cleanup_old_replicasets(
                         .await?;
                 }
 
-                // If we are here, there is a 0 sized replicaset which should be subject to the history limit
-                if historic_count < rsd.spec.revision_history_limit {
+                // If we are here, there is a 0 sized replicaset which should be subject to the
+                // history limit — except while deleting, where keeping it for rollback would
+                // just leave the Restate deployment registered with nothing left to
+                // deregister it once the finalizer is released.
+                if !is_deleting && historic_count < rsd.spec.revision_history_limit {
                     historic_count += 1;
                     // we haven't hit that limit yet, so we don't need to delete this rs
                     continue;

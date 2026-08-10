@@ -9,7 +9,7 @@ use tracing::*;
 use url::Url;
 
 use crate::controllers::restatedeployment::controller::{
-    Context, RESTATE_DEPLOYMENT_ID_ANNOTATION,
+    Context, DeploymentState, RESTATE_DEPLOYMENT_ID_ANNOTATION,
 };
 use crate::controllers::restatedeployment::reconcilers::replicaset::generate_pod_template_hash;
 use crate::resources::knative::{
@@ -743,7 +743,7 @@ pub async fn cleanup_old_configurations(
     ctx: &Context,
     rsd_uid: &str,
     rsd: &RestateDeployment,
-    deployments: &std::collections::HashMap<String, bool>,
+    deployments: &std::collections::HashMap<String, DeploymentState>,
     active_tag: Option<&str>,
 ) -> Result<(i32, Option<chrono::DateTime<chrono::Utc>>)> {
     // Use reflector cache instead of API list() call
@@ -807,6 +807,7 @@ pub async fn cleanup_old_configurations(
     let mut next_removal = None;
 
     let now = chrono::Utc::now();
+    let is_deleting = rsd.metadata.deletion_timestamp.is_some();
 
     for config in configurations {
         let config_name = config.name_any();
@@ -817,22 +818,29 @@ pub async fn cleanup_old_configurations(
             .as_ref()
             .and_then(|a| a.get(RESTATE_DEPLOYMENT_ID_ANNOTATION));
 
-        // Skip active deployments
         let deployment = config_deployment_id
-            .and_then(|config_deployment_id| deployments.get(config_deployment_id).cloned());
+            .and_then(|config_deployment_id| deployments.get(config_deployment_id).copied());
         let deployment_exists = deployment.is_some();
-        let deployment_active = deployment.unwrap_or(false);
+        let deployment = deployment.unwrap_or_default();
 
-        if deployment_active {
+        let current_remove_at = config
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get(RESTATE_REMOVE_VERSION_AT_ANNOTATION))
+            .and_then(|remove_at| {
+                chrono::DateTime::parse_from_rfc3339(remove_at)
+                    .map(|t| t.to_utc())
+                    .ok()
+            });
+        let current_remove_at_in_past = current_remove_at.is_some_and(|c| c < now);
+        let blocks_removal = deployment.blocks_removal(is_deleting);
+
+        // Skip active deployments
+        if blocks_removal && !is_deleting {
             active_count += 1;
 
-            if config
-                .metadata
-                .annotations
-                .as_ref()
-                .and_then(|a| a.get(RESTATE_REMOVE_VERSION_AT_ANNOTATION))
-                .is_none()
-            {
+            if current_remove_at.is_none() {
                 // not scheduled for removal; all good.
                 trace!(
                     "Keeping active Configuration {} in namespace {namespace}",
@@ -867,27 +875,51 @@ pub async fn cleanup_old_configurations(
             continue;
         }
 
-        let current_remove_at = config
-            .metadata
-            .annotations
-            .as_ref()
-            .and_then(|a| a.get(RESTATE_REMOVE_VERSION_AT_ANNOTATION))
-            .and_then(|remove_at| {
-                chrono::DateTime::parse_from_rfc3339(remove_at)
-                    .map(|t| t.to_utc())
-                    .ok()
-            });
+        // Deleting, and the only thing left worth waiting for: a version with live
+        // pinned invocations, which the force-deregistration below would kill. Hold
+        // it for the drain delay, then tear it down like any other version. Unlike
+        // the rollback case above we never reset an existing timer — we're committed.
+        if is_deleting && blocks_removal && !current_remove_at_in_past {
+            let remove_at = match current_remove_at {
+                Some(remove_at) => remove_at,
+                None => {
+                    let drain_delay_seconds = rsd.spec.restate.drain_delay_seconds();
+                    info!(
+                        configuration = %config_name,
+                        namespace = %namespace,
+                        drain_delay_seconds,
+                        "RestateDeployment being deleted; draining version with pinned invocations"
+                    );
+                    let remove_at = now
+                        .checked_add_signed(chrono::TimeDelta::seconds(drain_delay_seconds))
+                        .expect("remove_version_at in bounds");
 
-        let current_remove_at_in_past = current_remove_at.is_some_and(|c| c < now);
+                    schedule_configuration_removal(ctx, namespace, &config_name, remove_at).await?;
 
-        match (
-            current_remove_at,
-            current_remove_at_in_past,
-            deployment_exists,
-        ) {
+                    remove_at
+                }
+            };
+
+            next_removal = match next_removal {
+                None => Some(remove_at),
+                Some(next_removal) if next_removal > remove_at => Some(remove_at),
+                els => els,
+            };
+
+            continue;
+        }
+
+        // A deleting RestateDeployment never waits here: it either had nothing
+        // pinned, or its drain already elapsed above.
+        let teardown_due = current_remove_at_in_past || is_deleting;
+
+        match (current_remove_at, teardown_due, deployment_exists) {
             (_, true, _) | (_, _, false) => {
-                // we are past the remove-at time, or the endpoint was removed by other means; can now delete it (subject to the history limit)
-                if historic_count < rsd.spec.revision_history_limit {
+                // we are past the remove-at time, or the endpoint was removed by other means; can
+                // now delete it (subject to the history limit — except while deleting, where
+                // keeping it for rollback would just leave the Restate deployment registered with
+                // nothing left to deregister it once the finalizer is released)
+                if !is_deleting && historic_count < rsd.spec.revision_history_limit {
                     historic_count += 1;
                     trace!(
                         "Keeping old Configuration {} in namespace {namespace} (within revision history limit: {}/{})",
@@ -946,32 +978,11 @@ pub async fn cleanup_old_configurations(
                     "Scheduling removal of old Configuration (after drain delay)"
                 );
 
-                let remove_at = chrono::Utc::now()
+                let remove_at = now
                     .checked_add_signed(chrono::TimeDelta::seconds(drain_delay_seconds))
                     .expect("remove_version_at in bounds");
 
-                let config_api: Api<Configuration> = Api::namespaced(ctx.client.clone(), namespace);
-                let params = PatchParams::apply("restate-operator/remove-version-at").force();
-
-                config_api
-                    .patch_metadata(
-                        &config_name,
-                        &params,
-                        &Patch::Apply(
-                            ObjectMeta {
-                                annotations: Some(
-                                    [(
-                                        RESTATE_REMOVE_VERSION_AT_ANNOTATION.to_string(),
-                                        remove_at.to_rfc3339(),
-                                    )]
-                                    .into(),
-                                ),
-                                ..Default::default()
-                            }
-                            .into_request_partial::<Configuration>(),
-                        ),
-                    )
-                    .await?;
+                schedule_configuration_removal(ctx, namespace, &config_name, remove_at).await?;
 
                 // ensure we keep track of the soonest remove_at
                 next_removal = match next_removal {
@@ -997,6 +1008,39 @@ pub async fn cleanup_old_configurations(
     }
 
     Ok((active_count, next_removal))
+}
+
+/// Stamp the drain deadline after which a Configuration may be removed
+async fn schedule_configuration_removal(
+    ctx: &Context,
+    namespace: &str,
+    config_name: &str,
+    remove_at: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    let config_api: Api<Configuration> = Api::namespaced(ctx.client.clone(), namespace);
+    let params = PatchParams::apply("restate-operator/remove-version-at").force();
+
+    config_api
+        .patch_metadata(
+            config_name,
+            &params,
+            &Patch::Apply(
+                ObjectMeta {
+                    annotations: Some(
+                        [(
+                            RESTATE_REMOVE_VERSION_AT_ANNOTATION.to_string(),
+                            remove_at.to_rfc3339(),
+                        )]
+                        .into(),
+                    ),
+                    ..Default::default()
+                }
+                .into_request_partial::<Configuration>(),
+            ),
+        )
+        .await?;
+
+    Ok(())
 }
 
 /// Get tag from Configuration annotation

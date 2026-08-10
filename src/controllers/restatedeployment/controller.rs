@@ -211,6 +211,36 @@ fn error_policy<K, C>(_rs: Arc<K>, _: &Error, _ctx: C) -> Action {
     Action::requeue(Duration::from_secs(30))
 }
 
+/// Why Restate still considers a registered deployment live. The two signals are
+/// kept apart because only one of them is a reason to wait: a version can be the
+/// latest endpoint of a service and have never served an invocation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct DeploymentState {
+    /// Serves the latest revision of at least one service (`sys_service`).
+    pub latest_endpoint: bool,
+    /// At least one non-completed invocation is pinned to it (`sys_invocation_status`).
+    pub has_pinned_invocations: bool,
+}
+
+impl DeploymentState {
+    pub fn active(&self) -> bool {
+        self.latest_endpoint || self.has_pinned_invocations
+    }
+
+    /// Whether this version must be left alone this reconcile.
+    ///
+    /// While the RestateDeployment is being deleted only live pinned invocations
+    /// count: nothing will ever supersede the latest endpoint now, so waiting on
+    /// it wedges the finalizer forever. Otherwise either signal keeps it.
+    pub fn blocks_removal(&self, is_deleting: bool) -> bool {
+        if is_deleting {
+            self.has_pinned_invocations
+        } else {
+            self.active()
+        }
+    }
+}
+
 impl RestateDeployment {
     /// Resolve the RestateCloudEnvironment values a `tunnelMode: in-process`
     /// deployment derives its identity from (None for every other mode). They feed
@@ -442,8 +472,7 @@ impl RestateDeployment {
         if existing_deployment_id.is_none_or(|existing_deployment_id| {
             !deployments
                 .get(existing_deployment_id)
-                .cloned()
-                .unwrap_or_default()
+                .is_some_and(DeploymentState::active)
         }) {
             let valid = async {
                 if let Some(cluster_name) = &self.spec.restate.register.cluster {
@@ -494,9 +523,15 @@ impl RestateDeployment {
                     self.spec.restate.use_http11.as_ref().cloned(),
                 )
                 .await?;
-            // if registration succeeded, treat this as an active endpoint
+            // if registration succeeded, treat this as the latest endpoint
             // if we fail after this point we will re-register and should get the same deployment id
-            deployments.insert(deployment_id.clone(), true);
+            deployments.insert(
+                deployment_id.clone(),
+                DeploymentState {
+                    latest_endpoint: true,
+                    has_pinned_invocations: false,
+                },
+            );
 
             debug!(
                 "Updating deployment-id annotation of ReplicaSet/Service {versioned_name} in namespace {namespace}"
@@ -940,22 +975,29 @@ impl RestateDeployment {
         Ok(resp.id)
     }
 
-    pub(super) async fn list_deployments(&self, ctx: &Context) -> Result<HashMap<String, bool>> {
-        // This query finds deployments, noting those that are the latest for a particular service, or have an active invocation
+    pub(super) async fn list_deployments(
+        &self,
+        ctx: &Context,
+    ) -> Result<HashMap<String, DeploymentState>> {
+        // This query finds deployments, noting separately those that are the latest for a
+        // particular service, and those that still have a live invocation pinned to them
         let sql_query = r#"
-            WITH active_deployments AS (
+            WITH latest_deployments AS (
                 SELECT DISTINCT deployment_id as id
                 FROM sys_service
                 WHERE deployment_id IS NOT NULL
-                UNION
+            ),
+            pinned_deployments AS (
                 SELECT DISTINCT pinned_deployment_id as id
                 FROM sys_invocation_status
                 WHERE pinned_deployment_id IS NOT NULL AND status != 'completed'
             )
             SELECT d.id as deployment_id,
-                   a.id IS NOT NULL as active
+                   l.id IS NOT NULL as latest_endpoint,
+                   p.id IS NOT NULL as has_pinned_invocations
             FROM sys_deployment d
-            LEFT JOIN active_deployments a ON d.id = a.id;
+            LEFT JOIN latest_deployments l ON d.id = l.id
+            LEFT JOIN pinned_deployments p ON d.id = p.id;
         "#;
 
         #[derive(Deserialize)]
@@ -966,7 +1008,8 @@ impl RestateDeployment {
         #[derive(Deserialize)]
         struct DeploymentQueryResultRow {
             deployment_id: String,
-            active: bool,
+            latest_endpoint: bool,
+            has_pinned_invocations: bool,
         }
 
         let resp = ctx
@@ -984,21 +1027,15 @@ impl RestateDeployment {
             .await
             .map_err(Error::AdminCallFailed)?;
 
-        let mut endpoints = HashMap::with_capacity(response.rows.len());
+        let mut endpoints: HashMap<String, DeploymentState> =
+            HashMap::with_capacity(response.rows.len());
 
         for row in response.rows {
-            match endpoints.entry(row.deployment_id) {
-                std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    // two rows with same deployment id shouldnt happen...
-                    // we treat the deployment as active if any row is active
-                    if !entry.get() {
-                        entry.insert(row.active);
-                    }
-                }
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(row.active);
-                }
-            }
+            // two rows with same deployment id shouldnt happen, but if they do,
+            // any row asserting a signal wins
+            let entry = endpoints.entry(row.deployment_id).or_default();
+            entry.latest_endpoint |= row.latest_endpoint;
+            entry.has_pinned_invocations |= row.has_pinned_invocations;
         }
 
         Ok(endpoints)
@@ -1556,5 +1593,31 @@ mod tests {
         // ...and it is deterministic for the same template.
         let s1_again = latest_version_label_selector(&v1, None).expect("v1 selector again");
         assert_eq!(s1, s1_again, "selector should be deterministic");
+    }
+
+    #[test]
+    fn deletion_only_waits_for_pinned_invocations() {
+        let latest_only = DeploymentState {
+            latest_endpoint: true,
+            has_pinned_invocations: false,
+        };
+        // outside deletion, the latest endpoint is the live version and is kept
+        assert!(latest_only.active());
+        assert!(latest_only.blocks_removal(false));
+        // ...but nothing can supersede it once the RestateDeployment is going away,
+        // and with no invocations there is nothing to drain (issue #172)
+        assert!(!latest_only.blocks_removal(true));
+
+        let pinned = DeploymentState {
+            latest_endpoint: false,
+            has_pinned_invocations: true,
+        };
+        assert!(pinned.blocks_removal(false));
+        assert!(pinned.blocks_removal(true));
+
+        let drained = DeploymentState::default();
+        assert!(!drained.active());
+        assert!(!drained.blocks_removal(false));
+        assert!(!drained.blocks_removal(true));
     }
 }
