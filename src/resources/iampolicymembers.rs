@@ -31,6 +31,14 @@ pub struct IAMPolicyMemberSpec {
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct IAMPolicyMemberResourceRef {
+    /// The Config Connector API version of the referenced resource, e.g.
+    /// `iam.cnrm.cloud.google.com/v1beta1`. Config Connector defaults this
+    /// field at creation time; we must emit it on subsequent server-side
+    /// applies so the value is not stripped from the existing object and
+    /// rejected by the `deny-immutable-field-updates` webhook.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_version: Option<String>,
+
     /// The Config Connector kind, e.g. `IAMServiceAccount`
     pub kind: String,
 
