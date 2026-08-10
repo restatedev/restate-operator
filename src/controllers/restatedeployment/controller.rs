@@ -46,6 +46,9 @@ use crate::telemetry;
 use crate::{Error, Result};
 
 // Import our reconcilers
+use crate::controllers::restatedeployment::cleanup::{
+    CleanupMode, DeploymentUsage, DeploymentUsageMap, describe_blocking_versions,
+};
 use crate::controllers::restatedeployment::reconcilers;
 
 use super::reconcilers::replicaset::{
@@ -207,8 +210,31 @@ async fn reconcile(rs: Arc<RestateDeployment>, ctx: Arc<Context>) -> Result<Acti
     }
 }
 
-fn error_policy<K, C>(_rs: Arc<K>, _: &Error, _ctx: C) -> Action {
-    Action::requeue(Duration::from_secs(30))
+/// Look through the `finalizer` wrapper `reconcile` puts on every error.
+///
+/// Errors raised inside the finalizer closure reach `error_policy` as
+/// `FinalizerError(CleanupFailed(..))`, so matching on the reconciler's own variants only
+/// works after unwrapping — otherwise every arm below the wrapper is dead.
+fn root_cause(err: &Error) -> &Error {
+    match err {
+        Error::FinalizerError(inner) => match inner.as_ref() {
+            kube::runtime::finalizer::Error::ApplyFailed(err)
+            | kube::runtime::finalizer::Error::CleanupFailed(err) => root_cause(err),
+            _ => err,
+        },
+        err => err,
+    }
+}
+
+fn error_policy<K, C>(_rs: Arc<K>, err: &Error, _ctx: C) -> Action {
+    match root_cause(err) {
+        // A drain knows its own deadline; the blanket interval would make a short
+        // drainDelaySeconds cost up to 30s per version anyway.
+        Error::DeploymentDraining {
+            requeue_after: Some(requeue_after),
+        } => Action::requeue(*requeue_after),
+        _ => Action::requeue(Duration::from_secs(30)),
+    }
 }
 
 impl RestateDeployment {
@@ -432,7 +458,8 @@ impl RestateDeployment {
             )?,
         };
 
-        let mut deployments = self.list_deployments(&ctx).await?;
+        // this path only runs for a live RestateDeployment; deletion goes to `cleanup`.
+        let mut deployments = self.list_deployments(&ctx, CleanupMode::Rollout).await?;
 
         let existing_deployment_id = replicaset
             .annotations()
@@ -442,8 +469,7 @@ impl RestateDeployment {
         if existing_deployment_id.is_none_or(|existing_deployment_id| {
             !deployments
                 .get(existing_deployment_id)
-                .cloned()
-                .unwrap_or_default()
+                .is_some_and(|usage| usage.is_active(CleanupMode::Rollout))
         }) {
             let valid = async {
                 if let Some(cluster_name) = &self.spec.restate.register.cluster {
@@ -496,7 +522,13 @@ impl RestateDeployment {
                 .await?;
             // if registration succeeded, treat this as an active endpoint
             // if we fail after this point we will re-register and should get the same deployment id
-            deployments.insert(deployment_id.clone(), true);
+            deployments.insert(
+                deployment_id.clone(),
+                DeploymentUsage {
+                    latest_for_service: true,
+                    ..Default::default()
+                },
+            );
 
             debug!(
                 "Updating deployment-id annotation of ReplicaSet/Service {versioned_name} in namespace {namespace}"
@@ -940,23 +972,47 @@ impl RestateDeployment {
         Ok(resp.id)
     }
 
-    pub(super) async fn list_deployments(&self, ctx: &Context) -> Result<HashMap<String, bool>> {
-        // This query finds deployments, noting those that are the latest for a particular service, or have an active invocation
-        let sql_query = r#"
-            WITH active_deployments AS (
-                SELECT DISTINCT deployment_id as id
+    pub(super) async fn list_deployments(
+        &self,
+        ctx: &Context,
+        mode: CleanupMode,
+    ) -> Result<DeploymentUsageMap> {
+        // The unpinned count is attributed through `sys_service.deployment_id`, the same
+        // column that sets `latest_for_service`, so a non-zero count implies that flag.
+        let count_unpinned = if mode.is_deleting() { "1 = 1" } else { "1 = 0" };
+
+        let sql_query = format!(
+            r#"
+            WITH latest AS (
+                SELECT DISTINCT deployment_id AS id
                 FROM sys_service
                 WHERE deployment_id IS NOT NULL
-                UNION
-                SELECT DISTINCT pinned_deployment_id as id
+            ),
+            pinned AS (
+                SELECT pinned_deployment_id AS id, COUNT(*) AS n
                 FROM sys_invocation_status
                 WHERE pinned_deployment_id IS NOT NULL AND status != 'completed'
+                GROUP BY pinned_deployment_id
+            ),
+            unpinned AS (
+                SELECT s.deployment_id AS id, COUNT(*) AS n
+                FROM sys_invocation_status i
+                JOIN sys_service s ON s.name = i.target_service_name
+                WHERE {count_unpinned}
+                  AND i.pinned_deployment_id IS NULL
+                  AND i.status != 'completed'
+                GROUP BY s.deployment_id
             )
-            SELECT d.id as deployment_id,
-                   a.id IS NOT NULL as active
+            SELECT d.id AS deployment_id,
+                   l.id IS NOT NULL AS latest_for_service,
+                   COALESCE(p.n, 0) AS pinned_invocations,
+                   COALESCE(u.n, 0) AS unpinned_invocations
             FROM sys_deployment d
-            LEFT JOIN active_deployments a ON d.id = a.id;
-        "#;
+            LEFT JOIN latest l ON d.id = l.id
+            LEFT JOIN pinned p ON d.id = p.id
+            LEFT JOIN unpinned u ON d.id = u.id;
+        "#
+        );
 
         #[derive(Deserialize)]
         struct DeploymentQueryResult {
@@ -966,7 +1022,9 @@ impl RestateDeployment {
         #[derive(Deserialize)]
         struct DeploymentQueryResultRow {
             deployment_id: String,
-            active: bool,
+            latest_for_service: bool,
+            pinned_invocations: i64,
+            unpinned_invocations: i64,
         }
 
         let resp = ctx
@@ -984,19 +1042,25 @@ impl RestateDeployment {
             .await
             .map_err(Error::AdminCallFailed)?;
 
-        let mut endpoints = HashMap::with_capacity(response.rows.len());
+        let mut endpoints: DeploymentUsageMap = HashMap::with_capacity(response.rows.len());
 
         for row in response.rows {
+            let usage = DeploymentUsage {
+                latest_for_service: row.latest_for_service,
+                pinned_invocations: row.pinned_invocations.max(0) as u64,
+                unpinned_invocations: row.unpinned_invocations.max(0) as u64,
+            };
+
             match endpoints.entry(row.deployment_id) {
                 std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    // two rows with same deployment id shouldnt happen...
-                    // we treat the deployment as active if any row is active
-                    if !entry.get() {
-                        entry.insert(row.active);
-                    }
+                    // two rows for one deployment id shouldnt happen: `latest` is DISTINCT,
+                    // `pinned`/`unpinned` are grouped, sys_deployment holds one row per id,
+                    // and all three are LEFT JOINed. we take the most conservative view of
+                    // each fact if a future query shape ever does produce duplicates.
+                    entry.get_mut().merge(usage);
                 }
                 std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(row.active);
+                    entry.insert(usage);
                 }
             }
         }
@@ -1038,7 +1102,7 @@ impl RestateDeployment {
             };
         }
 
-        let deployments = self.list_deployments(&ctx).await?;
+        let deployments = self.list_deployments(&ctx, CleanupMode::Deleting).await?;
 
         let my_uid = self.uid().expect("RestateDeployment to have a uid");
 
@@ -1048,7 +1112,7 @@ impl RestateDeployment {
             Some(crate::resources::restatedeployments::DeploymentMode::Knative)
         );
 
-        let (active_count, next_removal) = if is_knative {
+        let (blocking, next_removal) = if is_knative {
             // Knative cleanup path
             reconcilers::knative::cleanup_old_configurations(
                 namespace,
@@ -1073,13 +1137,20 @@ impl RestateDeployment {
             .await?
         };
 
-        if active_count > 0 {
+        if !blocking.is_empty() {
+            let blocked_by = describe_blocking_versions(&blocking);
+
             debug!(
-                "Cannot process deletion of RestateDeployment '{}' from Restate as there are {} active deployments that rely on it",
+                "Cannot process deletion of RestateDeployment '{}' from Restate as {} version(s) still have unfinished invocations: {blocked_by}",
                 self.name_any(),
-                active_count
+                blocking.len(),
             );
-            return Err(Error::DeploymentInUse);
+
+            // Named versions and counts rather than the bare message: `reconcile` publishes
+            // this as a Warning event, and it is the only place a stuck deletion explains
+            // itself. Unpinned work includes scheduled invocations, whose execution time
+            // can be arbitrarily far out, so "wait for it" is not always sound advice.
+            return Err(Error::DeploymentInUse { blocked_by });
         }
 
         if let Some(next_removal) = next_removal {
@@ -1088,7 +1159,10 @@ impl RestateDeployment {
                 self.name_any()
             );
 
-            let secs_until_next_removal = (next_removal - chrono::Utc::now()).num_seconds().max(0);
+            // Floor at 1s: `num_seconds` truncates, so a deadline under a second away would
+            // otherwise requeue with no delay and spin the reconciler — each turn of which
+            // re-runs the admin query above — until the deadline passes.
+            let secs_until_next_removal = (next_removal - chrono::Utc::now()).num_seconds().max(1);
 
             return Err(Error::DeploymentDraining {
                 requeue_after: Some(Duration::from_secs(secs_until_next_removal as u64)),
@@ -1421,6 +1495,43 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// `reconcile` hands every error to the error policy wrapped by the finalizer
+    /// machinery, so a policy that matches on the reconciler's own variants only fires if
+    /// it looks through the wrapper first.
+    #[test]
+    fn drain_requeue_survives_the_finalizer_wrapper() {
+        let draining = || Error::DeploymentDraining {
+            requeue_after: Some(Duration::from_secs(7)),
+        };
+
+        let wrapped = Error::FinalizerError(Box::new(
+            kube::runtime::finalizer::Error::CleanupFailed(draining()),
+        ));
+
+        assert_eq!(
+            error_policy(Arc::new(()), &wrapped, ()),
+            Action::requeue(Duration::from_secs(7))
+        );
+        assert_eq!(
+            error_policy(Arc::new(()), &draining(), ()),
+            Action::requeue(Duration::from_secs(7))
+        );
+    }
+
+    #[test]
+    fn unrelated_errors_keep_the_blanket_interval() {
+        let wrapped = Error::FinalizerError(Box::new(
+            kube::runtime::finalizer::Error::CleanupFailed(Error::DeploymentInUse {
+                blocked_by: "greeter-abc123 (1 pinned, 0 unpinned invocations)".into(),
+            }),
+        ));
+
+        assert_eq!(
+            error_policy(Arc::new(()), &wrapped, ()),
+            Action::requeue(Duration::from_secs(30))
+        );
+    }
 
     /// Build a minimal ReplicaSet-mode RestateDeployment for selector tests.
     fn make_rsd(match_labels: Option<&[(&str, &str)]>, image: &str) -> RestateDeployment {

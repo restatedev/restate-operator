@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use k8s_openapi::api::apps::v1::ReplicaSet;
 use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
@@ -15,6 +15,9 @@ use reqwest::Method;
 use serde_json::json;
 use tracing::*;
 
+use crate::controllers::restatedeployment::cleanup::{
+    BlockingVersion, CleanupMode, DeploymentUsageMap, retain_for_rollback,
+};
 use crate::controllers::restatedeployment::controller::{
     APP_MANAGED_BY_LABEL, Context, OWNED_BY_LABEL, RESTATE_DEPLOYMENT_ID_ANNOTATION,
 };
@@ -274,9 +277,9 @@ pub async fn cleanup_old_replicasets(
     rs_api: &Api<ReplicaSet>,
     rsd_uid: &str,
     rsd: &RestateDeployment,
-    deployments: &HashMap<String, bool>,
+    deployments: &DeploymentUsageMap,
     except_rs: Option<&str>,
-) -> Result<(i32, Option<chrono::DateTime<chrono::Utc>>)> {
+) -> Result<(Vec<BlockingVersion>, Option<chrono::DateTime<chrono::Utc>>)> {
     let replicasets_cell = std::cell::Cell::new(Vec::new());
 
     let _ = ctx.replicasets_store.find(|rs| {
@@ -322,13 +325,15 @@ pub async fn cleanup_old_replicasets(
             .cmp(&a.metadata.creation_timestamp)
     });
 
-    // keep track of how many rs there are that are still in-use by restate (active services or invocations)
-    let mut active_count = 0;
+    // keep track of the rs that are still in-use by restate (active services or invocations)
+    let mut blocking = Vec::new();
     // Keep track of how many zero-scaled rs there are (for revision history limit)
     let mut historic_count = 0;
     let mut next_removal = None;
 
     let now = chrono::Utc::now();
+
+    let mode = CleanupMode::for_rsd(rsd);
 
     for rs in replicasets {
         let rs_name = rs.name_any();
@@ -337,12 +342,14 @@ pub async fn cleanup_old_replicasets(
 
         // Skip active deployments
         let deployment = rs_deployment_id
-            .and_then(|rs_deployment_id| deployments.get(rs_deployment_id).cloned());
+            .and_then(|rs_deployment_id| deployments.get(rs_deployment_id).copied());
         let deployment_exists = deployment.is_some();
-        let deployment_active = deployment.unwrap_or(false);
 
-        if deployment_active {
-            active_count += 1;
+        if let Some(usage) = deployment.filter(|usage| usage.is_active(mode)) {
+            blocking.push(BlockingVersion {
+                name: rs_name.clone(),
+                usage,
+            });
 
             // Per-version autoscaling: a non-latest version has an operator HPA
             // iff it is still active and autoscaling is configured. (See
@@ -456,19 +463,6 @@ pub async fn cleanup_old_replicasets(
             continue;
         }
 
-        // Non-active version: remove any operator HPA before scaling it down. Its
-        // minReplicas floor (>= 1) would otherwise fight the operator scaling the
-        // ReplicaSet to zero, and would hold the version at the floor through the
-        // revision-history retention window. Gate on the owned-HPA cache so we
-        // only call the API when an HPA actually exists (avoids a wasted delete
-        // per inactive ReplicaSet on every reconcile); this still fires whenever
-        // an HPA is present, including during RestateDeployment deletion, so
-        // teardown is never contended.
-        let hpa_ref = ObjectRef::<HorizontalPodAutoscaler>::new(&rs_name).within(namespace);
-        if ctx.hpa_store.get(&hpa_ref).is_some() {
-            super::autoscaling::delete_version_hpa(&ctx.client, namespace, &rs_name).await?;
-        }
-
         let current_remove_at = rs
             .annotations()
             .get(RESTATE_REMOVE_VERSION_AT_ANNOTATION)
@@ -487,6 +481,16 @@ pub async fn cleanup_old_replicasets(
         ) {
             (_, true, _) | (_, _, false) => {
                 // we are past the remove at time, or the endpoint was removed by other means; can now scale it down
+
+                // Remove any operator HPA first: its minReplicas floor (>= 1) would fight
+                // the scale to zero below, and would hold the version at the floor through
+                // the revision-history retention window. Gate on the owned-HPA cache so we
+                // only call the API when an HPA actually exists.
+                let hpa_ref = ObjectRef::<HorizontalPodAutoscaler>::new(&rs_name).within(namespace);
+                if ctx.hpa_store.get(&hpa_ref).is_some() {
+                    super::autoscaling::delete_version_hpa(&ctx.client, namespace, &rs_name)
+                        .await?;
+                }
 
                 // If this version has active pods, scale it down to 0 first
                 if rs
@@ -516,7 +520,7 @@ pub async fn cleanup_old_replicasets(
                 }
 
                 // If we are here, there is a 0 sized replicaset which should be subject to the history limit
-                if historic_count < rsd.spec.revision_history_limit {
+                if retain_for_rollback(mode, historic_count, rsd.spec.revision_history_limit) {
                     historic_count += 1;
                     // we haven't hit that limit yet, so we don't need to delete this rs
                     continue;
@@ -606,7 +610,7 @@ pub async fn cleanup_old_replicasets(
 
     // If there are active old deployments still draining but no removal is yet scheduled,
     // requeue on a short poll interval to detect drain completion promptly.
-    if active_count > 0 && next_removal.is_none() {
+    if !blocking.is_empty() && next_removal.is_none() {
         let poll_seconds = 10;
         next_removal = Some(
             chrono::Utc::now()
@@ -615,7 +619,7 @@ pub async fn cleanup_old_replicasets(
         );
     }
 
-    Ok((active_count, next_removal))
+    Ok((blocking, next_removal))
 }
 
 #[cfg(test)]
