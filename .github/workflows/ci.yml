@@ -34,6 +34,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-targets
 
+  query-e2e:
+    name: Deployment-usage query E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Install protoc
+        uses: restatedev/restate/.github/actions/install-protoc@main
+      - uses: Swatinem/rust-cache@v2
+      # These fixtures use real, digest-pinned Restate servers. Keep the query contract
+      # separate from the kind rollback suite: it validates external system-table semantics.
+      - name: Run deployment-usage query compatibility tests
+        run: cargo test --lib controllers::restatedeployment::e2e -- --ignored --nocapture --test-threads=1
+
   build-image:
     name: Build release Docker image
     runs-on: ubuntu-latest
