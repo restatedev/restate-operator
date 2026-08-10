@@ -16,7 +16,8 @@ use serde_json::json;
 use tracing::*;
 
 use crate::controllers::restatedeployment::controller::{
-    APP_MANAGED_BY_LABEL, Context, OWNED_BY_LABEL, RESTATE_DEPLOYMENT_ID_ANNOTATION,
+    APP_MANAGED_BY_LABEL, Context, DeploymentState, OWNED_BY_LABEL,
+    RESTATE_DEPLOYMENT_ID_ANNOTATION,
 };
 use crate::resources::restatecloudenvironments::InProcessTunnelParams;
 use crate::resources::restatedeployments::RestateDeployment;
@@ -274,7 +275,7 @@ pub async fn cleanup_old_replicasets(
     rs_api: &Api<ReplicaSet>,
     rsd_uid: &str,
     rsd: &RestateDeployment,
-    deployments: &HashMap<String, bool>,
+    deployments: &HashMap<String, DeploymentState>,
     except_rs: Option<&str>,
 ) -> Result<(i32, Option<chrono::DateTime<chrono::Utc>>)> {
     let replicasets_cell = std::cell::Cell::new(Vec::new());
@@ -339,7 +340,7 @@ pub async fn cleanup_old_replicasets(
         let deployment = rs_deployment_id
             .and_then(|rs_deployment_id| deployments.get(rs_deployment_id).cloned());
         let deployment_exists = deployment.is_some();
-        let deployment_active = deployment.unwrap_or(false);
+        let deployment_active = deployment.is_some_and(|state| state.active);
 
         if deployment_active {
             active_count += 1;
