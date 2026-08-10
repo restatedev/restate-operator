@@ -9,7 +9,6 @@ use k8s_openapi::api::apps::v1::{ReplicaSet, ReplicaSetStatus};
 use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
 use k8s_openapi::api::core::v1::{Secret, Service};
 
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
 use kube::api::{Api, ObjectMeta, PartialObjectMetaExt, Patch, PatchParams, ResourceExt};
 use kube::client::Client;
 use kube::core::Selector;
@@ -26,7 +25,6 @@ use kube::runtime::{
 use kube::Resource;
 use reqwest::Method;
 use serde::Deserialize;
-use serde_json::json;
 use tokio::sync::RwLock;
 use tracing::*;
 use url::Url;
@@ -39,17 +37,17 @@ use crate::resources::knative::{Configuration, Revision, Route};
 use crate::resources::restatecloudenvironments::{InProcessTunnelParams, RestateCloudEnvironment};
 use crate::resources::restateclusters::RestateCluster;
 use crate::resources::restatedeployments::{
-    RESTATE_DEPLOYMENT_FINALIZER, RestateAdminEndpoint, RestateDeployment,
-    RestateDeploymentCondition, RestateDeploymentStatus,
+    RESTATE_DEPLOYMENT_FINALIZER, RestateAdminEndpoint, RestateDeployment, RestateDeploymentStatus,
 };
 use crate::telemetry;
 use crate::{Error, Result};
 
 // Import our reconcilers
 use crate::controllers::restatedeployment::cleanup::{
-    CleanupMode, DeploymentUsage, DeploymentUsageMap, describe_blocking_versions,
+    BlockingVersion, CleanupMode, DeploymentUsage, DeploymentUsageMap, describe_blocking_versions,
 };
 use crate::controllers::restatedeployment::reconcilers;
+use crate::controllers::restatedeployment::status;
 
 use super::reconcilers::replicaset::{
     POD_TEMPLATE_HASH_LABEL, RESTATE_POD_TEMPLATE_ANNOTATION, RESTATE_TUNNEL_NAME_ANNOTATION,
@@ -263,7 +261,11 @@ impl RestateDeployment {
         &self,
         ctx: Arc<Context>,
         namespace: &str,
-    ) -> Result<(ReplicaSet, Option<chrono::DateTime<chrono::Utc>>)> {
+    ) -> Result<(
+        ReplicaSet,
+        Vec<BlockingVersion>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    )> {
         let rsc_api: Api<RestateCluster> = Api::all(ctx.client.clone());
         let rs_api = Api::<ReplicaSet>::namespaced(ctx.client.clone(), namespace);
         let svc_api = Api::<Service>::namespaced(ctx.client.clone(), namespace);
@@ -560,7 +562,7 @@ impl RestateDeployment {
 
         // Clean up old ReplicaSets that are no longer needed
 
-        let (_, next_removal) = reconcilers::replicaset::cleanup_old_replicasets(
+        let (draining, next_removal) = reconcilers::replicaset::cleanup_old_replicasets(
             namespace,
             &ctx,
             &rs_api,
@@ -571,7 +573,7 @@ impl RestateDeployment {
         )
         .await?;
 
-        Ok((replicaset, next_removal))
+        Ok((replicaset, draining, next_removal))
     }
 
     async fn reconcile_status(&self, ctx: Arc<Context>, namespace: &str) -> Result<Action> {
@@ -594,11 +596,7 @@ impl RestateDeployment {
         let mut rsd_status = self.status.clone().unwrap_or_default();
 
         // Build ready condition based on current state
-        let existing_ready = self
-            .status
-            .as_ref()
-            .and_then(|s| s.conditions.as_ref())
-            .and_then(|c| c.iter().find(|cond| cond.r#type == "Ready"));
+        let existing_ready = status::existing_ready(self.status.as_ref());
 
         let (result, message, reason, status) = if is_knative {
             // Delegate to Knative reconciler
@@ -740,7 +738,7 @@ impl RestateDeployment {
         } else {
             // ReplicaSet mode
             match self.reconcile(ctx.clone(), namespace).await {
-                Ok((current_replicaset, next_removal)) => {
+                Ok((current_replicaset, draining, next_removal)) => {
                     let action = match next_removal {
                         Some(next_removal) if next_removal < now => Action::requeue(Duration::ZERO), // immediate requeue
                         Some(next_removal) => {
@@ -759,6 +757,9 @@ impl RestateDeployment {
                         &mut rsd_status,
                         current_replicaset.status.as_ref(),
                     );
+
+                    rsd_status.draining_versions =
+                        status::draining_versions(&draining, CleanupMode::Rollout);
 
                     if let Some(id) = current_replicaset
                         .annotations()
@@ -875,23 +876,13 @@ impl RestateDeployment {
                 .await?;
         }
 
-        let last_transition_time = if existing_ready.is_none_or(|r| r.status != status) {
-            Time(now)
-        } else {
-            existing_ready
-                .and_then(|r| r.last_transition_time.clone())
-                .unwrap_or(Time(now))
-        };
-
-        let ready_condition = RestateDeploymentCondition {
-            last_transition_time: Some(last_transition_time),
-            message: Some(message),
-            reason: Some(reason),
+        rsd_status.conditions = Some(vec![status::ready_condition(
+            existing_ready,
             status,
-            r#type: "Ready".into(),
-        };
-
-        rsd_status.conditions = Some(vec![ready_condition]);
+            reason,
+            message,
+            now,
+        )]);
 
         // Only set labelSelector for ReplicaSet mode (Knative manages pods directly)
         if !is_knative {
@@ -906,21 +897,11 @@ impl RestateDeployment {
         }
         rsd_status.observed_generation = self.metadata.generation;
 
-        // Create the status update
-        let new_status = json!({
-            "apiVersion": RestateDeployment::api_version(&()),
-            "kind": RestateDeployment::kind(&()),
-            "status": rsd_status,
-        });
-
         let name = self.name_any();
 
         debug!("Updating status of RestateDeployment {name} in namespace {namespace}");
 
-        let ps = PatchParams::apply("restate-operator").force();
-        let _o = rsd_api
-            .patch_status(&name, &ps, &Patch::Apply(new_status))
-            .await?;
+        status::patch(&rsd_api, &name, &rsd_status).await?;
 
         result
     }
@@ -1137,6 +1118,18 @@ impl RestateDeployment {
             .await?
         };
 
+        if let Err(err) = self
+            .report_termination(&ctx, namespace, &blocking, next_removal)
+            .await
+        {
+            // Best-effort: the deletion is correctly blocked either way, and the errors
+            // below still carry the same account into a Warning event.
+            warn!(
+                "Failed to publish termination status of RestateDeployment '{}' in namespace {namespace}: {err}",
+                self.name_any(),
+            );
+        }
+
         if !blocking.is_empty() {
             let blocked_by = describe_blocking_versions(&blocking);
 
@@ -1170,6 +1163,41 @@ impl RestateDeployment {
         }
 
         Ok(Action::await_change())
+    }
+
+    /// Publish why the finalizer is still holding.
+    ///
+    /// Deletion never reaches `reconcile_status`, so without this the last status the
+    /// object carries is the one from before the delete was requested — and the only
+    /// account of a pending deletion is a Warning event, which expires and which
+    /// `kubectl get` does not read. The wait itself is unbounded (a scheduled invocation
+    /// can be days out), so it has to be legible for as long as it lasts.
+    async fn report_termination(
+        &self,
+        ctx: &Context,
+        namespace: &str,
+        blocking: &[BlockingVersion],
+        next_removal: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<()> {
+        let Some(termination) = status::termination_status(blocking, next_removal) else {
+            // nothing is holding the deletion; the object is about to go away
+            return Ok(());
+        };
+
+        let draining = status::draining_versions(blocking, CleanupMode::Deleting);
+        if status::is_current(self, &termination, &draining) {
+            return Ok(());
+        }
+
+        let new_status =
+            status::terminating_status(self, termination, draining, chrono::Utc::now());
+
+        status::patch(
+            &Api::namespaced(ctx.client.clone(), namespace),
+            &self.name_any(),
+            &new_status,
+        )
+        .await
     }
 }
 

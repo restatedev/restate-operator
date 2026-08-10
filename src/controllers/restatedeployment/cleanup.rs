@@ -66,6 +66,9 @@ impl DeploymentUsage {
 pub(crate) struct BlockingVersion {
     /// The ReplicaSet or Configuration name.
     pub name: String,
+    /// The Restate deployment the version is registered as, so status readers can go
+    /// straight to `restate invocations list --deployment <id>`.
+    pub deployment_id: Option<String>,
     pub usage: DeploymentUsage,
 }
 
@@ -74,7 +77,7 @@ pub(crate) struct BlockingVersion {
 pub(crate) fn describe_blocking_versions(blocking: &[BlockingVersion]) -> String {
     blocking
         .iter()
-        .map(|BlockingVersion { name, usage }| {
+        .map(|BlockingVersion { name, usage, .. }| {
             format!(
                 "{name} ({} pinned, {} unpinned invocations)",
                 usage.pinned_invocations, usage.unpinned_invocations
@@ -167,10 +170,12 @@ mod tests {
         let described = describe_blocking_versions(&[
             BlockingVersion {
                 name: "greeter-abc123".into(),
+                deployment_id: Some("dp_abc".into()),
                 usage: usage(true, 2, 0),
             },
             BlockingVersion {
                 name: "greeter-def456".into(),
+                deployment_id: Some("dp_def".into()),
                 usage: usage(false, 0, 7),
             },
         ]);

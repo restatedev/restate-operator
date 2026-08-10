@@ -15,6 +15,7 @@ use crate::controllers::restatedeployment::controller::{
     Context, RESTATE_DEPLOYMENT_ID_ANNOTATION,
 };
 use crate::controllers::restatedeployment::reconcilers::replicaset::generate_pod_template_hash;
+use crate::controllers::restatedeployment::status::draining_versions;
 use crate::resources::knative::{
     Configuration, ConfigurationTemplateMetadata, ConfigurationTemplateSpec,
     ConfigurationTemplateSpecContainers, Revision, Route, RouteSpec, RouteTraffic,
@@ -229,8 +230,10 @@ pub async fn reconcile_knative(
         .uid()
         .ok_or_else(|| Error::InvalidRestateConfig("RestateDeployment must have UID".into()))?;
 
-    let (_, next_removal) =
+    let (draining, next_removal) =
         cleanup_old_configurations(namespace, ctx, &rsd_uid, rsd, &deployments, Some(&tag)).await?;
+
+    status.draining_versions = draining_versions(&draining, CleanupMode::Rollout);
 
     Ok(next_removal)
 }
@@ -832,6 +835,7 @@ pub async fn cleanup_old_configurations(
         if let Some(usage) = deployment.filter(|usage| usage.is_active(mode)) {
             blocking.push(BlockingVersion {
                 name: config_name.clone(),
+                deployment_id: config_deployment_id.cloned(),
                 usage,
             });
 

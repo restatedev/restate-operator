@@ -106,7 +106,9 @@ pub struct KnativeDeploymentSpec {
     printcolumn = r#"{"name":"Deployment ID", "type":"string", "jsonPath":".status.deploymentId", "priority": 1}"#,
     printcolumn = r#"{"name":"Containers", "type":"string", "jsonPath":".spec.template.spec.containers[*].name", "priority": 1}"#,
     printcolumn = r#"{"name":"Images", "type":"string", "jsonPath":".spec.template.spec.containers[*].image", "priority": 1}"#,
-    printcolumn = r#"{"name":"Selector", "type":"string", "jsonPath":".status.labelSelector", "priority": 1}"#
+    printcolumn = r#"{"name":"Selector", "type":"string", "jsonPath":".status.labelSelector", "priority": 1}"#,
+    printcolumn = r#"{"name":"Terminating", "type":"string", "jsonPath":".status.terminating.reason", "priority": 1}"#,
+    printcolumn = r#"{"name":"Pending Invocations", "type":"integer", "jsonPath":".status.terminating.pendingInvocations", "priority": 1}"#
 )]
 #[kube(status = "RestateDeploymentStatus", shortname = "rsd")]
 #[serde(rename_all = "camelCase")]
@@ -581,6 +583,65 @@ pub struct RestateDeploymentStatus {
     /// The label selector of the RestateDeployment as a string, for `kubectl get rsd -o wide`
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label_selector: Option<String>,
+
+    /// Superseded versions the operator is keeping because Restate still needs them.
+    /// Unset once every old version has drained.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub draining_versions: Option<Vec<DrainingVersion>>,
+
+    /// Why deletion has not completed yet. Only set while the RestateDeployment is
+    /// terminating and its finalizer is still held.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminating: Option<TerminationStatus>,
+}
+
+/// A version (ReplicaSet in replicaset mode, Configuration in knative mode) that the
+/// operator cannot remove yet because Restate still has work for it
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DrainingVersion {
+    /// Name of the ReplicaSet or Configuration backing this version
+    pub name: String,
+
+    /// The Restate deployment ID this version is registered as
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployment_id: Option<String>,
+
+    /// Whether a Restate service still resolves to this version. This holds a version
+    /// through a rollout, but not through a deletion — nothing is coming to supersede
+    /// an endpoint that is going away.
+    pub latest_for_service: bool,
+
+    /// Unfinished invocations pinned to this version
+    pub pinned_invocations: i64,
+
+    /// Unfinished invocations targeting a service that resolves to this version but not
+    /// yet pinned to any deployment — paused, queued and scheduled work. Only counted
+    /// while terminating, and unset otherwise: outside a deletion these cannot change
+    /// the outcome, so the operator does not ask Restate for them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unpinned_invocations: Option<i64>,
+}
+
+/// Why deletion of a RestateDeployment is still pending
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminationStatus {
+    /// Machine-readable cause: `WaitingForInvocations` or `WaitingForDrainDelay`
+    pub reason: String,
+
+    /// Human-readable explanation of what the finalizer is waiting for
+    pub message: String,
+
+    /// Unfinished invocations that must complete before the deployment can be
+    /// deregistered, summed over `drainingVersions`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_invocations: Option<i64>,
+
+    /// When the drain delay elapses for the version holding the deletion, after which
+    /// it is deregistered and torn down
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drain_completes_at: Option<k8s_openapi::apimachinery::pkg::apis::meta::v1::Time>,
 }
 
 /// Knative deployment status

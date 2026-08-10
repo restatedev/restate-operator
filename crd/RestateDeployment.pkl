@@ -192,6 +192,10 @@ class Status {
   /// reflects revision.status.desired_replicas from latest revision
   desiredReplicas: Int?
 
+  /// Superseded versions the operator is keeping because Restate still needs them. Unset once every old
+  /// version has drained.
+  drainingVersions: Listing<DrainingVersion>?
+
   /// Knative-specific status
   knative: StatusKnative?
 
@@ -206,6 +210,10 @@ class Status {
 
   /// Total number of updated non-terminated pods targeted by this RestateDeployment
   replicas: Int
+
+  /// Why deletion has not completed yet. Only set while the RestateDeployment is terminating and its
+  /// finalizer is still held.
+  terminating: Terminating?
 
   /// Total number of updated unavailable pods
   unavailableReplicas: Int?
@@ -229,6 +237,29 @@ class Condition {
   type: String
 }
 
+/// A version (ReplicaSet in replicaset mode, Configuration in knative mode) that the operator cannot
+/// remove yet because Restate still has work for it
+class DrainingVersion {
+  /// The Restate deployment ID this version is registered as
+  deploymentId: String?
+
+  /// Whether a Restate service still resolves to this version. This holds a version through a rollout,
+  /// but not through a deletion — nothing is coming to supersede an endpoint that is going away.
+  latestForService: Boolean
+
+  /// Name of the ReplicaSet or Configuration backing this version
+  name: String
+
+  /// Unfinished invocations pinned to this version
+  pinnedInvocations: Int
+
+  /// Unfinished invocations targeting a service that resolves to this version but not yet pinned to any
+  /// deployment — paused, queued and scheduled work. Only counted while terminating, and unset
+  /// otherwise: outside a deletion these cannot change the outcome, so the operator does not ask Restate
+  /// for them.
+  unpinnedInvocations: Int?
+}
+
 /// Knative-specific status
 class StatusKnative {
   /// Name of the active Configuration for the current tag
@@ -242,4 +273,22 @@ class StatusKnative {
 
   /// Default URL for the current deployment
   url: String?
+}
+
+/// Why deletion has not completed yet. Only set while the RestateDeployment is terminating and its
+/// finalizer is still held.
+class Terminating {
+  /// When the drain delay elapses for the version holding the deletion, after which it is deregistered
+  /// and torn down
+  drainCompletesAt: String?
+
+  /// Human-readable explanation of what the finalizer is waiting for
+  message: String
+
+  /// Unfinished invocations that must complete before the deployment can be deregistered, summed over
+  /// `drainingVersions`
+  pendingInvocations: Int?
+
+  /// Machine-readable cause: `WaitingForInvocations` or `WaitingForDrainDelay`
+  reason: String
 }

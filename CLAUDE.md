@@ -301,6 +301,10 @@ kubectl get restatecluster -A
 # View RestateDeployment status with details
 kubectl get restatedeployment -o wide
 
+# Why a deletion is still pending, and which versions Restate still needs
+kubectl get restatedeployment <name> -o jsonpath='{.status.terminating}'
+kubectl get restatedeployment <name> -o jsonpath='{.status.drainingVersions}'
+
 # Check operator logs
 kubectl logs -n restate-operator -l app=restate-operator
 ```

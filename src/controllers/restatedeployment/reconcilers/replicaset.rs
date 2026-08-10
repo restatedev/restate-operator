@@ -348,6 +348,7 @@ pub async fn cleanup_old_replicasets(
         if let Some(usage) = deployment.filter(|usage| usage.is_active(mode)) {
             blocking.push(BlockingVersion {
                 name: rs_name.clone(),
+                deployment_id: rs_deployment_id.cloned(),
                 usage,
             });
 

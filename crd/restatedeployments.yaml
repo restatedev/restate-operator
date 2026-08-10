@@ -44,6 +44,14 @@ spec:
       name: Selector
       priority: 1
       type: string
+    - jsonPath: .status.terminating.reason
+      name: Terminating
+      priority: 1
+      type: string
+    - jsonPath: .status.terminating.pendingInvocations
+      name: Pending Invocations
+      priority: 1
+      type: integer
     name: v1beta1
     schema:
       openAPIV3Schema:
@@ -395,6 +403,48 @@ spec:
                 format: int32
                 nullable: true
                 type: integer
+              drainingVersions:
+                description: |-
+                  Superseded versions the operator is keeping because Restate still needs them.
+                  Unset once every old version has drained.
+                items:
+                  description: |-
+                    A version (ReplicaSet in replicaset mode, Configuration in knative mode) that the
+                    operator cannot remove yet because Restate still has work for it
+                  properties:
+                    deploymentId:
+                      description: The Restate deployment ID this version is registered as
+                      nullable: true
+                      type: string
+                    latestForService:
+                      description: |-
+                        Whether a Restate service still resolves to this version. This holds a version
+                        through a rollout, but not through a deletion — nothing is coming to supersede
+                        an endpoint that is going away.
+                      type: boolean
+                    name:
+                      description: Name of the ReplicaSet or Configuration backing this version
+                      type: string
+                    pinnedInvocations:
+                      description: Unfinished invocations pinned to this version
+                      format: int64
+                      type: integer
+                    unpinnedInvocations:
+                      description: |-
+                        Unfinished invocations targeting a service that resolves to this version but not
+                        yet pinned to any deployment — paused, queued and scheduled work. Only counted
+                        while terminating, and unset otherwise: outside a deletion these cannot change
+                        the outcome, so the operator does not ask Restate for them.
+                      format: int64
+                      nullable: true
+                      type: integer
+                  required:
+                  - latestForService
+                  - name
+                  - pinnedInvocations
+                  type: object
+                nullable: true
+                type: array
               knative:
                 description: Knative-specific status
                 nullable: true
@@ -434,6 +484,36 @@ spec:
                 description: Total number of updated non-terminated pods targeted by this RestateDeployment
                 format: int32
                 type: integer
+              terminating:
+                description: |-
+                  Why deletion has not completed yet. Only set while the RestateDeployment is
+                  terminating and its finalizer is still held.
+                nullable: true
+                properties:
+                  drainCompletesAt:
+                    description: |-
+                      When the drain delay elapses for the version holding the deletion, after which
+                      it is deregistered and torn down
+                    format: date-time
+                    nullable: true
+                    type: string
+                  message:
+                    description: Human-readable explanation of what the finalizer is waiting for
+                    type: string
+                  pendingInvocations:
+                    description: |-
+                      Unfinished invocations that must complete before the deployment can be
+                      deregistered, summed over `drainingVersions`
+                    format: int64
+                    nullable: true
+                    type: integer
+                  reason:
+                    description: 'Machine-readable cause: `WaitingForInvocations` or `WaitingForDrainDelay`'
+                    type: string
+                required:
+                - message
+                - reason
+                type: object
               unavailableReplicas:
                 description: Total number of updated unavailable pods
                 format: int32
