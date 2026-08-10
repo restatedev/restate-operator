@@ -17,9 +17,11 @@ use url::Url;
 
 use crate::Metrics;
 
+pub mod predicates;
 pub mod restatecloudenvironment;
 pub mod restatecluster;
 pub mod restatedeployment;
+pub mod ssa;
 
 /// How often each controller re-checks for its missing CRD, and how often the aggregate
 /// `WaitingForCRD` event is re-published while any are missing.

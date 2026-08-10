@@ -1,20 +1,17 @@
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use chrono::Utc;
 use futures::StreamExt;
-use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetStatus};
+use k8s_openapi::api::apps::v1::StatefulSet;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{
-    ConfigMap, Namespace, PersistentVolumeClaim, Service, ServiceAccount, ServiceSpec,
+    ConfigMap, Namespace, PersistentVolumeClaim, Service, ServiceAccount,
 };
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::api::policy::v1::PodDisruptionBudget;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{APIGroup, ObjectMeta};
 
 use kube::core::PartialObjectMeta;
-use kube::core::object::HasStatus;
 use kube::runtime::events::Recorder;
 use kube::runtime::reflector::{ObjectRef, Store};
 use kube::runtime::{Predicate, WatchStreamExt, metadata_watcher, reflector, watcher};
@@ -29,11 +26,14 @@ use kube::{
         watcher::Config,
     },
 };
-use serde::Serialize;
 use serde_json::json;
 use tokio::{sync::RwLock, time::Duration};
 use tracing::*;
 
+use crate::controllers::predicates::{
+    changed_predicate, ensure_deletion_change, spec_predicate, spec_predicate_serde,
+    status_predicate, status_predicate_serde,
+};
 use crate::controllers::{
     CrdWait, Diagnostics, ReadinessGate, State, wait_for_api_groups, wait_for_crd,
 };
@@ -609,111 +609,4 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         .filter_map(|x| async move { Result::ok(x) })
         .for_each(|_| futures::future::ready(()))
         .await;
-}
-
-// deletion apparently doesn't lead to any change in metadata otherwise, which means the changed_predicate
-// would drop them.
-fn ensure_deletion_change<K: Resource, E>(
-    mut event: Result<kube::runtime::watcher::Event<K>, E>,
-) -> Result<kube::runtime::watcher::Event<K>, E> {
-    if let Ok(kube::runtime::watcher::Event::Delete(ref mut object)) = event {
-        let meta = object.meta_mut();
-        meta.generation = match meta.generation {
-            Some(val) => Some(val + 1),
-            None => Some(0),
-        }
-    }
-    event
-}
-
-fn changed_predicate<K: Resource>(obj: &K) -> Option<u64> {
-    let mut hasher = DefaultHasher::new();
-    if let Some(g) = obj.meta().generation {
-        // covers spec but not metadata or status
-        g.hash(&mut hasher)
-    }
-    obj.labels().hash(&mut hasher);
-    obj.annotations().hash(&mut hasher);
-    // ignore status
-    Some(hasher.finish())
-}
-
-fn status_predicate<K: Resource + HasStatus>(obj: &K) -> Option<u64>
-where
-    K::Status: Hash,
-{
-    let mut hasher = DefaultHasher::new();
-    if let Some(s) = obj.status() {
-        s.hash(&mut hasher)
-    }
-    Some(hasher.finish())
-}
-
-trait MyHasStatus {
-    type Status;
-
-    fn status(&self) -> Option<&Self::Status>;
-}
-
-impl MyHasStatus for StatefulSet {
-    type Status = StatefulSetStatus;
-
-    fn status(&self) -> Option<&Self::Status> {
-        self.status.as_ref()
-    }
-}
-
-fn status_predicate_serde<K: Resource + MyHasStatus>(obj: &K) -> Option<u64>
-where
-    K::Status: Serialize,
-{
-    let mut hasher = DefaultHasher::new();
-    if let Some(s) = obj.status() {
-        serde_hashkey::to_key(s)
-            .expect("serde_hashkey never to return an error")
-            .hash(&mut hasher);
-    }
-    Some(hasher.finish())
-}
-
-pub trait MyHasSpec {
-    type Spec;
-
-    fn spec(&self) -> &Self::Spec;
-}
-
-impl MyHasSpec for Service {
-    type Spec = Option<ServiceSpec>;
-
-    fn spec(&self) -> &Self::Spec {
-        &self.spec
-    }
-}
-
-impl MyHasSpec for ConfigMap {
-    type Spec = Option<std::collections::BTreeMap<String, String>>;
-
-    fn spec(&self) -> &Self::Spec {
-        &self.data
-    }
-}
-
-fn spec_predicate<K: Resource + MyHasSpec>(obj: &K) -> Option<u64>
-where
-    K::Spec: Hash,
-{
-    let mut hasher = DefaultHasher::new();
-    obj.spec().hash(&mut hasher);
-    Some(hasher.finish())
-}
-
-fn spec_predicate_serde<K: Resource + MyHasSpec>(obj: &K) -> Option<u64>
-where
-    K::Spec: Serialize,
-{
-    let mut hasher = DefaultHasher::new();
-    serde_hashkey::to_key(obj.spec())
-        .expect("serde_hashkey never to return an error")
-        .hash(&mut hasher);
-    Some(hasher.finish())
 }

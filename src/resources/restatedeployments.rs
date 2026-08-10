@@ -536,7 +536,9 @@ pub struct ServiceReference {
 
 /// Status of the RestateDeployment
 /// This is set and managed automatically by the controller
-#[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema)]
+// PartialEq so the controller can spot that the status it just computed is the one already stored,
+// and skip the write. (a doc comment here would end up in the CRD schema)
+#[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RestateDeploymentStatus {
     /// Restate deployment ID for the current tag
@@ -584,7 +586,7 @@ pub struct RestateDeploymentStatus {
 }
 
 /// Knative deployment status
-#[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema)]
+#[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct KnativeDeploymentStatus {
     /// Name of the active Configuration for the current tag

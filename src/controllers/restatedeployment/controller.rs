@@ -31,6 +31,10 @@ use tokio::sync::RwLock;
 use tracing::*;
 use url::Url;
 
+use crate::controllers::predicates::{
+    changed_predicate, ensure_deletion_change, spec_predicate_serde, status_predicate_serde,
+};
+use crate::controllers::ssa;
 use crate::controllers::{
     CrdWait, Diagnostics, ReadinessGate, State, prewarmed_reflector, wait_for_crd,
 };
@@ -53,6 +57,10 @@ use super::reconcilers::replicaset::{
 };
 
 pub(super) const RESTATE_DEPLOYMENT_ID_ANNOTATION: &str = "restate.dev/deployment-id";
+// field managers for the two applies onto an existing ReplicaSet. constants because the
+// need-to-apply check reads back what the manager owns, so the names have to stay in step.
+const PROPAGATE_REPLICAS_MANAGER: &str = "restate-operator/propagate-replicas";
+const PROPAGATE_ANNOTATIONS_MANAGER: &str = "restate-operator/propagate-annotations";
 pub(super) const OWNED_BY_LABEL: &str = "restate.dev/owned-by";
 pub(super) const APP_MANAGED_BY_LABEL: &str = "app.kubernetes.io/managed-by";
 
@@ -73,6 +81,8 @@ pub(super) struct Context {
     pub configuration_store: Store<Configuration>,
     /// Store for operator-managed per-version HorizontalPodAutoscalers
     pub hpa_store: Store<HorizontalPodAutoscaler>,
+    /// Store for operator-managed per-version Services
+    pub services_store: Store<Service>,
     /// The namespace in which this operator runs
     pub operator_namespace: String,
     /// The cluster DNS suffix (e.g. "cluster.local")
@@ -95,6 +105,7 @@ impl Context {
         revision_store: Store<Revision>,
         configuration_store: Store<Configuration>,
         hpa_store: Store<HorizontalPodAutoscaler>,
+        services_store: Store<Service>,
         metrics: Metrics,
         state: State,
     ) -> Arc<Context> {
@@ -107,6 +118,7 @@ impl Context {
             revision_store,
             configuration_store,
             hpa_store,
+            services_store,
             operator_namespace: state.operator_namespace,
             cluster_dns: state.cluster_dns,
             metrics,
@@ -336,33 +348,47 @@ impl RestateDeployment {
                         "Found an existing ReplicaSet {versioned_name} in namespace {namespace}, ensuring it matches the deployment",
                     );
 
-                    // the replicaset already exists, ensure its scaled and annotated appropriately
-                    rs_api
-                        .patch_scale(
-                            &versioned_name,
-                            &PatchParams::apply("restate-operator/propagate-replicas").force(),
-                            &Patch::Apply(serde_json::json!({
-                                "apiVersion": Scale::api_version(&()),
-                                "kind": Scale::kind(&()),
-                                "spec": { "replicas": self.spec.replicas }
-                            })),
-                        )
-                        .await?;
+                    // the replicaset already exists, so pull its scale and annotations back into
+                    // line if they've drifted. only if they have: a no-op apply still bumps
+                    // resourceVersion, and the owned-rs watch turned that straight back into
+                    // another reconcile (#138).
+                    if reconcilers::replicaset::replicas_need_apply(
+                        &existing_replicaset,
+                        self.spec.replicas,
+                    ) {
+                        rs_api
+                            .patch_scale(
+                                &versioned_name,
+                                &PatchParams::apply(PROPAGATE_REPLICAS_MANAGER).force(),
+                                &Patch::Apply(serde_json::json!({
+                                    "apiVersion": Scale::api_version(&()),
+                                    "kind": Scale::kind(&()),
+                                    "spec": { "replicas": self.spec.replicas }
+                                })),
+                            )
+                            .await?;
+                    }
 
-                    rs_api
-                        .patch_metadata(
-                            &versioned_name,
-                            &PatchParams::apply("restate-operator/propagate-annotations").force(),
-                            &Patch::Apply(
-                                ObjectMeta {
-                                    // ensure the base annotations from the rsd are kept up to date
-                                    annotations: Some(annotations.clone()),
-                                    ..Default::default()
-                                }
-                                .into_request_partial::<ReplicaSet>(),
-                            ),
-                        )
-                        .await?;
+                    if ssa::annotations_need_apply(
+                        &existing_replicaset.metadata,
+                        PROPAGATE_ANNOTATIONS_MANAGER,
+                        &annotations,
+                    ) {
+                        rs_api
+                            .patch_metadata(
+                                &versioned_name,
+                                &PatchParams::apply(PROPAGATE_ANNOTATIONS_MANAGER).force(),
+                                &Patch::Apply(
+                                    ObjectMeta {
+                                        // ensure the base annotations from the rsd are kept up to date
+                                        annotations: Some(annotations.clone()),
+                                        ..Default::default()
+                                    }
+                                    .into_request_partial::<ReplicaSet>(),
+                                ),
+                            )
+                            .await?;
+                    }
 
                     existing_replicaset
                 } else {
@@ -407,6 +433,9 @@ impl RestateDeployment {
             service_labels,
             annotations,
             &replicaset,
+            ctx.services_store
+                .get(&ObjectRef::<Service>::new(&versioned_name).within(namespace))
+                .as_deref(),
         )
         .await?;
 
@@ -874,14 +903,22 @@ impl RestateDeployment {
         }
         rsd_status.observed_generation = self.metadata.generation;
 
+        let name = self.name_any();
+
+        // we rebuild the whole status every reconcile, so in a steady state it's normally identical
+        // to what's already stored. writing it anyway was the last per-reconcile write left, and a
+        // long-draining version would keep making it forever (#138).
+        if self.status.as_ref() == Some(&rsd_status) {
+            trace!("Status of RestateDeployment {name} in namespace {namespace} is unchanged");
+            return result;
+        }
+
         // Create the status update
         let new_status = json!({
             "apiVersion": RestateDeployment::api_version(&()),
             "kind": RestateDeployment::kind(&()),
             "status": rsd_status,
         });
-
-        let name = self.name_any();
 
         debug!("Updating status of RestateDeployment {name} in namespace {namespace}");
 
@@ -1276,13 +1313,20 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     // but restatedeployment, restatecloudenvironments, secrets dont
     let not_created_cfg = Config::default();
 
+    // predicates go after `reflector(...)` so the stores still see every event; the filtering is
+    // only about what re-triggers a reconcile. without them we react to the resourceVersion bumps
+    // our own writes produce, and busy-loop on anything with a draining version (#138).
     let (replicasets_store, replicasets_writer) = kube::runtime::reflector::store();
     let replicaset_reflector = kube::runtime::reflector(
         replicasets_writer,
         kube::runtime::watcher(replicasets, cfg.clone()),
     )
+    .map(ensure_deletion_change)
     .touched_objects()
-    .default_backoff();
+    .default_backoff()
+    // status is in the hash because registration waits on the ReplicaSet becoming ready, and
+    // the RestateDeployment status mirrors its replica counts
+    .predicate_filter(changed_predicate.combine(status_predicate_serde));
 
     // A reflector (rather than `.owns(...)`) also gives a queryable cache, so we can
     // check whether a draining version still has an HPA before issuing a delete —
@@ -1290,8 +1334,24 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     let (hpa_store, hpa_writer) = kube::runtime::reflector::store();
     let hpa_reflector =
         kube::runtime::reflector(hpa_writer, kube::runtime::watcher(hpas, cfg.clone()))
+            .map(ensure_deletion_change)
             .touched_objects()
-            .default_backoff();
+            .default_backoff()
+            // an HPA's status churns every scrape interval, and nothing reads it: the store is
+            // only consulted for existence
+            .predicate_filter(changed_predicate);
+
+    // a stream rather than `.owns(...)` so this can be filtered too. services have no generation,
+    // so hash the spec instead. the store is also what lets us skip a no-op service apply.
+    let (services_store, services_writer) = kube::runtime::reflector::store();
+    let svc_reflector = kube::runtime::reflector(
+        services_writer,
+        kube::runtime::watcher(services, cfg.clone()),
+    )
+    .map(ensure_deletion_change)
+    .touched_objects()
+    .default_backoff()
+    .predicate_filter(changed_predicate.combine(spec_predicate_serde));
 
     let (rce_store, rce_writer) = kube::runtime::reflector::store();
     let rce_reflector = kube::runtime::reflector(
@@ -1329,6 +1389,11 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     // Use deployments_reflector with generation predicate to filter out status-only changes
     let mut controller =
         controller::Controller::for_stream(deployments_reflector, deployments_store)
+            .with_config(
+                // belt and braces; the predicates and the diff-before-write are the actual fix.
+                // this just bounds the damage if some future write reintroduces a feedback edge.
+                controller::Config::default().debounce(Duration::from_millis(500)),
+            )
             .shutdown_on_signal()
             .owns_stream(replicaset_reflector);
 
@@ -1395,7 +1460,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         // just so that these get polled; we have no way to figure out which rsd may use the updated rce or secret
         .watches_stream(rce_reflector, |_| std::iter::empty())
         .watches_stream(secret_reflector, |_| std::iter::empty())
-        .owns(services, cfg.clone())
+        .owns_stream(svc_reflector)
         .owns_stream(hpa_reflector)
         .run(
             reconcile,
@@ -1408,6 +1473,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
                 revision_store,
                 configuration_store,
                 hpa_store,
+                services_store,
                 metrics,
                 state,
             ),

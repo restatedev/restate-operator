@@ -189,6 +189,23 @@ fn inject_in_process_tunnel_env(
     Ok(spec)
 }
 
+/// How often to poll a still-active old version to see whether it has drained.
+///
+/// A tenth of the drain delay, so we add at most ~10% to a removal that is already delayed on
+/// purpose. Clamped so `drainDelaySeconds: 0` still polls promptly and a huge one keeps polling.
+fn drain_poll_seconds(drain_delay_seconds: i64) -> i64 {
+    (drain_delay_seconds / 10).clamp(10, 60)
+}
+
+/// Whether `spec.replicas` on an existing ReplicaSet actually needs writing.
+///
+/// Otherwise we re-apply the scale subresource every reconcile, and that apply appears to bump
+/// resourceVersion even when nothing changes, which the owned-rs watch turned into another
+/// reconcile (#138).
+pub fn replicas_need_apply(rs: &ReplicaSet, desired: i32) -> bool {
+    rs.spec.as_ref().and_then(|spec| spec.replicas) != Some(desired)
+}
+
 pub fn pod_template_annotation(rs: &RestateDeployment) -> String {
     serde_json::to_string(&rs.spec.template).expect("PodTemplateSpec to serialize")
 }
@@ -604,13 +621,17 @@ pub async fn cleanup_old_replicasets(
         }
     }
 
-    // If there are active old deployments still draining but no removal is yet scheduled,
-    // requeue on a short poll interval to detect drain completion promptly.
+    // active old deployments still draining, but nothing scheduled for removal yet: requeue on a
+    // poll so we notice when they do drain. a version can stay pinned for days (invocations
+    // suspended on an awakeable) and this poll is the only reason such an object keeps reconciling
+    // at all, so scale it with the drain delay rather than fixing it. we wait drainDelaySeconds
+    // after noticing anyway, so polling much finer than that only buys apiserver traffic.
     if active_count > 0 && next_removal.is_none() {
-        let poll_seconds = 10;
         next_removal = Some(
             chrono::Utc::now()
-                .checked_add_signed(chrono::TimeDelta::seconds(poll_seconds))
+                .checked_add_signed(chrono::TimeDelta::seconds(drain_poll_seconds(
+                    rsd.spec.restate.drain_delay_seconds(),
+                )))
                 .expect("next_removal in bounds"),
         );
     }
@@ -663,6 +684,35 @@ mod tests {
             region: "us".into(),
             signing_public_key: "publickeyv1_abc".into(),
         }
+    }
+
+    // the scale apply is the prime suspect for the resourceVersion churn in #138, so the common
+    // case, replicas already correct, must not issue it
+    #[test]
+    fn replicas_only_need_applying_when_they_differ() {
+        let mut rs = ReplicaSet::default();
+        assert!(
+            replicas_need_apply(&rs, 1),
+            "a ReplicaSet with no spec has nothing to compare against, so apply"
+        );
+
+        rs.spec = Some(k8s_openapi::api::apps::v1::ReplicaSetSpec {
+            replicas: Some(3),
+            ..Default::default()
+        });
+        assert!(!replicas_need_apply(&rs, 3));
+        assert!(replicas_need_apply(&rs, 4));
+    }
+
+    #[test]
+    fn drain_poll_scales_with_the_drain_delay_within_bounds() {
+        // default 5 minute drain delay: 30s of extra latency on a wait that's already 300s
+        assert_eq!(drain_poll_seconds(300), 30);
+        // no configured delay still polls promptly
+        assert_eq!(drain_poll_seconds(0), 10);
+        assert_eq!(drain_poll_seconds(60), 10);
+        // and a very long one keeps polling
+        assert_eq!(drain_poll_seconds(86_400), 60);
     }
 
     #[test]
