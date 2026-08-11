@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use k8s_openapi::api::apps::v1::ReplicaSet;
 use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
@@ -15,6 +15,9 @@ use reqwest::Method;
 use serde_json::json;
 use tracing::*;
 
+use crate::controllers::restatedeployment::cleanup::{
+    BlockingVersion, CleanupMode, DeploymentUsageMap, retain_for_rollback,
+};
 use crate::controllers::restatedeployment::controller::{
     APP_MANAGED_BY_LABEL, Context, OWNED_BY_LABEL, RESTATE_DEPLOYMENT_ID_ANNOTATION,
 };
@@ -274,9 +277,9 @@ pub async fn cleanup_old_replicasets(
     rs_api: &Api<ReplicaSet>,
     rsd_uid: &str,
     rsd: &RestateDeployment,
-    deployments: &HashMap<String, bool>,
+    deployments: &DeploymentUsageMap,
     except_rs: Option<&str>,
-) -> Result<(i32, Option<chrono::DateTime<chrono::Utc>>)> {
+) -> Result<(Vec<BlockingVersion>, Option<chrono::DateTime<chrono::Utc>>)> {
     let replicasets_cell = std::cell::Cell::new(Vec::new());
 
     let _ = ctx.replicasets_store.find(|rs| {
@@ -322,13 +325,15 @@ pub async fn cleanup_old_replicasets(
             .cmp(&a.metadata.creation_timestamp)
     });
 
-    // keep track of how many rs there are that are still in-use by restate (active services or invocations)
-    let mut active_count = 0;
+    // keep track of the rs that are still in-use by restate (active services or invocations)
+    let mut blocking = Vec::new();
     // Keep track of how many zero-scaled rs there are (for revision history limit)
     let mut historic_count = 0;
     let mut next_removal = None;
 
     let now = chrono::Utc::now();
+
+    let mode = CleanupMode::for_rsd(rsd);
 
     for rs in replicasets {
         let rs_name = rs.name_any();
@@ -337,12 +342,14 @@ pub async fn cleanup_old_replicasets(
 
         // Skip active deployments
         let deployment = rs_deployment_id
-            .and_then(|rs_deployment_id| deployments.get(rs_deployment_id).cloned());
+            .and_then(|rs_deployment_id| deployments.get(rs_deployment_id).copied());
         let deployment_exists = deployment.is_some();
-        let deployment_active = deployment.unwrap_or(false);
 
-        if deployment_active {
-            active_count += 1;
+        if let Some(usage) = deployment.filter(|usage| usage.is_active(mode)) {
+            blocking.push(BlockingVersion {
+                name: rs_name.clone(),
+                usage,
+            });
 
             // Per-version autoscaling: a non-latest version has an operator HPA
             // iff it is still active and autoscaling is configured. (See
@@ -456,19 +463,6 @@ pub async fn cleanup_old_replicasets(
             continue;
         }
 
-        // Non-active version: remove any operator HPA before scaling it down. Its
-        // minReplicas floor (>= 1) would otherwise fight the operator scaling the
-        // ReplicaSet to zero, and would hold the version at the floor through the
-        // revision-history retention window. Gate on the owned-HPA cache so we
-        // only call the API when an HPA actually exists (avoids a wasted delete
-        // per inactive ReplicaSet on every reconcile); this still fires whenever
-        // an HPA is present, including during RestateDeployment deletion, so
-        // teardown is never contended.
-        let hpa_ref = ObjectRef::<HorizontalPodAutoscaler>::new(&rs_name).within(namespace);
-        if ctx.hpa_store.get(&hpa_ref).is_some() {
-            super::autoscaling::delete_version_hpa(&ctx.client, namespace, &rs_name).await?;
-        }
-
         let current_remove_at = rs
             .annotations()
             .get(RESTATE_REMOVE_VERSION_AT_ANNOTATION)
@@ -487,6 +481,16 @@ pub async fn cleanup_old_replicasets(
         ) {
             (_, true, _) | (_, _, false) => {
                 // we are past the remove at time, or the endpoint was removed by other means; can now scale it down
+
+                // Remove any operator HPA first: its minReplicas floor (>= 1) would fight
+                // the scale to zero below, and would hold the version at the floor through
+                // the revision-history retention window. Gate on the owned-HPA cache so we
+                // only call the API when an HPA actually exists.
+                let hpa_ref = ObjectRef::<HorizontalPodAutoscaler>::new(&rs_name).within(namespace);
+                if ctx.hpa_store.get(&hpa_ref).is_some() {
+                    super::autoscaling::delete_version_hpa(&ctx.client, namespace, &rs_name)
+                        .await?;
+                }
 
                 // If this version has active pods, scale it down to 0 first
                 if rs
@@ -516,7 +520,7 @@ pub async fn cleanup_old_replicasets(
                 }
 
                 // If we are here, there is a 0 sized replicaset which should be subject to the history limit
-                if historic_count < rsd.spec.revision_history_limit {
+                if retain_for_rollback(mode, historic_count, rsd.spec.revision_history_limit) {
                     historic_count += 1;
                     // we haven't hit that limit yet, so we don't need to delete this rs
                     continue;
@@ -606,7 +610,7 @@ pub async fn cleanup_old_replicasets(
 
     // If there are active old deployments still draining but no removal is yet scheduled,
     // requeue on a short poll interval to detect drain completion promptly.
-    if active_count > 0 && next_removal.is_none() {
+    if !blocking.is_empty() && next_removal.is_none() {
         let poll_seconds = 10;
         next_removal = Some(
             chrono::Utc::now()
@@ -615,7 +619,7 @@ pub async fn cleanup_old_replicasets(
         );
     }
 
-    Ok((active_count, next_removal))
+    Ok((blocking, next_removal))
 }
 
 #[cfg(test)]
@@ -807,5 +811,358 @@ mod tests {
         let injected =
             inject_in_process_tunnel_env(spec.clone(), "greeter-abc123", &test_params()).unwrap();
         assert_eq!(injected, spec);
+    }
+
+    // --- cleanup_old_replicasets against a mocked apiserver. The teardown *order*
+    // is the invariant here, not just which calls happen, so these record every
+    // request the reconciler makes and assert on the sequence. ---
+
+    mod teardown {
+        use std::any::Any;
+        use std::convert::Infallible;
+        use std::sync::{Arc, Mutex};
+
+        use http::{Request, Response};
+        use kube::client::Body;
+        use kube::runtime::reflector;
+        use kube::runtime::watcher;
+        use serde_json::json;
+
+        use super::super::*;
+        use crate::controllers::State;
+        use crate::controllers::restatedeployment::cleanup::DeploymentUsage;
+        use crate::metrics::Metrics;
+        use crate::resources::restatedeployments::RestateDeployment;
+
+        const NAMESPACE: &str = "apps";
+        const RSD_UID: &str = "uid-123";
+        const VERSION: &str = "greeter-old";
+
+        /// Every request the reconciler made, in order, as "METHOD /path".
+        #[derive(Clone, Default)]
+        struct Calls(Arc<Mutex<Vec<String>>>);
+
+        impl Calls {
+            fn matching(&self, needle: &str) -> Vec<String> {
+                self.0
+                    .lock()
+                    .expect("calls are not poisoned")
+                    .iter()
+                    .filter(|call| call.contains(needle))
+                    .cloned()
+                    .collect()
+            }
+        }
+
+        struct Harness {
+            ctx: Arc<Context>,
+            rs_api: Api<ReplicaSet>,
+            calls: Calls,
+            /// Stores read through their `Store` handles; the writers own the data.
+            _writers: Vec<Box<dyn Any>>,
+        }
+
+        fn store_of<K>(objects: Vec<K>) -> (reflector::Store<K>, Box<dyn Any>)
+        where
+            K: reflector::Lookup + Clone + 'static,
+            K::DynamicType: Default + Eq + std::hash::Hash + Clone,
+        {
+            let (reader, mut writer) = reflector::store::<K>();
+            writer.apply_watcher_event(&watcher::Event::Init);
+            for object in objects {
+                writer.apply_watcher_event(&watcher::Event::InitApply(object));
+            }
+            writer.apply_watcher_event(&watcher::Event::InitDone);
+            (reader, Box::new(writer))
+        }
+
+        fn harness(replicasets: Vec<ReplicaSet>, hpas: Vec<HorizontalPodAutoscaler>) -> Harness {
+            let calls = Calls::default();
+            let client = {
+                let calls = calls.clone();
+                let svc = tower::service_fn(move |req: Request<Body>| {
+                    let calls = calls.clone();
+                    async move {
+                        let path = req.uri().path().to_owned();
+                        calls
+                            .0
+                            .lock()
+                            .expect("calls are not poisoned")
+                            .push(format!("{} {path}", req.method()));
+
+                        // enough of a body for kube to deserialise the return type of
+                        // whichever call this was; none of it is asserted on
+                        let body = if path.ends_with("/scale") {
+                            json!({
+                                "apiVersion": "autoscaling/v1", "kind": "Scale",
+                                "metadata": { "name": VERSION, "namespace": NAMESPACE },
+                                "spec": { "replicas": 0 },
+                            })
+                        } else if path.contains("horizontalpodautoscalers") {
+                            json!({
+                                "apiVersion": "autoscaling/v2", "kind": "HorizontalPodAutoscaler",
+                                "metadata": { "name": VERSION, "namespace": NAMESPACE },
+                            })
+                        } else {
+                            json!({
+                                "apiVersion": "apps/v1", "kind": "ReplicaSet",
+                                "metadata": { "name": VERSION, "namespace": NAMESPACE },
+                            })
+                        };
+
+                        Ok::<_, Infallible>(
+                            Response::builder()
+                                .status(200)
+                                .header("content-type", "application/json")
+                                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                                .unwrap(),
+                        )
+                    }
+                });
+                kube::Client::new(svc, NAMESPACE)
+            };
+
+            let (replicasets_store, rs_writer) = store_of(replicasets);
+            let (hpa_store, hpa_writer) = store_of(hpas);
+            let (rce_store, rce_writer) = store_of(vec![]);
+            let (secret_store, secret_writer) = store_of(vec![]);
+            let (revision_store, revision_writer) = store_of(vec![]);
+            let (configuration_store, configuration_writer) = store_of(vec![]);
+
+            let ctx = Context::new(
+                client.clone(),
+                replicasets_store,
+                rce_store,
+                secret_store,
+                revision_store,
+                configuration_store,
+                hpa_store,
+                Metrics::default(),
+                State::new(
+                    None,
+                    false,
+                    "restate-operator".into(),
+                    None,
+                    None,
+                    "tunnel:latest".into(),
+                    "cluster.local".into(),
+                    "alpine:3.21".into(),
+                    None,
+                    None,
+                ),
+            );
+
+            Harness {
+                rs_api: Api::namespaced(client, NAMESPACE),
+                ctx,
+                calls,
+                _writers: vec![
+                    rs_writer,
+                    hpa_writer,
+                    rce_writer,
+                    secret_writer,
+                    revision_writer,
+                    configuration_writer,
+                ],
+            }
+        }
+
+        fn rsd(autoscaling: bool, deleting: bool) -> RestateDeployment {
+            let spec = serde_json::from_value(json!({
+                "replicas": 3,
+                "revisionHistoryLimit": 10,
+                "template": {
+                    "metadata": null,
+                    "spec": { "containers": [{ "name": "app", "image": "greeter:v1" }] }
+                },
+                "restate": {
+                    "register": { "cluster": null, "cloud": null, "service": null, "url": "http://restate:9070/" },
+                    "servicePath": null, "useHttp11": null, "drainDelaySeconds": null
+                },
+                "autoscaling": autoscaling.then(|| json!({ "minReplicas": 1, "maxReplicas": 5 })),
+            }))
+            .expect("test RestateDeploymentSpec deserializes");
+
+            let mut rsd = RestateDeployment::new("greeter", spec);
+            rsd.metadata.uid = Some(RSD_UID.into());
+            rsd.metadata.namespace = Some(NAMESPACE.into());
+            if deleting {
+                rsd.metadata.deletion_timestamp = Some(
+                    k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(chrono::Utc::now()),
+                );
+            }
+            rsd
+        }
+
+        fn version(
+            deployment_id: &str,
+            remove_at: Option<chrono::DateTime<chrono::Utc>>,
+        ) -> ReplicaSet {
+            let mut annotations = serde_json::Map::new();
+            annotations.insert(
+                RESTATE_DEPLOYMENT_ID_ANNOTATION.into(),
+                json!(deployment_id),
+            );
+            if let Some(remove_at) = remove_at {
+                annotations.insert(
+                    RESTATE_REMOVE_VERSION_AT_ANNOTATION.into(),
+                    json!(remove_at.to_rfc3339()),
+                );
+            }
+
+            serde_json::from_value(json!({
+                "apiVersion": "apps/v1",
+                "kind": "ReplicaSet",
+                "metadata": {
+                    "name": VERSION,
+                    "namespace": NAMESPACE,
+                    "creationTimestamp": "2026-01-01T00:00:00Z",
+                    "annotations": annotations,
+                    "ownerReferences": [{
+                        "apiVersion": "restate.dev/v1beta1",
+                        "kind": "RestateDeployment",
+                        "name": "greeter",
+                        "uid": RSD_UID,
+                        "controller": true,
+                    }],
+                },
+                "spec": { "replicas": 3 },
+            }))
+            .expect("test ReplicaSet deserializes")
+        }
+
+        fn version_hpa() -> HorizontalPodAutoscaler {
+            serde_json::from_value(json!({
+                "apiVersion": "autoscaling/v2",
+                "kind": "HorizontalPodAutoscaler",
+                "metadata": { "name": VERSION, "namespace": NAMESPACE },
+                "spec": {
+                    "scaleTargetRef": {
+                        "apiVersion": "apps/v1", "kind": "ReplicaSet", "name": VERSION,
+                    },
+                    "minReplicas": 1, "maxReplicas": 5,
+                },
+            }))
+            .expect("test HorizontalPodAutoscaler deserializes")
+        }
+
+        fn usage_of(deployment_id: &str, usage: DeploymentUsage) -> DeploymentUsageMap {
+            [(deployment_id.to_owned(), usage)].into()
+        }
+
+        /// The autoscaler comes off immediately before the scale to zero, in the same
+        /// branch: its `minReplicas` floor of 1 would otherwise fight the scale-down and
+        /// hold the version at that floor for the whole retention window.
+        #[tokio::test]
+        async fn autoscaler_is_removed_immediately_before_the_scale_to_zero() {
+            let rsd = rsd(true, false);
+            let harness = harness(vec![version("dp_gone", None)], vec![version_hpa()]);
+
+            let (blocking, next_removal) = cleanup_old_replicasets(
+                NAMESPACE,
+                &harness.ctx,
+                &harness.rs_api,
+                RSD_UID,
+                &rsd,
+                // the endpoint was deregistered by other means, so the version is
+                // scaled down on this pass rather than waiting out a drain
+                &DeploymentUsageMap::new(),
+                None,
+            )
+            .await
+            .expect("cleanup succeeds");
+
+            assert!(blocking.is_empty());
+            assert_eq!(next_removal, None);
+            assert_eq!(
+                harness.calls.matching(VERSION),
+                vec![
+                    format!(
+                        "DELETE /apis/autoscaling/v2/namespaces/{NAMESPACE}/horizontalpodautoscalers/{VERSION}"
+                    ),
+                    format!(
+                        "PATCH /apis/apps/v1/namespaces/{NAMESPACE}/replicasets/{VERSION}/scale"
+                    ),
+                ],
+            );
+        }
+
+        /// ...and not before that. A version waiting out its drain deadline is still
+        /// serving traffic, so it keeps the autoscaler it was given.
+        #[tokio::test]
+        async fn draining_version_keeps_its_autoscaler_until_the_deadline() {
+            let rsd = rsd(true, false);
+            let remove_at = chrono::Utc::now() + chrono::TimeDelta::seconds(300);
+            let harness = harness(
+                vec![version("dp_draining", Some(remove_at))],
+                vec![version_hpa()],
+            );
+
+            let (blocking, next_removal) = cleanup_old_replicasets(
+                NAMESPACE,
+                &harness.ctx,
+                &harness.rs_api,
+                RSD_UID,
+                &rsd,
+                // registered, superseded, and nothing in flight: drained but not yet due
+                &usage_of("dp_draining", DeploymentUsage::default()),
+                None,
+            )
+            .await
+            .expect("cleanup succeeds");
+
+            assert!(blocking.is_empty());
+            assert_eq!(next_removal, Some(remove_at));
+            assert_eq!(
+                harness.calls.matching(VERSION),
+                Vec::<String>::new(),
+                "nothing is touched until the deadline passes"
+            );
+        }
+
+        /// The same holds while the RestateDeployment itself is being deleted: deletion
+        /// puts every version through the drain, and stripping their autoscalers up front
+        /// would collapse them to `spec.replicas` while they still serve invocations.
+        #[tokio::test]
+        async fn deletion_does_not_strip_autoscalers_up_front() {
+            let rsd = rsd(true, true);
+            let remove_at = chrono::Utc::now() + chrono::TimeDelta::seconds(300);
+            let harness = harness(
+                vec![version("dp_busy", Some(remove_at))],
+                vec![version_hpa()],
+            );
+
+            let busy = DeploymentUsage {
+                latest_for_service: true,
+                pinned_invocations: 2,
+                unpinned_invocations: 0,
+            };
+
+            let (blocking, _) = cleanup_old_replicasets(
+                NAMESPACE,
+                &harness.ctx,
+                &harness.rs_api,
+                RSD_UID,
+                &rsd,
+                &usage_of("dp_busy", busy),
+                None,
+            )
+            .await
+            .expect("cleanup succeeds");
+
+            assert_eq!(
+                blocking,
+                vec![BlockingVersion {
+                    name: VERSION.into(),
+                    usage: busy,
+                }],
+                "in-flight invocations hold the deletion, and say so"
+            );
+            assert_eq!(
+                harness.calls.matching("horizontalpodautoscalers"),
+                Vec::<String>::new(),
+                "an owned HPA is garbage-collected with the RestateDeployment, not by us"
+            );
+        }
     }
 }

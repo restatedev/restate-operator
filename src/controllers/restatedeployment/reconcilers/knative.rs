@@ -8,6 +8,9 @@ use serde_json::json;
 use tracing::*;
 use url::Url;
 
+use crate::controllers::restatedeployment::cleanup::{
+    BlockingVersion, CleanupMode, DeploymentUsageMap, retain_for_rollback,
+};
 use crate::controllers::restatedeployment::controller::{
     Context, RESTATE_DEPLOYMENT_ID_ANNOTATION,
 };
@@ -220,7 +223,8 @@ pub async fn reconcile_knative(
     annotate_configuration(ctx, namespace, &config, &deployment_id).await?;
 
     // Cleanup old Configurations (mirrors ReplicaSet cleanup pattern)
-    let deployments = rsd.list_deployments(ctx).await?;
+    // this path only runs for a live RestateDeployment; deletion goes to `cleanup`.
+    let deployments = rsd.list_deployments(ctx, CleanupMode::Rollout).await?;
     let rsd_uid = rsd
         .uid()
         .ok_or_else(|| Error::InvalidRestateConfig("RestateDeployment must have UID".into()))?;
@@ -743,9 +747,9 @@ pub async fn cleanup_old_configurations(
     ctx: &Context,
     rsd_uid: &str,
     rsd: &RestateDeployment,
-    deployments: &std::collections::HashMap<String, bool>,
+    deployments: &DeploymentUsageMap,
     active_tag: Option<&str>,
-) -> Result<(i32, Option<chrono::DateTime<chrono::Utc>>)> {
+) -> Result<(Vec<BlockingVersion>, Option<chrono::DateTime<chrono::Utc>>)> {
     // Use reflector cache instead of API list() call
     let configurations_cell = std::cell::Cell::new(Vec::new());
 
@@ -800,13 +804,16 @@ pub async fn cleanup_old_configurations(
             .cmp(&a.metadata.creation_timestamp)
     });
 
-    // keep track of how many configurations there are that are still in-use by restate (active services or invocations)
-    let mut active_count = 0;
+    // keep track of the configurations that are still in-use by restate (active services or invocations)
+    let mut blocking = Vec::new();
     // Keep track of how many zero-scaled configurations there are (for revision history limit)
     let mut historic_count = 0;
     let mut next_removal = None;
 
     let now = chrono::Utc::now();
+
+    // As in `cleanup_old_replicasets`.
+    let mode = CleanupMode::for_rsd(rsd);
 
     for config in configurations {
         let config_name = config.name_any();
@@ -819,12 +826,14 @@ pub async fn cleanup_old_configurations(
 
         // Skip active deployments
         let deployment = config_deployment_id
-            .and_then(|config_deployment_id| deployments.get(config_deployment_id).cloned());
+            .and_then(|config_deployment_id| deployments.get(config_deployment_id).copied());
         let deployment_exists = deployment.is_some();
-        let deployment_active = deployment.unwrap_or(false);
 
-        if deployment_active {
-            active_count += 1;
+        if let Some(usage) = deployment.filter(|usage| usage.is_active(mode)) {
+            blocking.push(BlockingVersion {
+                name: config_name.clone(),
+                usage,
+            });
 
             if config
                 .metadata
@@ -887,7 +896,7 @@ pub async fn cleanup_old_configurations(
         ) {
             (_, true, _) | (_, _, false) => {
                 // we are past the remove-at time, or the endpoint was removed by other means; can now delete it (subject to the history limit)
-                if historic_count < rsd.spec.revision_history_limit {
+                if retain_for_rollback(mode, historic_count, rsd.spec.revision_history_limit) {
                     historic_count += 1;
                     trace!(
                         "Keeping old Configuration {} in namespace {namespace} (within revision history limit: {}/{})",
@@ -987,7 +996,7 @@ pub async fn cleanup_old_configurations(
 
     // If there are active old deployments still draining but no removal is yet scheduled,
     // requeue on a short poll interval to detect drain completion promptly.
-    if active_count > 0 && next_removal.is_none() {
+    if !blocking.is_empty() && next_removal.is_none() {
         let poll_seconds = 10;
         next_removal = Some(
             chrono::Utc::now()
@@ -996,7 +1005,7 @@ pub async fn cleanup_old_configurations(
         );
     }
 
-    Ok((active_count, next_removal))
+    Ok((blocking, next_removal))
 }
 
 /// Get tag from Configuration annotation
