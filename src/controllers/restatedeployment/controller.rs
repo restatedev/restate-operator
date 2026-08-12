@@ -25,11 +25,9 @@ use kube::runtime::{
 
 use kube::Resource;
 use reqwest::Method;
-use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::RwLock;
 use tracing::*;
-use url::Url;
 
 use crate::controllers::{
     CrdWait, Diagnostics, ReadinessGate, State, prewarmed_reflector, wait_for_crd,
@@ -51,6 +49,7 @@ use crate::controllers::restatedeployment::cleanup::{
     blocked_deletion_requeue, deployment_usage_query, describe_blocking_versions,
 };
 use crate::controllers::restatedeployment::reconcilers;
+use crate::controllers::restatedeployment::registration::{self, RegistrationAction};
 
 use super::reconcilers::replicaset::{
     POD_TEMPLATE_HASH_LABEL, RESTATE_POD_TEMPLATE_ANNOTATION, RESTATE_TUNNEL_NAME_ANNOTATION,
@@ -470,14 +469,34 @@ impl RestateDeployment {
 
         let existing_deployment_id = replicaset
             .annotations()
-            .get(RESTATE_DEPLOYMENT_ID_ANNOTATION);
+            .get(RESTATE_DEPLOYMENT_ID_ANNOTATION)
+            .cloned();
 
-        // if the repliceset doesn't have a deployment id, or its deployment id is not active, register it
-        if existing_deployment_id.is_none_or(|existing_deployment_id| {
-            !deployments
-                .get(existing_deployment_id)
-                .is_some_and(|usage| usage.is_active(CleanupMode::Rollout))
-        }) {
+        let action = registration::plan_registration(
+            existing_deployment_id.as_deref(),
+            &deployments,
+            || registration::owned_deployment_ids(&ctx.replicasets_store, namespace, &my_uid),
+        );
+
+        // This branch leaves the old ReplicaSets alone: the reconcile returns before
+        // `cleanup_old_replicasets`. That is deliberate — draining a version while we cannot
+        // tell who is serving its services risks removing the endpoint still taking traffic.
+        if action == RegistrationAction::Conflict {
+            // Deliberately no admin write. See `RegistrationAction::Conflict`.
+            return Err(Error::DeploymentNotLatest {
+                message: format!(
+                    "Deployment {} is registered but superseded, and no version of this \
+                     RestateDeployment is serving its services. Something outside this \
+                     RestateDeployment has registered them; check `GET /services` against the \
+                     Restate admin API. The operator will not force a promotion here.",
+                    existing_deployment_id.as_deref().unwrap_or("<unknown>"),
+                ),
+                reason: "ForeignDeployment".into(),
+                requeue_after: None,
+            });
+        }
+
+        if action != RegistrationAction::AlreadyLatest {
             let valid = async {
                 if let Some(cluster_name) = &self.spec.restate.register.cluster {
                     // wait for the cluster to be ready before registering to it
@@ -519,50 +538,102 @@ impl RestateDeployment {
                 Err(err) => return Err(err),
             }
 
-            // Register the latest version with Restate cluster using the service URL
-            let deployment_id = self
-                .register_service_with_restate(
-                    &ctx,
-                    &service_endpoint,
-                    self.spec.restate.use_http11.as_ref().cloned(),
-                )
-                .await?;
-            // if registration succeeded, treat this as an active endpoint
-            // if we fail after this point we will re-register and should get the same deployment id
+            // Register the latest version with Restate cluster using the service URL.
+            // A promotion re-registers the same endpoint with overwrite, so Restate bumps
+            // its service revisions past the current latest without minting a new
+            // deployment id — leaving invocations already pinned to it undisturbed.
+            let registered = registration::register_deployment(
+                &ctx,
+                self,
+                &service_endpoint,
+                self.spec.restate.use_http11.as_ref().cloned(),
+                action.overwrite(),
+            )
+            .await?;
+
+            // Recorded before the routing is confirmed, because the id is true either way:
+            // it is what Restate holds for this endpoint. Deferring the annotation until
+            // after confirmation would strand a version whose registration landed on an
+            // endpoint Restate already knew but was not routing to — with nothing recorded,
+            // the next reconcile plans a plain `Register` again rather than a promotion, and
+            // repeats that forever.
+            if existing_deployment_id.as_deref() != Some(registered.id.as_str()) {
+                debug!(
+                    "Updating deployment-id annotation of ReplicaSet/Service {versioned_name} in namespace {namespace}"
+                );
+
+                // store the id against the versioned objects
+                let params = PatchParams::apply("restate-operator/deployment-id").force();
+                let patch = ObjectMeta {
+                    annotations: Some(
+                        [(
+                            RESTATE_DEPLOYMENT_ID_ANNOTATION.to_string(),
+                            registered.id.clone(),
+                        )]
+                        .into(),
+                    ),
+                    ..Default::default()
+                };
+                rs_api
+                    .patch_metadata(
+                        &versioned_name,
+                        &params,
+                        &Patch::Apply(patch.clone().into_request_partial::<ReplicaSet>()),
+                    )
+                    .await?;
+                svc_api
+                    .patch_metadata(
+                        &versioned_name,
+                        &params,
+                        &Patch::Apply(patch.into_request_partial::<Service>()),
+                    )
+                    .await?;
+            }
+
+            // Registration's own response cannot distinguish "promoted" from "already
+            // existed, nothing changed" — both are a 200 carrying this deployment id. Ask
+            // Restate what it actually routes before treating this as done, or `Ready=True`
+            // would go on meaning "the pods are up" rather than "new work lands here".
+            registration::confirm_latest(&ctx, &self.spec.restate.register, &registered).await?;
+
+            if let RegistrationAction::Promote { superseded_by } = &action {
+                ctx.recorder
+                    .publish(
+                        &Event {
+                            type_: EventType::Normal,
+                            reason: "Promoted".into(),
+                            // Worth an event rather than only a log line: a promotion is a
+                            // forced re-registration, which Restate treats as permitting
+                            // breaking schema changes, and it resets the deployment's
+                            // registration time in Restate. Both deserve an audit trail.
+                            note: Some(format!(
+                                "Promoted deployment {} back to latest for {}, superseding {superseded_by}",
+                                registered.id,
+                                versioned_name.as_str(),
+                            )),
+                            action: "Reconcile".into(),
+                            secondary: None,
+                        },
+                        &self.object_ref(&()),
+                    )
+                    .await?;
+            }
+
+            // Confirmed above, so this is Restate's answer rather than an assumption.
+            //
+            // The deployment this one superseded keeps its stale `latest_for_service` until
+            // the next reconcile re-runs the query, so cleanup reads it as active and defers
+            // its drain by one pass. A promotion names it, but not whether it lost latest for
+            // *every* service it serves — it may still be the endpoint for one this version
+            // never discovered — so clearing the flag here could drain a version still taking
+            // traffic. One extra pass is the cheaper mistake.
             deployments.insert(
-                deployment_id.clone(),
+                registered.id.clone(),
                 DeploymentUsage {
                     latest_for_service: true,
                     ..Default::default()
                 },
             );
-
-            debug!(
-                "Updating deployment-id annotation of ReplicaSet/Service {versioned_name} in namespace {namespace}"
-            );
-
-            // store the id against the versioned objects
-            let params = PatchParams::apply("restate-operator/deployment-id").force();
-            let patch = ObjectMeta {
-                annotations: Some(
-                    [(RESTATE_DEPLOYMENT_ID_ANNOTATION.to_string(), deployment_id)].into(),
-                ),
-                ..Default::default()
-            };
-            rs_api
-                .patch_metadata(
-                    &versioned_name,
-                    &params,
-                    &Patch::Apply(patch.clone().into_request_partial::<ReplicaSet>()),
-                )
-                .await?;
-            svc_api
-                .patch_metadata(
-                    &versioned_name,
-                    &params,
-                    &Patch::Apply(patch.into_request_partial::<Service>()),
-                )
-                .await?;
         }
 
         // Clean up old ReplicaSets that are no longer needed
@@ -734,6 +805,26 @@ impl RestateDeployment {
                         "False".into(),
                     )
                 }
+                // See the ReplicaSet-mode arm below: healthy pods, stale routing.
+                Err(Error::DeploymentNotLatest {
+                    ref message,
+                    ref reason,
+                    requeue_after,
+                }) => {
+                    let requeue_after = requeue_after.unwrap_or(Duration::from_secs(30));
+                    warn!(
+                        name = %self.metadata.name.as_deref().unwrap_or("unknown"),
+                        namespace = %namespace,
+                        reason = %reason,
+                        "{message}"
+                    );
+                    (
+                        Ok(Action::requeue(requeue_after)),
+                        message.clone(),
+                        reason.clone(),
+                        "False".into(),
+                    )
+                }
                 Err(err) => {
                     let message = err.to_string();
                     (
@@ -810,6 +901,29 @@ impl RestateDeployment {
                         Ok(Action::requeue(Duration::ZERO)),
                         "Encountered a hash collision, will retry with a new template hash".into(),
                         "HashCollision".into(),
+                        "False".into(),
+                    )
+                }
+                // The desired version exists in Restate but is not what new invocations go
+                // to. Reported as not-Ready rather than as a reconcile failure: the pods are
+                // healthy, and a `Ready=True` here would be the exact false assurance that
+                // let a silent rollback failure pass for a successful one.
+                Err(Error::DeploymentNotLatest {
+                    ref message,
+                    ref reason,
+                    requeue_after,
+                }) => {
+                    let requeue_after = requeue_after.unwrap_or(Duration::from_secs(30));
+                    warn!(
+                        name = %self.metadata.name.as_deref().unwrap_or("unknown"),
+                        namespace = %namespace,
+                        reason = %reason,
+                        "{message}"
+                    );
+                    (
+                        Ok(Action::requeue(requeue_after)),
+                        message.clone(),
+                        reason.clone(),
                         "False".into(),
                     )
                 }
@@ -930,53 +1044,6 @@ impl RestateDeployment {
             .await?;
 
         result
-    }
-
-    /// Register a service version with the Restate cluster
-    pub(super) async fn register_service_with_restate(
-        &self,
-        ctx: &Context,
-        service_endpoint: &Url,
-        use_http11: Option<bool>,
-    ) -> Result<String> {
-        debug!(
-            "Registering endpoint '{service_endpoint}' to Restate at '{}'",
-            &self.spec.restate.register
-        );
-
-        #[derive(Deserialize)]
-        struct DeploymentResponse {
-            id: String,
-        }
-
-        let mut payload = serde_json::json!({
-            "uri": service_endpoint,
-        });
-
-        if let Some(use_http11) = use_http11 {
-            payload["use_http_11"] = serde_json::Value::Bool(use_http11);
-        }
-
-        let resp = ctx
-            .request(Method::POST, &self.spec.restate.register, "/deployments")?
-            .json(&payload)
-            .send()
-            .await
-            .map_err(Error::AdminCallFailed)?;
-        let resp: DeploymentResponse = check_admin_response(resp)
-            .await?
-            .json()
-            .await
-            .map_err(Error::AdminCallFailed)?;
-
-        let deployment_id = &resp.id;
-        info!(
-            deployment_id = %deployment_id,
-            url = %service_endpoint,
-            "Successfully registered Restate deployment"
-        );
-
-        Ok(resp.id)
     }
 
     pub(super) async fn list_deployments(
@@ -1301,12 +1368,16 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     let not_created_cfg = Config::default();
 
     let (replicasets_store, replicasets_writer) = kube::runtime::reflector::store();
-    let replicaset_reflector = kube::runtime::reflector(
+    // Prewarmed, because the registration planner tells a rollback apart from a foreign
+    // controller by asking this store which other versions of a RestateDeployment hold
+    // Restate's latest revision. An unsynced store answers "none of ours", which reads as a
+    // conflict and would park an otherwise healthy rollback at Ready=False until it filled.
+    let replicaset_reflector = prewarmed_reflector(
+        replicasets_store.clone(),
         replicasets_writer,
         kube::runtime::watcher(replicasets, cfg.clone()),
     )
-    .touched_objects()
-    .default_backoff();
+    .await;
 
     // A reflector (rather than `.owns(...)`) also gives a queryable cache, so we can
     // check whether a draining version still has an HPA before issuing a delete —

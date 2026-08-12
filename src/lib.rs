@@ -67,6 +67,16 @@ pub enum Error {
     #[error("Encountered a hash collision, will retry with a new template hash")]
     HashCollision,
 
+    /// The desired version is registered but Restate still routes new invocations somewhere
+    /// else. Kept distinct from `DeploymentNotReady`: the pods are fine, it is the routing
+    /// that has not caught up, and `Ready=True` must not be reported until it has.
+    #[error("RestateDeployment version is not latest in Restate: {message}")]
+    DeploymentNotLatest {
+        message: String,
+        reason: String,
+        requeue_after: Option<Duration>,
+    },
+
     #[error(
         "This RestateDeployment is backing active versions in Restate: {blocked_by}. If you want to delete the RestateDeployment, either register new endpoints for the relevant services or cancel/complete the outstanding invocations."
     )]
@@ -117,6 +127,7 @@ impl Error {
             Error::AdminCallFailed(_) => "AdminCallFailed",
             Error::AdminCallRejected { .. } => "AdminCallRejected",
             Error::HashCollision => "HashCollision",
+            Error::DeploymentNotLatest { .. } => "DeploymentNotLatest",
             Error::DeploymentInUse { .. } => "DeploymentInUse",
             Error::DeploymentDraining { .. } => "DeploymentDraining",
             Error::ConfigurationNotReady { .. } => "ConfigurationNotReady",
