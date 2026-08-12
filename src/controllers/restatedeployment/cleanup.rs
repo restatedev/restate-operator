@@ -1,11 +1,19 @@
 //! Policy decisions shared by the ReplicaSet and Knative cleanup reconcilers: what
-//! Restate still needs a registered deployment for, how we ask it, and how long we keep a
-//! drained version around.
+//! Restate still needs a registered deployment for, how we ask it, how long we keep a
+//! drained version around, and the drain deadline that records it.
 
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::time::Duration;
 
+use kube::api::{Api, Patch, PatchParams};
+use kube::{Resource, ResourceExt};
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
+use serde_json::json;
+use tracing::{debug, info};
+
+use crate::Result;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CleanupMode {
@@ -213,9 +221,341 @@ pub(crate) fn retain_for_rollback(
     !mode.is_deleting() && historic_count < revision_history_limit
 }
 
+/// When a superseded version may be torn down.
+pub(crate) const RESTATE_REMOVE_VERSION_AT_ANNOTATION: &str = "restate.dev/remove-version-at";
+
+/// Every write to the deadline goes out under this one manager.
+const REMOVE_VERSION_AT_FIELD_MANAGER: &str = "restate-operator/remove-version-at";
+
+fn stamp_patch<K>(
+    remove_at: chrono::DateTime<chrono::Utc>,
+) -> (PatchParams, Patch<serde_json::Value>)
+where
+    K: Resource<DynamicType = ()>,
+{
+    let patch = json!({
+        "apiVersion": K::api_version(&()),
+        "kind": K::kind(&()),
+        "metadata": { "annotations": {
+            RESTATE_REMOVE_VERSION_AT_ANNOTATION: remove_at.to_rfc3339(),
+        } },
+    });
+
+    (
+        PatchParams::apply(REMOVE_VERSION_AT_FIELD_MANAGER).force(),
+        Patch::Apply(patch),
+    )
+}
+
+/// Giving up the claim is what removes the annotation; setting it to `null` leaves an
+/// empty string behind. Only a deadline this manager owns can go this way, so a hand-set
+/// one survives.
+fn clear_patch<K>() -> (PatchParams, Patch<serde_json::Value>)
+where
+    K: Resource<DynamicType = ()>,
+{
+    let patch = json!({
+        "apiVersion": K::api_version(&()),
+        "kind": K::kind(&()),
+        "metadata": { "annotations": {} },
+    });
+
+    (
+        PatchParams::apply(REMOVE_VERSION_AT_FIELD_MANAGER).force(),
+        Patch::Apply(patch),
+    )
+}
+
+pub(crate) async fn schedule_version_removal<K>(
+    api: &Api<K>,
+    namespace: &str,
+    name: &str,
+    drain_delay_seconds: i64,
+) -> Result<chrono::DateTime<chrono::Utc>>
+where
+    K: Resource<DynamicType = ()> + Clone + DeserializeOwned + Debug,
+{
+    let remove_at = chrono::Utc::now()
+        .checked_add_signed(chrono::TimeDelta::seconds(drain_delay_seconds))
+        .expect("remove_version_at in bounds");
+
+    info!(
+        kind = %K::kind(&()),
+        version = %name,
+        namespace = %namespace,
+        drain_delay_seconds,
+        remove_at = %remove_at.to_rfc3339(),
+        "Scheduling removal of old version (after drain delay)"
+    );
+
+    let (params, patch) = stamp_patch::<K>(remove_at);
+    api.patch_metadata(name, &params, &patch).await?;
+
+    Ok(remove_at)
+}
+
+/// For a version that is staying. A leftover deadline would tear it down with no drain
+/// delay the next time it is superseded. No API call if nothing is scheduled.
+pub(crate) async fn unschedule_version_removal<K>(api: &Api<K>, version: &K) -> Result<()>
+where
+    K: Resource<DynamicType = ()> + Clone + DeserializeOwned + Debug,
+{
+    if !version
+        .annotations()
+        .contains_key(RESTATE_REMOVE_VERSION_AT_ANNOTATION)
+    {
+        return Ok(());
+    }
+
+    let name = version.name_any();
+    debug!(
+        kind = %K::kind(&()),
+        version = %name,
+        namespace = %version.namespace().unwrap_or_default(),
+        "Unscheduling removal of version that is staying"
+    );
+
+    let (params, patch) = clear_patch::<K>();
+    api.patch_metadata(&name, &params, &patch).await?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resources::knative::Configuration;
+    use k8s_openapi::api::apps::v1::ReplicaSet;
+
+    /// Both deployment modes write the same annotation under the same field manager.
+    #[test]
+    fn the_deadline_is_stamped_and_cleared_under_one_field_manager() {
+        let remove_at = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00+00:00")
+            .expect("test deadline parses")
+            .to_utc();
+
+        let (params, patch) = stamp_patch::<ReplicaSet>(remove_at);
+        assert_eq!(
+            params.field_manager.as_deref(),
+            Some("restate-operator/remove-version-at"),
+        );
+        assert_eq!(
+            patch,
+            Patch::Apply(json!({
+                "apiVersion": "apps/v1",
+                "kind": "ReplicaSet",
+                "metadata": { "annotations": {
+                    "restate.dev/remove-version-at": "2026-01-01T00:00:00+00:00",
+                } },
+            })),
+        );
+
+        assert_eq!(
+            stamp_patch::<Configuration>(remove_at).1,
+            Patch::Apply(json!({
+                "apiVersion": "serving.knative.dev/v1",
+                "kind": "Configuration",
+                "metadata": { "annotations": {
+                    "restate.dev/remove-version-at": "2026-01-01T00:00:00+00:00",
+                } },
+            })),
+        );
+
+        let (params, patch) = clear_patch::<ReplicaSet>();
+        assert_eq!(
+            params.field_manager.as_deref(),
+            Some("restate-operator/remove-version-at"),
+        );
+        assert_eq!(
+            patch,
+            Patch::Apply(json!({
+                "apiVersion": "apps/v1",
+                "kind": "ReplicaSet",
+                "metadata": { "annotations": {} },
+            })),
+        );
+
+        assert_eq!(
+            clear_patch::<Configuration>().1,
+            Patch::Apply(json!({
+                "apiVersion": "serving.knative.dev/v1",
+                "kind": "Configuration",
+                "metadata": { "annotations": {} },
+            })),
+        );
+    }
+
+    /// Stamp, clear, stamp again, as a rollback does it. Only a real apiserver can say
+    /// whether the clear removes the annotation and the next stamp lands.
+    ///
+    /// Creates and deletes the namespace `restate-operator-drain-deadline` in the current
+    /// kube context.
+    ///
+    ///     cargo test --lib -- --ignored the_cleared_deadline
+    mod live {
+        use super::*;
+        use k8s_openapi::api::apps::v1::ReplicaSet;
+        use k8s_openapi::api::core::v1::Namespace;
+        use kube::Client;
+        use kube::api::{DeleteParams, PostParams};
+
+        const NAMESPACE: &str = "restate-operator-drain-deadline";
+        const VERSION: &str = "greeter-abc123";
+
+        /// The deadline annotation, and every manager claiming it.
+        async fn deadline(rs_api: &Api<ReplicaSet>) -> (Option<String>, Vec<String>) {
+            let rs = rs_api
+                .get(VERSION)
+                .await
+                .expect("the ReplicaSet is readable");
+
+            let claimants = rs
+                .managed_fields()
+                .iter()
+                .filter(|entry| {
+                    let claimed = serde_json::to_string(&entry.fields_v1).unwrap_or_default();
+                    claimed.contains(RESTATE_REMOVE_VERSION_AT_ANNOTATION)
+                })
+                .map(|entry| entry.manager.clone().unwrap_or_default())
+                .collect();
+
+            (
+                rs.annotations()
+                    .get(RESTATE_REMOVE_VERSION_AT_ANNOTATION)
+                    .cloned(),
+                claimants,
+            )
+        }
+
+        #[tokio::test]
+        #[ignore = "needs a Kubernetes apiserver; run with --ignored"]
+        async fn the_cleared_deadline_can_be_stamped_again() {
+            let client = Client::try_default()
+                .await
+                .expect("a kube context to run against");
+
+            let ns_api: Api<Namespace> = Api::all(client.clone());
+            let _ = ns_api
+                .create(
+                    &PostParams::default(),
+                    &serde_json::from_value(json!({
+                        "apiVersion": "v1",
+                        "kind": "Namespace",
+                        "metadata": { "name": NAMESPACE },
+                    }))
+                    .expect("the scratch namespace deserializes"),
+                )
+                .await;
+
+            let rs_api: Api<ReplicaSet> = Api::namespaced(client, NAMESPACE);
+            let _ = rs_api.delete(VERSION, &DeleteParams::default()).await;
+
+            // as the operator creates it
+            rs_api
+                .create(
+                    &PostParams {
+                        dry_run: false,
+                        field_manager: Some("restate-operator".to_owned()),
+                    },
+                    &serde_json::from_value(json!({
+                        "apiVersion": "apps/v1",
+                        "kind": "ReplicaSet",
+                        "metadata": {
+                            "name": VERSION,
+                            "annotations": { "restate.dev/pod-template": "{}" },
+                        },
+                        "spec": {
+                            "replicas": 0,
+                            "selector": { "matchLabels": { "pod-template-hash": "abc123" } },
+                            "template": {
+                                "metadata": { "labels": { "pod-template-hash": "abc123" } },
+                                "spec": { "containers": [
+                                    { "name": "app", "image": "registry.k8s.io/pause:3.9" },
+                                ] },
+                            },
+                        },
+                    }))
+                    .expect("the test ReplicaSet deserializes"),
+                )
+                .await
+                .expect("the ReplicaSet is created");
+
+            let first = schedule_version_removal(&rs_api, NAMESPACE, VERSION, 300)
+                .await
+                .expect("the deadline is stamped");
+            assert_eq!(
+                deadline(&rs_api).await,
+                (
+                    Some(first.to_rfc3339()),
+                    vec![REMOVE_VERSION_AT_FIELD_MANAGER.to_owned()],
+                ),
+            );
+
+            let stamped = rs_api
+                .get(VERSION)
+                .await
+                .expect("the ReplicaSet is readable");
+            unschedule_version_removal(&rs_api, &stamped)
+                .await
+                .expect("the deadline is cleared");
+            assert_eq!(
+                deadline(&rs_api).await,
+                (None, vec![]),
+                "the annotation is gone, and nothing is left claiming it",
+            );
+
+            let second = schedule_version_removal(&rs_api, NAMESPACE, VERSION, 300)
+                .await
+                .expect("the cleared deadline is stamped again");
+            assert_ne!(second.to_rfc3339(), first.to_rfc3339());
+            assert_eq!(
+                deadline(&rs_api).await,
+                (
+                    Some(second.to_rfc3339()),
+                    vec![REMOVE_VERSION_AT_FIELD_MANAGER.to_owned()],
+                ),
+                "the re-stamped deadline landed, under the one manager",
+            );
+
+            let no_deadline = rs_api
+                .get(VERSION)
+                .await
+                .expect("the ReplicaSet is readable");
+            unschedule_version_removal(&rs_api, &no_deadline)
+                .await
+                .expect("clearing an unscheduled version is a no-op");
+
+            // a deadline this manager never owned survives the clear
+            rs_api
+                .patch_metadata(
+                    VERSION,
+                    &PatchParams::apply("someone-else").force(),
+                    &Patch::Apply(json!({
+                        "apiVersion": "apps/v1",
+                        "kind": "ReplicaSet",
+                        "metadata": { "annotations": {
+                            RESTATE_REMOVE_VERSION_AT_ANNOTATION: "2026-01-01T00:00:00+00:00",
+                        } },
+                    })),
+                )
+                .await
+                .expect("the foreign deadline is set");
+            let foreign = rs_api
+                .get(VERSION)
+                .await
+                .expect("the ReplicaSet is readable");
+            unschedule_version_removal(&rs_api, &foreign)
+                .await
+                .expect("the clear is applied");
+            assert_eq!(
+                deadline(&rs_api).await.0,
+                Some("2026-01-01T00:00:00+00:00".to_owned()),
+                "a deadline this manager never owned survives the clear",
+            );
+
+            let _ = ns_api.delete(NAMESPACE, &DeleteParams::default()).await;
+        }
+    }
 
     fn usage(latest: bool, pinned: u64, unpinned: u64) -> DeploymentUsage {
         DeploymentUsage {

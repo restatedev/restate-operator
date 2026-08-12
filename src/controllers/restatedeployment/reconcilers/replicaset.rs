@@ -2,11 +2,9 @@ use std::collections::BTreeMap;
 
 use k8s_openapi::api::apps::v1::ReplicaSet;
 use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 
-use kube::api::{
-    Api, ApiResource, DynamicObject, PartialObjectMetaExt, Patch, PatchParams, PostParams,
-};
+use kube::api::{Api, ApiResource, DynamicObject, Patch, PatchParams, PostParams};
 use kube::core::subresource::Scale;
 use kube::runtime::events::{Event, EventType};
 use kube::runtime::reflector::ObjectRef;
@@ -16,7 +14,8 @@ use serde_json::json;
 use tracing::*;
 
 use crate::controllers::restatedeployment::cleanup::{
-    BlockingVersion, CleanupMode, DeploymentUsageMap, retain_for_rollback,
+    BlockingVersion, CleanupMode, DeploymentUsageMap, RESTATE_REMOVE_VERSION_AT_ANNOTATION,
+    retain_for_rollback, schedule_version_removal, unschedule_version_removal,
 };
 use crate::controllers::restatedeployment::controller::{
     APP_MANAGED_BY_LABEL, Context, OWNED_BY_LABEL, RESTATE_DEPLOYMENT_ID_ANNOTATION,
@@ -29,7 +28,6 @@ use super::autoscaling::HpaPlan;
 
 pub const POD_TEMPLATE_HASH_LABEL: &str = "pod-template-hash";
 pub const RESTATE_POD_TEMPLATE_ANNOTATION: &str = "restate.dev/pod-template";
-pub const RESTATE_REMOVE_VERSION_AT_ANNOTATION: &str = "restate.dev/remove-version-at";
 /// Records the tunnel name a `tunnelMode: in-process` ReplicaSet was created with —
 /// the same value injected into its pods as RESTATE_INPROC_TUNNEL_NAME.
 pub const RESTATE_TUNNEL_NAME_ANNOTATION: &str = "restate.dev/tunnel-name";
@@ -427,38 +425,8 @@ pub async fn cleanup_old_replicasets(
                 HpaPlan::Skip => {}
             }
 
-            if rs
-                .annotations()
-                .get(RESTATE_REMOVE_VERSION_AT_ANNOTATION)
-                .is_none()
-            {
-                // not scheduled for removal; all good.
-                continue;
-            }
-
-            debug!(
-                "Unscheduling removal of active ReplicaSet {} in namespace {namespace}",
-                rs_name,
-            );
-
-            // if we previously scheduled it for removal, but it now seems active, reset the timer by removing the annotation
-            let params: PatchParams =
-                PatchParams::apply("restate-operator/remove-version-at").force();
-            rs_api
-                .patch_metadata(
-                    &rs_name,
-                    &params,
-                    &Patch::Apply(json!({
-                        "apiVersion": ReplicaSet::api_version(&()),
-                        "kind": ReplicaSet::kind(&()),
-                        "metadata": {
-                            "annotations": {
-                                RESTATE_REMOVE_VERSION_AT_ANNOTATION: null,
-                            }
-                        }
-                    })),
-                )
-                .await?;
+            // it was scheduled for removal but looks active again, so reset the timer
+            unschedule_version_removal(rs_api, &rs).await?;
 
             continue;
         }
@@ -568,33 +536,13 @@ pub async fn cleanup_old_replicasets(
             }
             (None, _, true) => {
                 // endpoint exists and there's no valid remove_version_at annotation, create one
-                let drain_delay_seconds = rsd.spec.restate.drain_delay_seconds();
-                info!(
-                    replicaset = %rs_name,
-                    namespace = %namespace,
-                    drain_delay_seconds,
-                    "Scheduling removal of old ReplicaSet (after drain delay)"
-                );
-                let remove_at = chrono::Utc::now()
-                    .checked_add_signed(chrono::TimeDelta::seconds(drain_delay_seconds))
-                    .expect("remove_version_at in bounds");
-
-                let params = PatchParams::apply("restate-operator/remove-version-at").force();
-                let patch = ObjectMeta {
-                    annotations: Some(
-                        [(
-                            RESTATE_REMOVE_VERSION_AT_ANNOTATION.to_string(),
-                            remove_at.to_rfc3339(),
-                        )]
-                        .into(),
-                    ),
-                    ..Default::default()
-                }
-                .into_request_partial::<ReplicaSet>();
-
-                rs_api
-                    .patch_metadata(&rs_name, &params, &Patch::Apply(patch))
-                    .await?;
+                let remove_at = schedule_version_removal(
+                    rs_api,
+                    namespace,
+                    &rs_name,
+                    rsd.spec.restate.drain_delay_seconds(),
+                )
+                .await?;
 
                 // ensure we keep track of the soonest remove_at
                 next_removal = match next_removal {
@@ -838,20 +786,62 @@ mod tests {
         const RSD_UID: &str = "uid-123";
         const VERSION: &str = "greeter-old";
 
-        /// Every request the reconciler made, in order, as "METHOD /path".
+        /// One request the reconciler made.
+        #[derive(Clone)]
+        struct Call {
+            method: String,
+            path: String,
+            field_manager: Option<String>,
+            /// Which kind of patch it was.
+            content_type: Option<String>,
+        }
+
+        /// Every request the reconciler made, in order.
         #[derive(Clone, Default)]
-        struct Calls(Arc<Mutex<Vec<String>>>);
+        struct Calls(Arc<Mutex<Vec<Call>>>);
 
         impl Calls {
+            /// Matching requests as "METHOD /path".
             fn matching(&self, needle: &str) -> Vec<String> {
+                self.to_path(needle)
+                    .into_iter()
+                    .map(|call| format!("{} {}", call.method, call.path))
+                    .collect()
+            }
+
+            /// The field managers of matching requests, in order.
+            fn field_managers(&self, needle: &str) -> Vec<String> {
+                self.to_path(needle)
+                    .into_iter()
+                    .filter_map(|call| call.field_manager)
+                    .collect()
+            }
+
+            /// The patch types of matching requests, in order.
+            fn patch_types(&self, needle: &str) -> Vec<String> {
+                self.to_path(needle)
+                    .into_iter()
+                    .filter_map(|call| call.content_type)
+                    .collect()
+            }
+
+            fn to_path(&self, needle: &str) -> Vec<Call> {
                 self.0
                     .lock()
                     .expect("calls are not poisoned")
                     .iter()
-                    .filter(|call| call.contains(needle))
+                    .filter(|call| call.path.contains(needle))
                     .cloned()
                     .collect()
             }
+        }
+
+        fn field_manager_of(query: Option<&str>) -> Option<String> {
+            query?
+                .split('&')
+                .find_map(|pair| pair.strip_prefix("fieldManager="))
+                // slashes in manager names are escaped on the wire
+                .map(|manager| manager.replace("%2F", "/"))
         }
 
         struct Harness {
@@ -884,11 +874,17 @@ mod tests {
                     let calls = calls.clone();
                     async move {
                         let path = req.uri().path().to_owned();
-                        calls
-                            .0
-                            .lock()
-                            .expect("calls are not poisoned")
-                            .push(format!("{} {path}", req.method()));
+                        let content_type = req
+                            .headers()
+                            .get(http::header::CONTENT_TYPE)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_owned);
+                        calls.0.lock().expect("calls are not poisoned").push(Call {
+                            method: req.method().to_string(),
+                            path: path.clone(),
+                            field_manager: field_manager_of(req.uri().query()),
+                            content_type,
+                        });
 
                         // enough of a body for kube to deserialise the return type of
                         // whichever call this was; none of it is asserted on
@@ -1162,6 +1158,71 @@ mod tests {
                 harness.calls.matching("horizontalpodautoscalers"),
                 Vec::<String>::new(),
                 "an owned HPA is garbage-collected with the RestateDeployment, not by us"
+            );
+        }
+
+        /// Stamp and clear both go out under one field manager. The controller's rollback
+        /// path clears through this same helper.
+        #[tokio::test]
+        async fn the_drain_deadline_is_stamped_and_cleared_by_one_field_manager() {
+            const MANAGER: &str = "restate-operator/remove-version-at";
+            let patch_of =
+                |name| format!("PATCH /apis/apps/v1/namespaces/{NAMESPACE}/replicasets/{name}");
+            let rsd = rsd(false, false);
+
+            // superseded with nothing in flight, so this pass stamps a deadline
+            let stamping = harness(vec![version("dp_super", None)], vec![]);
+            let (_, next_removal) = cleanup_old_replicasets(
+                NAMESPACE,
+                &stamping.ctx,
+                &stamping.rs_api,
+                RSD_UID,
+                &rsd,
+                &usage_of("dp_super", DeploymentUsage::default()),
+                None,
+            )
+            .await
+            .expect("cleanup succeeds");
+
+            assert!(next_removal.is_some(), "the version is left to drain");
+            assert_eq!(stamping.calls.matching(VERSION), vec![patch_of(VERSION)]);
+            assert_eq!(stamping.calls.field_managers(VERSION), vec![MANAGER]);
+            assert_eq!(
+                stamping.calls.patch_types(VERSION),
+                vec!["application/apply-patch+yaml"],
+            );
+
+            // a version still holding an invocation sheds its deadline, same manager
+            let clearing = harness(vec![version("dp_pinned", Some(chrono::Utc::now()))], vec![]);
+            let pinned = DeploymentUsage {
+                latest_for_service: false,
+                pinned_invocations: 1,
+                unpinned_invocations: 0,
+            };
+            let (blocking, _) = cleanup_old_replicasets(
+                NAMESPACE,
+                &clearing.ctx,
+                &clearing.rs_api,
+                RSD_UID,
+                &rsd,
+                &usage_of("dp_pinned", pinned),
+                None,
+            )
+            .await
+            .expect("cleanup succeeds");
+
+            assert_eq!(
+                blocking,
+                vec![BlockingVersion {
+                    name: VERSION.into(),
+                    usage: pinned,
+                }],
+            );
+            assert_eq!(clearing.calls.matching(VERSION), vec![patch_of(VERSION)]);
+            assert_eq!(clearing.calls.field_managers(VERSION), vec![MANAGER]);
+            assert_eq!(
+                clearing.calls.patch_types(VERSION),
+                vec!["application/apply-patch+yaml"],
             );
         }
     }

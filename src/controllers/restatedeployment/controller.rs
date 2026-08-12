@@ -48,7 +48,8 @@ use crate::{Error, Result};
 // Import our reconcilers
 use crate::controllers::restatedeployment::cleanup::{
     CleanupMode, DeploymentUsage, DeploymentUsageMap, DeploymentUsageRows,
-    blocked_deletion_requeue, deployment_usage_query, describe_blocking_versions,
+    RESTATE_REMOVE_VERSION_AT_ANNOTATION, blocked_deletion_requeue, deployment_usage_query,
+    describe_blocking_versions, unschedule_version_removal,
 };
 use crate::controllers::restatedeployment::reconcilers;
 
@@ -314,6 +315,8 @@ impl RestateDeployment {
         // recorded by the operator on the ReplicaSet at creation (in-process tunnel
         // mode) and read back when building the registration URL
         annotations.remove(RESTATE_TUNNEL_NAME_ANNOTATION);
+        // the drain deadline; a copy would land under a manager the clear can't give up
+        annotations.remove(RESTATE_REMOVE_VERSION_AT_ANNOTATION);
 
         // Create/update the ReplicaSet for this version
         let reconcile_result = reconcilers::replicaset::reconcile_replicaset(
@@ -396,6 +399,11 @@ impl RestateDeployment {
                             ),
                         )
                         .await?;
+
+                    // This ReplicaSet was superseded before, so it can still carry the
+                    // deadline it drained under; nothing else removes it, and the next
+                    // rollout would tear it down early.
+                    unschedule_version_removal(&rs_api, &existing_replicaset).await?;
 
                     existing_replicaset
                 } else {
