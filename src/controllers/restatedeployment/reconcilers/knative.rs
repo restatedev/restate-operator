@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{Api, DeleteParams, PartialObjectMetaExt, Patch, PatchParams, PropagationPolicy};
+use kube::runtime::events::{Event, EventType};
 use kube::runtime::reflector::ObjectRef;
 use kube::{Resource, ResourceExt};
 use serde_json::json;
@@ -15,6 +16,7 @@ use crate::controllers::restatedeployment::controller::{
     Context, RESTATE_DEPLOYMENT_ID_ANNOTATION,
 };
 use crate::controllers::restatedeployment::reconcilers::replicaset::generate_pod_template_hash;
+use crate::controllers::restatedeployment::registration;
 use crate::resources::knative::{
     Configuration, ConfigurationTemplateMetadata, ConfigurationTemplateSpec,
     ConfigurationTemplateSpecContainers, Revision, Route, RouteSpec, RouteTraffic,
@@ -212,23 +214,31 @@ pub async fn reconcile_knative(
         knative_status.url = route.status.as_ref().and_then(|s| s.url.clone());
     }
 
-    // Register or lookup deployment
-    let deployment_id = register_or_lookup_deployment(ctx, rsd, namespace, &config, &route).await?;
-    trace!(deployment_id = %deployment_id, "Deployment registered/looked up");
-
-    // Update status with deployment ID
-    status.deployment_id = Some(deployment_id.clone());
-
-    // Annotate Configuration with deployment metadata
-    annotate_configuration(ctx, namespace, &config, &deployment_id).await?;
-
-    // Cleanup old Configurations (mirrors ReplicaSet cleanup pattern)
     // this path only runs for a live RestateDeployment; deletion goes to `cleanup`.
+    // Read before registering, because what Restate currently routes to is what decides
+    // whether this version needs registering, promoting, or leaving alone.
     let deployments = rsd.list_deployments(ctx, CleanupMode::Rollout).await?;
     let rsd_uid = rsd
         .uid()
         .ok_or_else(|| Error::InvalidRestateConfig("RestateDeployment must have UID".into()))?;
 
+    // Registers, promotes, or leaves alone as Restate's routing requires, annotating the
+    // Configuration with the resulting deployment id.
+    let deployment_id = register_or_promote_deployment(
+        ctx,
+        rsd,
+        namespace,
+        &rsd_uid,
+        &config,
+        &route,
+        &deployments,
+    )
+    .await?;
+    trace!(deployment_id = %deployment_id, "Deployment registered/looked up");
+
+    status.deployment_id = Some(deployment_id);
+
+    // Cleanup old Configurations (mirrors ReplicaSet cleanup pattern)
     let (_, next_removal) =
         cleanup_old_configurations(namespace, ctx, &rsd_uid, rsd, &deployments, Some(&tag)).await?;
 
@@ -636,23 +646,54 @@ fn check_revision_ready(revision: &Revision) -> Result<()> {
     })
 }
 
-/// Register deployment with Restate or lookup existing deployment ID
-async fn register_or_lookup_deployment(
+/// Register this version's endpoint with Restate, promoting it if a rollback needs it.
+///
+/// Knative names its Configuration and Route after the same content hash the ReplicaSet path
+/// uses, so `v1 -> v2 -> v1` re-adopts v1's Configuration, its Route URL and its deployment
+/// id here too — and the same rollback has to move Restate's routing. This used to return on
+/// the recorded annotation alone, which meant it could never promote.
+#[allow(clippy::too_many_arguments)]
+async fn register_or_promote_deployment(
     ctx: &Context,
     rsd: &RestateDeployment,
-    _namespace: &str,
+    namespace: &str,
+    rsd_uid: &str,
     config: &Configuration,
     route: &Route,
+    deployments: &DeploymentUsageMap,
 ) -> Result<String> {
-    // Check if Configuration already has deployment-id annotation
-    if let Some(annotations) = &config.metadata.annotations
-        && let Some(deployment_id) = annotations.get(RESTATE_DEPLOYMENT_ID_ANNOTATION)
-    {
-        trace!(
-            deployment_id = %deployment_id,
-            "Found existing deployment ID in Configuration annotation"
-        );
-        return Ok(deployment_id.clone());
+    let recorded_id = config.annotations().get(RESTATE_DEPLOYMENT_ID_ANNOTATION);
+
+    let action =
+        registration::plan_registration(recorded_id.map(String::as_str), deployments, || {
+            registration::owned_deployment_ids(&ctx.configuration_store, namespace, rsd_uid)
+        });
+
+    match &action {
+        // Restate already sends new invocations here; nothing to say to it.
+        registration::RegistrationAction::AlreadyLatest => {
+            let recorded_id = recorded_id.cloned().expect("AlreadyLatest implies an id");
+            trace!(
+                deployment_id = %recorded_id,
+                "Configuration's deployment is already latest"
+            );
+            annotate_configuration(ctx, namespace, config, &recorded_id).await?;
+            return Ok(recorded_id);
+        }
+        registration::RegistrationAction::Conflict => {
+            return Err(Error::DeploymentNotLatest {
+                message: format!(
+                    "Deployment {} is registered but superseded, and no Configuration of this \
+                     RestateDeployment is serving its services. Something outside this \
+                     RestateDeployment has registered them; check `GET /services` against the \
+                     Restate admin API. The operator will not force a promotion here.",
+                    recorded_id.map(String::as_str).unwrap_or("<unknown>"),
+                ),
+                reason: "ForeignDeployment".into(),
+                requeue_after: None,
+            });
+        }
+        _ => {}
     }
 
     // Build endpoint URL from Route default URL
@@ -673,11 +714,42 @@ async fn register_or_lookup_deployment(
         .register
         .maybe_tunnel_url(&ctx.rce_store, url)?;
 
-    let deployment_id = rsd
-        .register_service_with_restate(ctx, &url, rsd.spec.restate.use_http11.as_ref().cloned())
-        .await?;
+    let registered = registration::register_deployment(
+        ctx,
+        rsd,
+        &url,
+        rsd.spec.restate.use_http11.as_ref().cloned(),
+        action.overwrite(),
+    )
+    .await?;
 
-    Ok(deployment_id)
+    // Recorded before the routing is confirmed, for the reason given in the ReplicaSet path:
+    // the id is what Restate holds for this endpoint either way, and it is what lets the next
+    // reconcile plan a promotion rather than repeating this same plain registration.
+    annotate_configuration(ctx, namespace, config, &registered.id).await?;
+
+    registration::confirm_latest(ctx, &rsd.spec.restate.register, &registered).await?;
+
+    if let registration::RegistrationAction::Promote { superseded_by } = &action {
+        ctx.recorder
+            .publish(
+                &Event {
+                    type_: EventType::Normal,
+                    reason: "Promoted".into(),
+                    note: Some(format!(
+                        "Promoted deployment {} back to latest for Configuration {}, superseding {superseded_by}",
+                        registered.id,
+                        config.name_any(),
+                    )),
+                    action: "Reconcile".into(),
+                    secondary: None,
+                },
+                &rsd.object_ref(&()),
+            )
+            .await?;
+    }
+
+    Ok(registered.id)
 }
 
 /// Annotate Configuration with deployment metadata

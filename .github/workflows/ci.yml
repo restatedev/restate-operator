@@ -49,3 +49,55 @@ jobs:
       # of only surfacing during the tagged release build.
       - name: Build the release image (build-only, no push)
         run: just docker
+      # Hand the built image to the e2e job rather than making it rebuild. The musl
+      # cross-compile is the slowest thing in CI; paying for it twice would roughly
+      # double PR wall-clock for no extra coverage.
+      - name: Export the image for the e2e job
+        run: docker save ghcr.io/restatedev/restate-operator:local -o /tmp/operator-image.tar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: operator-image
+          path: /tmp/operator-image.tar
+          retention-days: 1
+
+  e2e-rollback:
+    name: E2E rollback
+    runs-on: ubuntu-latest
+    needs: build-image
+    # Three scenarios, each standing up a fresh RestateDeployment from scratch and
+    # waiting out real drain delays. A full run is well under 10 minutes; the
+    # margin is so a slow runner reports failures rather than a bare cancellation.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install just
+        uses: extractions/setup-just@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: operator-image
+          path: /tmp
+      - name: Load the operator image
+        run: docker load -i /tmp/operator-image.tar
+
+      - name: Build the greeter image
+        working-directory: examples/services/greeter
+        run: just docker
+
+      # Create the cluster here rather than letting the script do it, so both
+      # images can be loaded before the operator starts. The script reuses an
+      # existing healthy cluster of this name, so SKIP_BUILD=1 is all it needs.
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: restate-rollback-e2e
+
+      - name: Load images into kind
+        run: |
+          kind load docker-image ghcr.io/restatedev/restate-operator:local --name restate-rollback-e2e
+          kind load docker-image dev.local/restatedev/restate-operator/greeter:local --name restate-rollback-e2e
+
+      - name: Run the rollback e2e
+        env:
+          SKIP_BUILD: "1"
+        run: ./e2e/rollback.sh

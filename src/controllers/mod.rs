@@ -271,7 +271,12 @@ pub fn service_url(
 /// 2. Polls the reflector until the store is ready (pre-warming)
 /// 3. Returns the reflector stream ready to be passed to owns_stream() or watches_stream()
 ///
-/// The store must be created with `store_shared()` for this pattern to work correctly.
+/// `store` may come from either `store()` or `store_shared()`; readiness is signalled by the
+/// writer, which both share. Use `store_shared()` only if something else needs to subscribe.
+///
+/// Events consumed while pre-warming are not delivered to the controller. That is fine for
+/// the streams used here: the RestateDeployment reflector driving the controller emits every
+/// object on its initial list, so each one is reconciled once at startup regardless.
 pub async fn prewarmed_reflector<K>(
     store: reflector::Store<K>,
     writer: reflector::store::Writer<K>,
