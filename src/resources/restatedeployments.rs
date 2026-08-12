@@ -134,8 +134,16 @@ pub struct RestateDeploymentSpec {
     #[schemars(default = "default_replicas", range(min = 0))]
     pub replicas: i32,
 
-    /// The number of old ReplicaSets to retain to allow rollback. Defaults to 10.
-    /// Only used in ReplicaSet mode.
+    /// The number of old, fully drained versions to keep for rollback before the operator
+    /// deletes them. Defaults to 10.
+    ///
+    /// Applies to both deployment modes: it bounds retained ReplicaSets in ReplicaSet mode
+    /// and retained Knative Configurations in Knative mode. Versions past the limit are
+    /// deregistered from Restate and removed once they have drained.
+    ///
+    /// In Knative mode a retained Configuration keeps running its `minScale` pods, because
+    /// Knative cannot rescale an existing Revision, so lower this for services with a high
+    /// `minScale` to avoid idle pods kept only for rollback.
     #[schemars(default = "default_revision_history_limit", range(min = 0))]
     pub revision_history_limit: i32,
 
