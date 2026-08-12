@@ -496,7 +496,7 @@ impl RestateDeployment {
             });
         }
 
-        if action != RegistrationAction::AlreadyLatest {
+        if !matches!(action, RegistrationAction::AlreadyLatest { .. }) {
             let valid = async {
                 if let Some(cluster_name) = &self.spec.restate.register.cluster {
                     // wait for the cluster to be ready before registering to it
