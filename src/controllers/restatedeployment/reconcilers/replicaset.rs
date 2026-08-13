@@ -549,6 +549,8 @@ pub async fn cleanup_old_replicasets(
                         )
                         .await?;
                     }
+
+                    ctx.invalidate_usage_cache(&rsd.spec.restate.register);
                 }
 
                 debug!("Deleting old ReplicaSet {rs_name} in namespace {namespace}");

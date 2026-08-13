@@ -237,6 +237,8 @@ pub(super) async fn register_deployment(
         "Successfully registered Restate deployment"
     );
 
+    ctx.invalidate_usage_cache(endpoint);
+
     Ok(RegisteredDeployment {
         id: resp.id,
         services: resp.services.into_iter().map(|svc| svc.name).collect(),

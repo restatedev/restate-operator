@@ -1000,6 +1000,8 @@ pub async fn cleanup_old_configurations(
                         )
                         .await?;
                     }
+
+                    ctx.invalidate_usage_cache(&rsd.spec.restate.register);
                 }
 
                 debug!("Deleting old Configuration {config_name} in namespace {namespace}");

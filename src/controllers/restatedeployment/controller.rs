@@ -52,6 +52,7 @@ use crate::controllers::restatedeployment::cleanup::{
 use crate::controllers::restatedeployment::reconcilers;
 use crate::controllers::restatedeployment::registration::{self, RegistrationAction};
 use crate::controllers::restatedeployment::retry::ExpensiveOperationRetries;
+use crate::controllers::restatedeployment::usage_cache::UsageCache;
 
 use super::reconcilers::replicaset::{
     POD_TEMPLATE_HASH_LABEL, RESTATE_POD_TEMPLATE_ANNOTATION, RESTATE_TUNNEL_NAME_ANNOTATION,
@@ -90,6 +91,8 @@ pub(super) struct Context {
     pub http_client: reqwest::Client,
     /// Process-local, endpoint-scoped retry coordination for expensive admin work.
     pub expensive_operation_retries: ExpensiveOperationRetries,
+    /// Process-local, endpoint-scoped cache of deployment-usage answers.
+    pub usage_cache: UsageCache,
 }
 
 impl Context {
@@ -120,6 +123,7 @@ impl Context {
             diagnostics: state.diagnostics.clone(),
             http_client: reqwest::Client::new(),
             expensive_operation_retries: ExpensiveOperationRetries::new(),
+            usage_cache: UsageCache::new(),
         })
     }
 
@@ -151,6 +155,14 @@ impl Context {
         Ok(admin_endpoint
             .admin_url(&self.rce_store, &self.cluster_dns)?
             .to_string())
+    }
+
+    /// Drop this endpoint's cached usage answer after a write that changes it. An endpoint
+    /// that will not resolve has nothing cached under it: the query never went out.
+    pub fn invalidate_usage_cache(&self, admin_endpoint: &RestateAdminEndpoint) {
+        if let Ok(endpoint) = self.admin_endpoint_key(admin_endpoint) {
+            self.usage_cache.invalidate(&endpoint);
+        }
     }
 
     fn expensive_operation_key(&self, rsd: &RestateDeployment) -> (String, String) {
@@ -1161,13 +1173,24 @@ impl RestateDeployment {
         ctx: &Context,
         mode: CleanupMode,
     ) -> Result<DeploymentUsageMap> {
+        // A hit sits in front of admission deliberately: it sends nothing, so making it wait
+        // for a permit would leave the queue this cache exists to remove.
+        let cache_key = ctx.admin_endpoint_key(&self.spec.restate.register).ok();
+        if let Some(key) = &cache_key
+            && let Some(usage) = ctx.usage_cache.get(key, mode)
+        {
+            return Ok(usage);
+        }
+
         ctx.admit_expensive_operation(self)?;
         let response = self.query_deployment_usage(ctx, mode).await;
         ctx.finish_expensive_operation(self);
-        match response {
-            Ok(response) => Ok(response.into_map()),
-            Err(err) => Err(err),
+
+        let usage = response?.into_map();
+        if let Some(key) = cache_key {
+            ctx.usage_cache.insert(key, mode, &usage);
         }
+        Ok(usage)
     }
 
     async fn query_deployment_usage(
