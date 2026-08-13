@@ -126,4 +126,8 @@ lint:
 test:
     cargo test --all-targets
 
+# Docker-backed RestateDeployment introspection compatibility tests.
+test-e2e:
+    cargo test --lib controllers::restatedeployment::e2e -- --ignored --nocapture --test-threads=1
+
 check: fmt lint
