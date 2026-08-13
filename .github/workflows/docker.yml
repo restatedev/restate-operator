@@ -7,9 +7,10 @@ on:
 jobs:
   build-docker-image:
     name: Build docker image
-    # Pinned to the commit before restatedev/restate f2605af9 (#5111), which added a
-    # `cargo metadata | jq 'select(.name == "restate-server")'` step. This repo's package
-    # is restate-operator, so that step exits non-zero here and fails the release build.
-    # Return to @main once the shared workflow takes the package name as an input.
-    uses: restatedev/restate/.github/workflows/docker.yml@e80dfe702f256abe9f53711910caf73fba05c2fb
+    # this workflow is from the restate repo, so we pin the revision to
+    # protect ourselves from unexpected changes that might impact CI in
+    # this repo.
+    uses: restatedev/restate/.github/workflows/docker.yml@f901a8e725cb141e3c1919a837945c978d52fb80
+    with:
+      cargoPackage: restate-operator
     secrets: inherit
