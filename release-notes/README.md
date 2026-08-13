@@ -66,17 +66,22 @@ When making a significant change that affects users, create a release note file 
 
 Release checklist (in order):
 
-1. **Bump the version in all three files, together, to the new version:**
+1. **Bump the version in all these places, together, to the new version:**
    - `Cargo.toml` — `version = "<version>"`
    - `Cargo.lock` — the `restate-operator` package entry. Do **not** hand-edit it;
      run `cargo check` after bumping `Cargo.toml` so the lockfile updates, then
      confirm the `restate-operator` entry reads `version = "<version>"`.
-   - `charts/restate-operator-helm/Chart.yaml` — `version: "<version>"`
+   - `charts/restate-operator-helm/Chart.yaml` — the chart `version:` **and** the
+     `restate-operator-crds` dependency `version:` (the two charts release in lockstep).
+   - `charts/restate-operator-crds/Chart.yaml` — `version: "<version>"`
 2. **Consolidate release notes** into `v<version>.md` (see the detailed steps below).
 3. **Delete the individual `unreleased/` files** after consolidation (keep `.gitkeep`).
 4. **Merge the release PR** into `main`.
 5. **Tag `v<version>` on the merge commit** and push it to trigger the release
-   workflow, which builds and publishes the docker image and helm chart.
+   workflow, which builds and publishes the docker image and both helm charts
+   (`restate-operator-helm` and `restate-operator-crds`).
+6. **Accept the draft GitHub release** once the workflow finishes.
+7. **Announce the release** in the community Slack and Discord.
 
 The rest of this section details the consolidation step.
 
