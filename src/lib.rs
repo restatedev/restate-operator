@@ -64,6 +64,9 @@ pub enum Error {
         body: String,
     },
 
+    #[error("expensive Restate admin operation deferred for {requeue_after:?}")]
+    ExpensiveOperationDeferred { requeue_after: Duration },
+
     #[error("Encountered a hash collision, will retry with a new template hash")]
     HashCollision,
 
@@ -126,6 +129,7 @@ impl Error {
             Error::InvalidSigningKeyError(_) => "InvalidSigningKeyError",
             Error::AdminCallFailed(_) => "AdminCallFailed",
             Error::AdminCallRejected { .. } => "AdminCallRejected",
+            Error::ExpensiveOperationDeferred { .. } => "ExpensiveOperationDeferred",
             Error::HashCollision => "HashCollision",
             Error::DeploymentNotLatest { .. } => "DeploymentNotLatest",
             Error::DeploymentInUse { .. } => "DeploymentInUse",

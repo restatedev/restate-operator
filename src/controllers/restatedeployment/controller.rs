@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -50,6 +51,7 @@ use crate::controllers::restatedeployment::cleanup::{
 };
 use crate::controllers::restatedeployment::reconcilers;
 use crate::controllers::restatedeployment::registration::{self, RegistrationAction};
+use crate::controllers::restatedeployment::retry::ExpensiveOperationRetries;
 
 use super::reconcilers::replicaset::{
     POD_TEMPLATE_HASH_LABEL, RESTATE_POD_TEMPLATE_ANNOTATION, RESTATE_TUNNEL_NAME_ANNOTATION,
@@ -86,6 +88,8 @@ pub(super) struct Context {
     pub metrics: Metrics,
     /// HTTP client
     pub http_client: reqwest::Client,
+    /// Process-local, endpoint-scoped retry coordination for expensive admin work.
+    pub expensive_operation_retries: ExpensiveOperationRetries,
 }
 
 impl Context {
@@ -115,6 +119,7 @@ impl Context {
             metrics,
             diagnostics: state.diagnostics.clone(),
             http_client: reqwest::Client::new(),
+            expensive_operation_retries: ExpensiveOperationRetries::new(),
         })
     }
 
@@ -138,6 +143,65 @@ impl Context {
         }
 
         Ok(request_builder)
+    }
+
+    /// A stable cache key for capabilities of the downstream Restate server. Authentication is
+    /// intentionally excluded: token rotation does not change which system tables exist.
+    pub fn admin_endpoint_key(&self, admin_endpoint: &RestateAdminEndpoint) -> Result<String> {
+        Ok(admin_endpoint
+            .admin_url(&self.rce_store, &self.cluster_dns)?
+            .to_string())
+    }
+
+    fn expensive_operation_key(&self, rsd: &RestateDeployment) -> (String, String) {
+        let endpoint = self
+            .admin_endpoint_key(&rsd.spec.restate.register)
+            // Invalid endpoint configuration cannot be globally coordinated. Preserve the
+            // floor rather than hiding the configuration error behind a retry storm.
+            .unwrap_or_else(|_| "<unresolved-admin-endpoint>".into());
+        let resource = rsd.uid().unwrap_or_else(|| {
+            format!("{}/{}", rsd.namespace().unwrap_or_default(), rsd.name_any())
+        });
+        (endpoint, resource)
+    }
+
+    fn admit_expensive_operation(&self, rsd: &RestateDeployment) -> Result<()> {
+        let (endpoint, resource) = self.expensive_operation_key(rsd);
+        self.expensive_operation_retries
+            .admit(endpoint, resource)
+            .map_err(|requeue_after| Error::ExpensiveOperationDeferred { requeue_after })
+    }
+
+    fn expensive_retry_after(&self, rsd: &RestateDeployment) -> Duration {
+        let (endpoint, resource) = self.expensive_operation_key(rsd);
+        self.expensive_operation_retries.failure(endpoint, resource)
+    }
+
+    fn finish_expensive_operation(&self, rsd: &RestateDeployment) {
+        let (endpoint, _) = self.expensive_operation_key(rsd);
+        self.expensive_operation_retries.finish(&endpoint);
+    }
+
+    fn reset_expensive_retries(&self, rsd: &RestateDeployment) {
+        let (endpoint, resource) = self.expensive_operation_key(rsd);
+        self.expensive_operation_retries
+            .reset_resource(&endpoint, &resource);
+    }
+}
+
+impl RestateDeployment {
+    /// Spread otherwise-healthy periodic reconciliations over a minute, using stable resource
+    /// identity so an operator restart does not align every deployment again. This is a poll,
+    /// not an error retry, so a small positive jitter is preferable to an exact global cadence.
+    fn healthy_requeue_after(&self) -> Duration {
+        const BASE: Duration = Duration::from_secs(5 * 60);
+        const JITTER: u64 = 60;
+
+        let mut hasher = fnv::FnvHasher::default();
+        self.uid()
+            .unwrap_or_else(|| self.name_any())
+            .hash(&mut hasher);
+        BASE + Duration::from_secs(hasher.finish() % (JITTER + 1))
     }
 }
 
@@ -226,8 +290,10 @@ fn root_cause(err: &Error) -> &Error {
     }
 }
 
+#[cfg(test)]
 fn error_policy<K, C>(_rs: Arc<K>, err: &Error, _ctx: C) -> Action {
     match root_cause(err) {
+        Error::ExpensiveOperationDeferred { requeue_after } => Action::requeue(*requeue_after),
         // A drain knows its own deadline; the blanket interval would make a short
         // drainDelaySeconds cost up to 30s per version anyway. A deletion blocked on
         // in-flight invocations sets its own interval too, backing off as the wait grows
@@ -239,6 +305,30 @@ fn error_policy<K, C>(_rs: Arc<K>, err: &Error, _ctx: C) -> Action {
             requeue_after: Some(requeue_after),
             ..
         } => Action::requeue(*requeue_after),
+        _ => Action::requeue(Duration::from_secs(30)),
+    }
+}
+
+/// Controller-framework errors do not pass through `reconcile_status`, including finalizer
+/// failures during deletion. Apply the same endpoint-scoped protection there while preserving a
+/// real drain deadline when one exists.
+fn restate_deployment_error_policy(
+    rsd: Arc<RestateDeployment>,
+    err: &Error,
+    ctx: Arc<Context>,
+) -> Action {
+    match root_cause(err) {
+        Error::ExpensiveOperationDeferred { requeue_after } => Action::requeue(*requeue_after),
+        Error::DeploymentDraining {
+            requeue_after: Some(requeue_after),
+        } => Action::requeue(*requeue_after),
+        Error::DeploymentInUse {
+            requeue_after: Some(requeue_after),
+            ..
+        } => Action::requeue((*requeue_after).max(ctx.expensive_retry_after(&rsd))),
+        Error::AdminCallFailed(_) | Error::AdminCallRejected { .. } => {
+            Action::requeue(ctx.expensive_retry_after(&rsd))
+        }
         _ => Action::requeue(Duration::from_secs(30)),
     }
 }
@@ -678,7 +768,7 @@ impl RestateDeployment {
             .and_then(|s| s.conditions.as_ref())
             .and_then(|c| c.iter().find(|cond| cond.r#type == "Ready"));
 
-        let (result, message, reason, status) = if is_knative {
+        let (mut result, message, reason, status) = if is_knative {
             // Delegate to Knative reconciler
             let knative_result = if self.spec.restate.is_in_process_tunnel() {
                 // An in-process tunnel carries no traffic the Knative autoscaler can
@@ -701,10 +791,10 @@ impl RestateDeployment {
                             if secs < 5 * 60 {
                                 Action::requeue(Duration::from_secs(secs))
                             } else {
-                                Action::requeue(Duration::from_secs(5 * 60))
+                                Action::requeue(self.healthy_requeue_after())
                             }
                         }
-                        None => Action::requeue(Duration::from_secs(5 * 60)),
+                        None => Action::requeue(self.healthy_requeue_after()),
                     };
 
                     (
@@ -846,10 +936,10 @@ impl RestateDeployment {
                             if secs < 5 * 60 {
                                 Action::requeue(Duration::from_secs(secs))
                             } else {
-                                Action::requeue(Duration::from_secs(5 * 60))
+                                Action::requeue(self.healthy_requeue_after())
                             }
                         }
-                        None => Action::requeue(Duration::from_secs(5 * 60)),
+                        None => Action::requeue(self.healthy_requeue_after()),
                     };
 
                     status_from_replica_set(
@@ -979,6 +1069,26 @@ impl RestateDeployment {
             }
         };
 
+        // These states all ran, or are about to immediately re-run, deployment usage
+        // accounting against Restate. Coordinate their retries per endpoint so one stuck
+        // resource cannot keep a full scan at a fixed cadence, and several resources sharing
+        // an environment cannot line up their retries. Route/Configuration readiness is
+        // deliberately not included: those paths fail before the Restate query and retain
+        // their short Kubernetes readiness polling.
+        if status == "True" {
+            ctx.reset_expensive_retries(self);
+        } else if result.is_ok() && requeues_after_expensive_admin_work(&reason) {
+            let requeue_after = ctx.expensive_retry_after(self);
+            debug!(
+                name = %self.name_any(),
+                namespace = %namespace,
+                reason = %reason,
+                requeue_after_secs = %requeue_after.as_secs(),
+                "Backing off an expensive RestateDeployment retry"
+            );
+            result = Ok(Action::requeue(requeue_after));
+        }
+
         // Emit a K8s Warning event for admin API failures so they're visible
         // via `kubectl describe` and `kubectl get events`
         if reason == "AdminCallFailed" || reason == "AdminCallRejected" {
@@ -1051,8 +1161,21 @@ impl RestateDeployment {
         ctx: &Context,
         mode: CleanupMode,
     ) -> Result<DeploymentUsageMap> {
-        let sql_query = deployment_usage_query(mode);
+        ctx.admit_expensive_operation(self)?;
+        let response = self.query_deployment_usage(ctx, mode).await;
+        ctx.finish_expensive_operation(self);
+        match response {
+            Ok(response) => Ok(response.into_map()),
+            Err(err) => Err(err),
+        }
+    }
 
+    async fn query_deployment_usage(
+        &self,
+        ctx: &Context,
+        mode: CleanupMode,
+    ) -> Result<DeploymentUsageRows> {
+        let sql_query = deployment_usage_query(mode);
         let resp = ctx
             .request(Method::POST, &self.spec.restate.register, "/query")?
             .header(reqwest::header::ACCEPT, "application/json")
@@ -1062,13 +1185,11 @@ impl RestateDeployment {
             .send()
             .await
             .map_err(Error::AdminCallFailed)?;
-        let response: DeploymentUsageRows = check_admin_response(resp)
+        check_admin_response(resp)
             .await?
             .json()
             .await
-            .map_err(Error::AdminCallFailed)?;
-
-        Ok(response.into_map())
+            .map_err(Error::AdminCallFailed)
     }
 
     /// How long ago deletion was requested, for pacing the retries of a blocked one.
@@ -1190,6 +1311,24 @@ impl RestateDeployment {
     }
 }
 
+/// Readiness conditions that occur after the normal ReplicaSet-mode usage query. The controller
+/// reports them as `Ready=False` rather than reconciliation errors, so they must opt into the
+/// shared retry coordinator here instead of relying on the controller framework's error policy.
+fn requeues_after_expensive_admin_work(reason: &str) -> bool {
+    matches!(
+        reason,
+        "AdminCallFailed"
+            | "AdminCallRejected"
+            | "ForeignDeployment"
+            | "NotLatest"
+            | "ClusterNotReady"
+            | "ReplicaSetNoStatus"
+            | "ReplicaSetScaling"
+            | "ReplicaSetPodNotReady"
+            | "ReplicaSetPodNotAvailable"
+    )
+}
+
 /// Build the `.status.labelSelector` for a ReplicaSet-mode RestateDeployment,
 /// scoped to the latest version's pods by appending the pod-template-hash.
 ///
@@ -1248,8 +1387,8 @@ pub fn validate_replica_set_status(
         status
     } else {
         return Err(Error::DeploymentNotReady {
-            message: "ReplicaSetNoStatus".into(),
-            reason: "ReplicaSet has no status set; it may have just been created".into(),
+            message: "ReplicaSet has no status set; it may have just been created".into(),
+            reason: "ReplicaSetNoStatus".into(),
             requeue_after: None,
             replica_set_status: status.cloned().map(Box::new),
         });
@@ -1494,7 +1633,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         .owns_stream(hpa_reflector)
         .run(
             reconcile,
-            error_policy,
+            restate_deployment_error_policy,
             Context::new(
                 client,
                 replicasets_store,
