@@ -2,10 +2,10 @@ apiVersion: v2
 name: restate-operator-helm
 description: An operator for Restate clusters
 type: application
-version: "3.0.0"
+version: "3.0.1"
 
 dependencies:
   - name: restate-operator-crds
-    version: "3.0.0"
+    version: "3.0.1"
     repository: "file://../restate-operator-crds"
     condition: installCrds
