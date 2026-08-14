@@ -158,6 +158,35 @@ where
         .collect()
 }
 
+/// Whether this RestateDeployment owns any versioned object other than `except_name` in the
+/// namespace — i.e. whether a previous version exists that cleanup might still need to drain.
+/// Read from the already-synced reflector cache, so it costs no admin call and mirrors the
+/// filter [`cleanup_old_replicasets`](super::reconcilers::replicaset::cleanup_old_replicasets)
+/// applies when deciding what to drain.
+pub(super) fn has_other_owned<K>(
+    store: &Store<K>,
+    namespace: &str,
+    rsd_uid: &str,
+    except_name: &str,
+) -> bool
+where
+    K: Resource + Clone + 'static,
+    K::DynamicType: std::hash::Hash + Eq + Clone + Default,
+{
+    store.state().into_iter().any(|obj| {
+        let obj_namespace = match obj.meta().namespace.as_deref() {
+            Some("") | None => "default",
+            Some(ns) => ns,
+        };
+        obj_namespace == namespace
+            && obj.name_any() != except_name
+            && obj.owner_references().iter().any(|reference| {
+                reference.uid == rsd_uid
+                    && reference.kind == <RestateDeployment as Resource>::kind(&())
+            })
+    })
+}
+
 /// A deployment as Restate returned it from registration.
 #[derive(Debug, Clone)]
 pub(super) struct RegisteredDeployment {
@@ -315,6 +344,22 @@ async fn latest_deployment_by_service(
         .services
         .into_iter()
         .map(|svc| (svc.name, svc.deployment_id))
+        .collect())
+}
+
+/// The set of deployment ids Restate currently routes at least one service to.
+///
+/// This is the same `latest_for_service` fact the usage query carries, but read from
+/// `GET /services` — a metadata call that never scans `sys_invocation_status`. It answers "is
+/// my recorded version still the one taking new invocations?" cheaply enough to run on the hot
+/// reconcile path, so the steady state can decide it is already latest without the usage query.
+pub(super) async fn latest_deployment_ids(
+    ctx: &Context,
+    endpoint: &RestateAdminEndpoint,
+) -> Result<BTreeSet<String>> {
+    Ok(latest_deployment_by_service(ctx, endpoint)
+        .await?
+        .into_values()
         .collect())
 }
 
@@ -477,5 +522,78 @@ mod tests {
         assert_eq!(RegistrationAction::Conflict.overwrite(), Overwrite::No);
         assert!(!Overwrite::No.force());
         assert!(Overwrite::Yes.force());
+    }
+
+    mod has_other_owned {
+        use super::super::has_other_owned;
+        use k8s_openapi::api::apps::v1::ReplicaSet;
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
+        use kube::runtime::{reflector, watcher};
+
+        const UID: &str = "rd-uid";
+        const NS: &str = "app";
+
+        fn replica_set(name: &str, namespace: &str, owner_uid: Option<&str>) -> ReplicaSet {
+            ReplicaSet {
+                metadata: ObjectMeta {
+                    name: Some(name.into()),
+                    namespace: Some(namespace.into()),
+                    owner_references: owner_uid.map(|uid| {
+                        vec![OwnerReference {
+                            kind: "RestateDeployment".into(),
+                            name: "rd".into(),
+                            uid: uid.into(),
+                            api_version: "restate.dev/v1beta1".into(),
+                            ..Default::default()
+                        }]
+                    }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        }
+
+        // The writer is returned boxed and must be kept alive: the Store reads through the
+        // shared handle the writer owns.
+        fn store_of(
+            objects: Vec<ReplicaSet>,
+        ) -> (reflector::Store<ReplicaSet>, Box<dyn std::any::Any>) {
+            let (reader, mut writer) = reflector::store::<ReplicaSet>();
+            writer.apply_watcher_event(&watcher::Event::Init);
+            for object in objects {
+                writer.apply_watcher_event(&watcher::Event::InitApply(object));
+            }
+            writer.apply_watcher_event(&watcher::Event::InitDone);
+            (reader, Box::new(writer))
+        }
+
+        #[test]
+        fn a_lone_version_has_no_others() {
+            let (store, _writer) = store_of(vec![replica_set("rd-current", NS, Some(UID))]);
+            assert!(!has_other_owned(&store, NS, UID, "rd-current"));
+        }
+
+        #[test]
+        fn an_older_owned_version_counts() {
+            let (store, _writer) = store_of(vec![
+                replica_set("rd-current", NS, Some(UID)),
+                replica_set("rd-old", NS, Some(UID)),
+            ]);
+            assert!(has_other_owned(&store, NS, UID, "rd-current"));
+        }
+
+        #[test]
+        fn foreign_other_namespace_and_orphaned_replicasets_do_not_count() {
+            let (store, _writer) = store_of(vec![
+                replica_set("rd-current", NS, Some(UID)),
+                // ours, but in another namespace
+                replica_set("rd-old", "other-ns", Some(UID)),
+                // same namespace, owned by a different RestateDeployment
+                replica_set("foreign", NS, Some("other-uid")),
+                // same namespace, no controller at all
+                replica_set("orphan", NS, None),
+            ]);
+            assert!(!has_other_owned(&store, NS, UID, "rd-current"));
+        }
     }
 }

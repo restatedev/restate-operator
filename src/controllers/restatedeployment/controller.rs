@@ -465,12 +465,28 @@ impl RestateDeployment {
         };
 
         // this path only runs for a live RestateDeployment; deletion goes to `cleanup`.
-        let mut deployments = self.list_deployments(&ctx, CleanupMode::Rollout).await?;
-
         let existing_deployment_id = replicaset
             .annotations()
             .get(RESTATE_DEPLOYMENT_ID_ANNOTATION)
             .cloned();
+
+        // Optimisation: only run the expensive invocation-status query when we really need it,
+        // not in the common case where this version is already latest with nothing to drain.
+        if !registration::has_other_owned(
+            &ctx.replicasets_store,
+            namespace,
+            &my_uid,
+            &versioned_name,
+        ) && let Some(recorded_id) = existing_deployment_id.as_deref()
+        {
+            let latest_ids =
+                registration::latest_deployment_ids(&ctx, &self.spec.restate.register).await?;
+            if latest_ids.contains(recorded_id) {
+                return Ok((replicaset, None));
+            }
+        }
+
+        let mut deployments = self.list_deployments(&ctx, CleanupMode::Rollout).await?;
 
         let action = registration::plan_registration(
             existing_deployment_id.as_deref(),
@@ -1386,7 +1402,10 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     let hpa_reflector =
         kube::runtime::reflector(hpa_writer, kube::runtime::watcher(hpas, cfg.clone()))
             .touched_objects()
-            .default_backoff();
+            .default_backoff()
+            // Wake the owner on a managed HPA's spec change, not the controller's frequent
+            // status heartbeats. After the reflector write, so `hpa_store` still sees every update.
+            .predicate_filter(predicates::generation);
 
     let (rce_store, rce_writer) = kube::runtime::reflector::store();
     let rce_reflector = kube::runtime::reflector(
