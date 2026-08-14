@@ -2,4 +2,4 @@ apiVersion: v2
 name: restate-operator-crds
 description: Restate operator CustomResourceDefinitions (RestateCluster, RestateDeployment, RestateCloudEnvironment)
 type: application
-version: "3.0.0"
+version: "3.0.1"
