@@ -55,8 +55,10 @@ pub(super) enum RegistrationAction {
     /// it, intact. Carries the id that currently holds latest, for the event the operator
     /// emits afterwards.
     Promote { superseded_by: String },
-    /// Already serving new invocations. Leave it alone.
-    AlreadyLatest,
+    /// Already serving new invocations. Leave it alone. Carries the recorded id, which this
+    /// variant can only be reached with — holding it here is what saves the caller from
+    /// re-deriving it from an `Option` it has already proven to be `Some`.
+    AlreadyLatest { deployment_id: String },
     /// Our deployment is registered but superseded, and no version of this RestateDeployment
     /// is serving these services either — so something outside it is. Forcing here would
     /// start a promotion war between two controllers, each bumping revisions to take the
@@ -103,7 +105,9 @@ pub(super) fn plan_registration(
     };
 
     if usage.latest_for_service {
-        return RegistrationAction::AlreadyLatest;
+        return RegistrationAction::AlreadyLatest {
+            deployment_id: recorded_id.to_owned(),
+        };
     }
 
     // Our deployment exists but is superseded. It can only have been superseded by whoever
@@ -386,6 +390,12 @@ mod tests {
         }
     }
 
+    fn already_latest(deployment_id: &str) -> RegistrationAction {
+        RegistrationAction::AlreadyLatest {
+            deployment_id: deployment_id.into(),
+        }
+    }
+
     #[test]
     fn nothing_recorded_registers() {
         assert_eq!(
@@ -409,8 +419,22 @@ mod tests {
         let deployments = DeploymentUsageMap::from([("dp_v1".into(), usage(true, 0))]);
         assert_eq!(
             plan_registration(Some("dp_v1"), &deployments, || owned(&["dp_v1"])),
-            RegistrationAction::AlreadyLatest
+            already_latest("dp_v1")
         );
+    }
+
+    /// The id travels with the verdict so the caller never has to assert an invariant the
+    /// planner already established. Previously the Knative path recovered it by unwrapping
+    /// the same `Option` it had passed in, which put a panic on the reconcile path.
+    #[test]
+    fn already_latest_carries_the_recorded_id() {
+        let deployments = DeploymentUsageMap::from([("dp_v1".into(), usage(true, 3))]);
+        let RegistrationAction::AlreadyLatest { deployment_id } =
+            plan_registration(Some("dp_v1"), &deployments, || owned(&["dp_v1"]))
+        else {
+            panic!("expected AlreadyLatest");
+        };
+        assert_eq!(deployment_id, "dp_v1");
     }
 
     /// The steady state must not pay for the cluster-wide reflector walk that only a
@@ -518,7 +542,7 @@ mod tests {
     fn only_promotion_overwrites() {
         assert_eq!(RegistrationAction::Register.overwrite(), Overwrite::No);
         assert_eq!(promote("dp_v2").overwrite(), Overwrite::Yes);
-        assert_eq!(RegistrationAction::AlreadyLatest.overwrite(), Overwrite::No);
+        assert_eq!(already_latest("dp_v1").overwrite(), Overwrite::No);
         assert_eq!(RegistrationAction::Conflict.overwrite(), Overwrite::No);
         assert!(!Overwrite::No.force());
         assert!(Overwrite::Yes.force());

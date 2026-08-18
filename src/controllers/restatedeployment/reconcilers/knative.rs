@@ -671,14 +671,13 @@ async fn register_or_promote_deployment(
 
     match &action {
         // Restate already sends new invocations here; nothing to say to it.
-        registration::RegistrationAction::AlreadyLatest => {
-            let recorded_id = recorded_id.cloned().expect("AlreadyLatest implies an id");
+        registration::RegistrationAction::AlreadyLatest { deployment_id } => {
             trace!(
-                deployment_id = %recorded_id,
+                deployment_id = %deployment_id,
                 "Configuration's deployment is already latest"
             );
-            annotate_configuration(ctx, namespace, config, &recorded_id).await?;
-            return Ok(recorded_id);
+            annotate_configuration(ctx, namespace, config, deployment_id).await?;
+            return Ok(deployment_id.clone());
         }
         registration::RegistrationAction::Conflict => {
             return Err(Error::DeploymentNotLatest {
