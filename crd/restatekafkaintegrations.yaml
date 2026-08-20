@@ -46,74 +46,72 @@ spec:
 
               The operator only models where Restate is and how to authenticate to it; everything else
               (Kafka connection, consumer settings, record mapper, metrics, retry policy) is the
-              container's own configuration surface and is passed through verbatim as a `.properties`
-              file via `spec.config` or `spec.configFrom`.
+              container's own configuration surface and is passed through verbatim as one or more
+              `.properties` files via `spec.config`.
             properties:
               config:
                 description: |-
-                  Inline configuration for the integration, in Java `.properties` format. The operator
-                  stores this in a ConfigMap it owns, mounts it, and points the container's
-                  `CONFIG_FILE` at it. Editing it rolls the pods.
+                  Inline configuration for the integration, in Java `.properties` format.
 
                   Every option documented at
                   https://github.com/restatedev/ingress-integration-kafka/blob/main/CONFIGURATION.md
                   is accepted, using the property-key spelling (not the environment-variable one).
                   At a minimum the integration needs `bootstrap.servers`, `group.id` and `topics`.
 
-                  `restate.ingress.url` and `restate.auth.token` set here have no effect: the operator
-                  supplies both as environment variables, which the container prefers over the file.
+                  The operator stores this in a ConfigMap it owns and mounts it as a config file, merged
+                  after its own resolved `restate.ingress.url` (so this can override the ingress URL) and
+                  before `spec.configRefs` (so a ref can override this). Editing it rolls the pods.
 
-                  This is the CR's own body, so it is stored and displayed in plain text - keep
-                  credentials (`sasl.jaas.config`, `sasl.password`, ...) in `spec.configFrom` with a
-                  Secret instead.
-
-                  Mutually exclusive with `configFrom`.
+                  This is part of the custom resource, so it is stored and displayed in plain text - keep
+                  credentials (`sasl.jaas.config`, `sasl.password`, ...) in a `spec.configRefs` Secret,
+                  and the Restate ingress bearer token in `spec.restate.authToken`, never here.
                 nullable: true
                 type: string
-              configFrom:
+              configRefs:
                 description: |-
-                  Configuration for the integration, read from a Secret or ConfigMap in this namespace
-                  and mounted as the container's `CONFIG_FILE`. Use this rather than `config` when the
-                  configuration contains credentials.
+                  Additional configuration sources, read from Secrets or ConfigMaps in this namespace and
+                  merged on top of `spec.config` in order - a later ref overrides an earlier one, and any
+                  ref overrides `spec.config`.
 
-                  The operator does not read the referenced object, so changing its contents does not
-                  restart the pods; run `kubectl rollout restart deployment/<name>` to pick a change up.
-
-                  Mutually exclusive with `config`.
-                nullable: true
-                oneOf:
-                - required:
-                  - secretRef
-                - required:
-                  - configMapRef
-                properties:
-                  configMapRef:
-                    description: A ConfigMap in this namespace holding the `.properties` configuration. Exactly one of `secretRef` or `configMapRef` must be specified
-                    properties:
-                      key:
-                        description: The key to read the `.properties` configuration from. Defaults to `config.properties`.
-                        nullable: true
-                        type: string
-                      name:
-                        description: The name of the referenced object. It must be in the same namespace as this resource.
-                        type: string
-                    required:
-                    - name
-                    type: object
-                  secretRef:
-                    description: A Secret in this namespace holding the `.properties` configuration. Exactly one of `secretRef` or `configMapRef` must be specified
-                    properties:
-                      key:
-                        description: The key to read the `.properties` configuration from. Defaults to `config.properties`.
-                        nullable: true
-                        type: string
-                      name:
-                        description: The name of the referenced object. It must be in the same namespace as this resource.
-                        type: string
-                    required:
-                    - name
-                    type: object
-                type: object
+                  Each entry is a `secretRef` or a `configMapRef`; use a `secretRef` for anything
+                  sensitive. The operator does not read these objects, so changing their contents does not
+                  restart the pods; run `kubectl rollout restart deployment/<name>` afterwards.
+                items:
+                  description: 'One additional source of `.properties` configuration: a Secret key or a ConfigMap key'
+                  oneOf:
+                  - required:
+                    - secretRef
+                  - required:
+                    - configMapRef
+                  properties:
+                    configMapRef:
+                      description: A ConfigMap in this namespace holding the `.properties` configuration. Exactly one of `secretRef` or `configMapRef` must be specified
+                      properties:
+                        key:
+                          description: The key to read the `.properties` configuration from. Defaults to `config.properties`.
+                          nullable: true
+                          type: string
+                        name:
+                          description: The name of the referenced object. It must be in the same namespace as this resource.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    secretRef:
+                      description: A Secret in this namespace holding the `.properties` configuration. Exactly one of `secretRef` or `configMapRef` must be specified
+                      properties:
+                        key:
+                          description: The key to read the `.properties` configuration from. Defaults to `config.properties`.
+                          nullable: true
+                          type: string
+                        name:
+                          description: The name of the referenced object. It must be in the same namespace as this resource.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                  type: object
+                type: array
               image:
                 description: |-
                   Container image name. Defaults to a suggested version of
@@ -145,7 +143,11 @@ spec:
                   authToken:
                     description: |-
                       A Secret key in this namespace holding a bearer token for the Restate ingress,
-                      supplied to the container as `RESTATE_AUTH_TOKEN`.
+                      supplied to the container as the `RESTATE_AUTH_TOKEN` environment variable.
+
+                      This is where the token belongs: it stays in a Secret and is never written into the
+                      plain-text `.properties` files. The container prefers the environment variable over any
+                      `restate.auth.token` in a config file, so nothing in `spec.config` can shadow it.
 
                       Required when `ingress.cloud` is set; optional (and usually unnecessary) otherwise.
                       The operator never reads this Secret - it is referenced from the pod spec, so the
@@ -257,9 +259,6 @@ spec:
             required:
             - restate
             type: object
-            x-kubernetes-validations:
-            - message: only one of spec.config and spec.configFrom may be set
-              rule: '!(has(self.config) && has(self.configFrom))'
           status:
             description: |-
               Status of the RestateKafkaIntegration

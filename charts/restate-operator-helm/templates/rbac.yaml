@@ -93,12 +93,13 @@ rules:
       - networking.k8s.io
       - vpcresources.k8s.aws
       - secrets-store.csi.x-k8s.io
-  # RestateKafkaIntegration owns a Deployment, and a ConfigMap when spec.config is used
-  # inline, in the RestateKafkaIntegration's own namespace. Unlike the RestateCloudEnvironment
-  # tunnel Deployment -- which always lands in the operator's namespace, and so is covered by
-  # the namespaced Role below -- those can be anywhere, hence a cluster-wide grant.
-  # ConfigMaps already have get/list/watch/create/patch above; only delete is missing, needed
-  # when a user switches from spec.config to spec.configFrom.
+  # RestateKafkaIntegration owns a Deployment, and a ConfigMap (holding the resolved ingress
+  # location plus any inline spec.config entries), in the RestateKafkaIntegration's own
+  # namespace. Unlike the RestateCloudEnvironment tunnel Deployment -- which always lands in the
+  # operator's namespace, and so is covered by the namespaced Role below -- those can be
+  # anywhere, hence a cluster-wide grant. The ConfigMap always exists and is torn down by
+  # garbage collection through its owner reference, so the get/list/watch/create/patch grant
+  # above is enough -- the operator never deletes it itself.
   - resources:
       - deployments
     verbs:
@@ -110,12 +111,6 @@ rules:
       - delete
     apiGroups:
       - apps
-  - resources:
-      - configmaps
-    verbs:
-      - delete
-    apiGroups:
-      - ''
   # Per-version autoscaling: the operator manages one HorizontalPodAutoscaler per
   # draining (non-latest) RestateDeployment version, and watches them (owns).
   - resources:

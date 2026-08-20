@@ -2,16 +2,16 @@ use k8s_openapi::api::apps::v1::{
     Deployment, DeploymentSpec, DeploymentStatus, DeploymentStrategy, RollingUpdateDeployment,
 };
 use k8s_openapi::api::core::v1::{
-    ConfigMapVolumeSource, Container, ContainerPort, EnvVar, EnvVarSource, KeyToPath,
-    PodSecurityContext, PodSpec, PodTemplateSpec, SeccompProfile, SecretKeySelector,
-    SecretVolumeSource, SecurityContext, Volume, VolumeMount,
+    ConfigMapVolumeSource, Container, ContainerPort, EnvVar, EnvVarSource, PodSecurityContext,
+    PodSpec, PodTemplateSpec, SeccompProfile, SecretKeySelector, SecretVolumeSource,
+    SecurityContext, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{Api, ApiResource, DynamicObject, Patch, PatchParams};
 use serde_json::{Map, Value, json};
 use tracing::debug;
 
-use super::config::{CONFIG_HASH_ANNOTATION, config_hash};
+use super::config::{CONFIG_HASH_ANNOTATION, config_hash, managed_config_data};
 use super::{
     CONFIG_VOLUME_NAME, CONTAINER_NAME, METRICS_PORT, label_selector, object_meta, selector_labels,
 };
@@ -19,25 +19,19 @@ use crate::Error;
 use crate::controllers::restatekafkaintegration::controller::Context;
 use crate::controllers::restatekafkaintegration::merge::strategic_merge;
 use crate::resources::restatekafkaintegrations::{
-    CONFIG_FILE_KEY, CONFIG_FILE_PATH, ConfigSourceKind, RestateKafkaIntegrationSpec,
+    CONFIG_DIR, CONFIG_FILE_KEY, ConfigRef, ConfigRefKind, RESTATE_CONFIG_KEY,
+    RestateKafkaIntegrationSpec,
 };
-
-/// The subPath the config key is projected to inside the volume, so that the mount lands as a
-/// single file at [`CONFIG_FILE_PATH`] rather than turning its parent into a directory.
-const CONFIG_SUB_PATH: &str = "config.properties";
 
 /// The environment variables the operator owns.
 ///
-/// The container prefers environment variables over the `.properties` file, which is exactly
-/// what we want here: the operator decides where Restate is, and a stale `restate.ingress.url`
-/// left in a config file must not silently win. Users who really need to override one of these
-/// can do so from `spec.template`, which is merged last.
-fn env(spec: &RestateKafkaIntegrationSpec, ingress_url: &str) -> Vec<EnvVar> {
-    let mut env = vec![EnvVar {
-        name: "RESTATE_INGRESS_URL".into(),
-        value: Some(ingress_url.to_owned()),
-        value_from: None,
-    }];
+/// No `RESTATE_INGRESS_URL`: the operator writes `restate.ingress.url` into the first config
+/// file instead, so a `spec.config` entry can override it. `RESTATE_AUTH_TOKEN` stays an
+/// environment variable so the bearer token stays in a Secret and never lands in a plain-text
+/// config file; the container prefers it over any `restate.auth.token` in a file. `CONFIG_FILE`
+/// is the comma-separated list of files to merge, always at least the operator's own.
+fn env(spec: &RestateKafkaIntegrationSpec, config_file: &str) -> Vec<EnvVar> {
+    let mut env = Vec::new();
 
     if let Some(auth_token) = spec.restate.auth_token.as_ref() {
         env.push(EnvVar {
@@ -54,71 +48,117 @@ fn env(spec: &RestateKafkaIntegrationSpec, ingress_url: &str) -> Vec<EnvVar> {
         });
     }
 
-    if spec.config.is_some() || spec.config_from.is_some() {
-        env.push(EnvVar {
-            name: "CONFIG_FILE".into(),
-            value: Some(CONFIG_FILE_PATH.to_owned()),
-            value_from: None,
-        });
-    }
+    env.push(EnvVar {
+        name: "CONFIG_FILE".into(),
+        value: Some(config_file.to_owned()),
+        value_from: None,
+    });
 
     env
 }
 
-/// The volume projecting the `.properties` configuration, if there is any.
+/// The mounted file name for the `spec.configRefs` entry at `index`.
+fn config_ref_file_name(index: usize) -> String {
+    format!("config-{index}.properties")
+}
+
+/// The volumes, mounts and `CONFIG_FILE` value backing the merged `.properties` configuration.
 ///
-/// Inline `spec.config` comes from the ConfigMap the operator owns (named after the
-/// RestateKafkaIntegration); `spec.configFrom` comes from the user's own Secret or ConfigMap.
-fn config_volume(name: &str, spec: &RestateKafkaIntegrationSpec) -> Result<Option<Volume>, Error> {
-    let items = |key: &str| {
-        Some(vec![KeyToPath {
-            key: key.to_owned(),
-            mode: None,
-            path: CONFIG_SUB_PATH.to_owned(),
-        }])
+/// Every source lands as its own read-only file under [`CONFIG_DIR`], listed in `CONFIG_FILE`
+/// in the order the container should merge them (later wins):
+/// - `restate.properties`, the operator's resolved ingress location, *first*, so an inline
+///   `spec.config` or a `spec.configRefs` entry can override it. From the operator's ConfigMap.
+/// - the inline `spec.config`, if any, as `config.properties`. Also from the operator's
+///   ConfigMap (mounting the same volume a second time by `subPath`).
+/// - each `spec.configRefs` entry, in order, as `config-<i>.properties`, from the user's own
+///   Secret or ConfigMap.
+///
+/// A `subPath` mount is deliberate: it projects a single key to a single file (rather than
+/// turning the mount point into a directory), and it does not pick up ConfigMap/Secret updates
+/// live -- which is what we want, since the pods are rolled by the config-hash annotation
+/// instead.
+struct ConfigLayout {
+    volumes: Vec<Volume>,
+    volume_mounts: Vec<VolumeMount>,
+    config_file: String,
+}
+
+fn config_layout(
+    cm_name: &str,
+    inline: Option<&str>,
+    refs: &[ConfigRef],
+) -> Result<ConfigLayout, Error> {
+    let mount = |volume: &str, sub_path: &str, path: String| VolumeMount {
+        name: volume.to_owned(),
+        mount_path: path,
+        sub_path: Some(sub_path.to_owned()),
+        read_only: Some(true),
+        ..Default::default()
     };
 
-    let volume = match (spec.config.as_deref(), spec.config_from.as_ref()) {
-        (Some(_), None) => Volume {
-            name: CONFIG_VOLUME_NAME.into(),
-            config_map: Some(ConfigMapVolumeSource {
-                name: name.to_owned(),
-                items: items(CONFIG_FILE_KEY),
-                ..Default::default()
-            }),
+    // The operator's own ConfigMap, referenced once as a volume and mounted per key it carries
+    // (the ingress file, plus the inline config if there is any).
+    let restate_path = format!("{CONFIG_DIR}/{RESTATE_CONFIG_KEY}");
+    let mut volumes = vec![Volume {
+        name: CONFIG_VOLUME_NAME.into(),
+        config_map: Some(ConfigMapVolumeSource {
+            name: cm_name.to_owned(),
             ..Default::default()
-        },
-        (None, Some(config_from)) => match config_from.resolve()? {
-            ConfigSourceKind::Secret(secret) => Volume {
-                name: CONFIG_VOLUME_NAME.into(),
-                secret: Some(SecretVolumeSource {
-                    secret_name: Some(secret.name.clone()),
-                    items: items(secret.key()),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-            ConfigSourceKind::ConfigMap(config_map) => Volume {
-                name: CONFIG_VOLUME_NAME.into(),
-                config_map: Some(ConfigMapVolumeSource {
-                    name: config_map.name.clone(),
-                    items: items(config_map.key()),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-        },
-        (None, None) => return Ok(None),
-        // The CRD's CEL rule rejects this, but an older apiserver or a hand-edited object
-        // could still get here, and silently picking one would be worse than saying so.
-        (Some(_), Some(_)) => {
-            return Err(Error::InvalidRestateConfig(
-                "only one of spec.config and spec.configFrom may be set".into(),
-            ));
-        }
-    };
+        }),
+        ..Default::default()
+    }];
+    let mut volume_mounts = vec![mount(
+        CONFIG_VOLUME_NAME,
+        RESTATE_CONFIG_KEY,
+        restate_path.clone(),
+    )];
+    let mut files = vec![restate_path];
 
-    Ok(Some(volume))
+    if inline.is_some() {
+        let path = format!("{CONFIG_DIR}/{CONFIG_FILE_KEY}");
+        volume_mounts.push(mount(CONFIG_VOLUME_NAME, CONFIG_FILE_KEY, path.clone()));
+        files.push(path);
+    }
+
+    for (index, config_ref) in refs.iter().enumerate() {
+        let volume = format!("{CONFIG_VOLUME_NAME}-{index}");
+        let target = format!("{CONFIG_DIR}/{}", config_ref_file_name(index));
+
+        let (volume_source, key) = match config_ref.resolve()? {
+            ConfigRefKind::Secret(secret) => (
+                Volume {
+                    name: volume.clone(),
+                    secret: Some(SecretVolumeSource {
+                        secret_name: Some(secret.name.clone()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                secret.key(),
+            ),
+            ConfigRefKind::ConfigMap(config_map) => (
+                Volume {
+                    name: volume.clone(),
+                    config_map: Some(ConfigMapVolumeSource {
+                        name: config_map.name.clone(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                config_map.key(),
+            ),
+        };
+
+        volumes.push(volume_source);
+        volume_mounts.push(mount(&volume, key, target.clone()));
+        files.push(target);
+    }
+
+    Ok(ConfigLayout {
+        volumes,
+        volume_mounts,
+        config_file: files.join(","),
+    })
 }
 
 /// Build the Deployment the operator wants, before the user's `spec.template` overlay.
@@ -143,21 +183,19 @@ fn base_deployment(
         pod_labels.insert(format!("allow.restate.dev/{cluster}"), "true".to_owned());
     }
 
+    // The operator's ConfigMap always exists (it carries at least the ingress URL), so the
+    // hash is always present; a change to the ingress URL or the inline config rolls the pods.
     let mut pod_annotations = metadata.annotations.clone().unwrap_or_default();
-    if let Some(config) = spec.config.as_deref() {
-        pod_annotations.insert(CONFIG_HASH_ANNOTATION.to_owned(), config_hash(config));
-    }
+    pod_annotations.insert(
+        CONFIG_HASH_ANNOTATION.to_owned(),
+        config_hash(&managed_config_data(ingress_url, spec.config.as_deref())),
+    );
 
-    let config_volume = config_volume(name, spec)?;
-    let volume_mounts = config_volume.as_ref().map(|_| {
-        vec![VolumeMount {
-            name: CONFIG_VOLUME_NAME.into(),
-            mount_path: CONFIG_FILE_PATH.into(),
-            sub_path: Some(CONFIG_SUB_PATH.into()),
-            read_only: Some(true),
-            ..Default::default()
-        }]
-    });
+    let ConfigLayout {
+        volumes,
+        volume_mounts,
+        config_file,
+    } = config_layout(name, spec.config.as_deref(), &spec.config_refs)?;
 
     Ok(Deployment {
         metadata,
@@ -189,7 +227,7 @@ fn base_deployment(
                         name: CONTAINER_NAME.into(),
                         image: Some(spec.image.as_deref().unwrap_or(default_image).to_owned()),
                         image_pull_policy: spec.image_pull_policy.clone(),
-                        env: Some(env(spec, ingress_url)),
+                        env: Some(env(spec, &config_file)),
                         ports: Some(vec![ContainerPort {
                             name: Some("metrics".into()),
                             container_port: METRICS_PORT,
@@ -200,7 +238,7 @@ fn base_deployment(
                             allow_privilege_escalation: Some(false),
                             ..Default::default()
                         }),
-                        volume_mounts,
+                        volume_mounts: Some(volume_mounts),
                         ..Default::default()
                     }],
                     security_context: Some(PodSecurityContext {
@@ -218,7 +256,7 @@ fn base_deployment(
                     // Long enough for in-flight records to finish and their offsets to be
                     // committed before the consumer is killed.
                     termination_grace_period_seconds: Some(60),
-                    volumes: config_volume.map(|volume| vec![volume]),
+                    volumes: Some(volumes),
                     ..Default::default()
                 }),
             },
@@ -388,26 +426,42 @@ mod tests {
         &deployment["spec"]["template"]["spec"]["containers"][0]
     }
 
+    const CLUSTER_URL: &str = "http://restate.my-cluster.svc.cluster.local:8080/";
+
     #[test]
-    fn the_ingress_url_and_defaults_are_set() {
+    fn the_ingress_file_and_defaults_are_set() {
         let deployment = built(&minimal(json!({})));
         let container = container(&deployment);
 
         assert_eq!(container["name"], "kafka-integration");
         assert_eq!(container["image"], "default-image:1");
+        // no RESTATE_INGRESS_URL env: the ingress URL is a config file now. With no config
+        // entries, CONFIG_FILE is just the operator's own file.
         assert_eq!(
             container["env"],
             json!([{
-                "name": "RESTATE_INGRESS_URL",
-                "value": "http://restate.my-cluster.svc.cluster.local:8080/"
+                "name": "CONFIG_FILE",
+                "value": "/etc/restate-kafka/restate.properties"
             }])
         );
-        // no config source, so no CONFIG_FILE, no volume and no mount
-        assert!(container.get("volumeMounts").is_none());
-        assert!(
-            deployment["spec"]["template"]["spec"]
-                .get("volumes")
-                .is_none()
+        // the operator's ConfigMap is always mounted, at the front of CONFIG_FILE
+        assert_eq!(
+            container["volumeMounts"],
+            json!([{
+                "name": "config",
+                "mountPath": "/etc/restate-kafka/restate.properties",
+                "subPath": "restate.properties",
+                "readOnly": true
+            }])
+        );
+        assert_eq!(
+            deployment["spec"]["template"]["spec"]["volumes"],
+            json!([{"name": "config", "configMap": {"name": "orders"}}])
+        );
+        // always hashed, because the ingress URL always lives in the ConfigMap
+        assert_eq!(
+            deployment["spec"]["template"]["metadata"]["annotations"]["restate.dev/config-hash"],
+            config_hash(&managed_config_data(CLUSTER_URL, None))
         );
         assert_eq!(deployment["spec"]["replicas"], 1);
         assert_eq!(
@@ -442,13 +496,15 @@ mod tests {
             json!({"restate": {"ingress": {"cloud": "my-env"}, "authToken": {"name": "tok", "key": "k"}}}),
         ));
         let env = &container(&deployment)["env"];
+        // the token stays a secretKeyRef env var, ahead of CONFIG_FILE; it never enters a file
         assert_eq!(
-            env[1],
+            env[0],
             json!({
                 "name": "RESTATE_AUTH_TOKEN",
                 "valueFrom": {"secretKeyRef": {"name": "tok", "key": "k"}}
             })
         );
+        assert_eq!(env[1]["name"], "CONFIG_FILE");
     }
 
     #[test]
@@ -456,80 +512,128 @@ mod tests {
         let deployment = built(&minimal(json!({"config": "group.id=orders\n"})));
         let container = container(&deployment);
 
+        // the ingress file is first, then the inline config, so the inline can override the URL
         assert_eq!(
-            container["env"][1],
-            json!({"name": "CONFIG_FILE", "value": "/etc/restate-kafka/config.properties"})
+            container["env"][0],
+            json!({
+                "name": "CONFIG_FILE",
+                "value": "/etc/restate-kafka/restate.properties,/etc/restate-kafka/config.properties"
+            })
         );
         assert_eq!(
             container["volumeMounts"],
-            json!([{
-                "name": "config",
-                "mountPath": "/etc/restate-kafka/config.properties",
-                "subPath": "config.properties",
-                "readOnly": true
-            }])
+            json!([
+                {
+                    "name": "config",
+                    "mountPath": "/etc/restate-kafka/restate.properties",
+                    "subPath": "restate.properties",
+                    "readOnly": true
+                },
+                {
+                    "name": "config",
+                    "mountPath": "/etc/restate-kafka/config.properties",
+                    "subPath": "config.properties",
+                    "readOnly": true
+                }
+            ])
         );
+        // inline config lives in the operator's ConfigMap, so it is the only config volume
         assert_eq!(
             deployment["spec"]["template"]["spec"]["volumes"],
-            json!([{
-                "name": "config",
-                "configMap": {
-                    "name": "orders",
-                    "items": [{"key": "config.properties", "path": "config.properties"}]
-                }
-            }])
+            json!([{"name": "config", "configMap": {"name": "orders"}}])
         );
         assert_eq!(
             deployment["spec"]["template"]["metadata"]["annotations"]["restate.dev/config-hash"],
-            config_hash("group.id=orders\n")
+            config_hash(&managed_config_data(CLUSTER_URL, Some("group.id=orders\n")))
         );
     }
 
     #[test]
-    fn config_from_a_secret_mounts_the_users_secret_and_is_not_hashed() {
+    fn a_config_ref_mounts_the_users_secret_after_the_operators() {
         let deployment = built(&minimal(
-            json!({"configFrom": {"secretRef": {"name": "kafka-config", "key": "kafka.properties"}}}),
+            json!({"configRefs": [{"secretRef": {"name": "kafka-config", "key": "kafka.properties"}}]}),
         ));
 
+        assert_eq!(
+            container(&deployment)["env"][0]["value"],
+            "/etc/restate-kafka/restate.properties,/etc/restate-kafka/config-0.properties"
+        );
+        // the operator's ConfigMap first, then a dedicated volume for the user's Secret
         assert_eq!(
             deployment["spec"]["template"]["spec"]["volumes"],
-            json!([{
-                "name": "config",
-                "secret": {
-                    "secretName": "kafka-config",
-                    "items": [{"key": "kafka.properties", "path": "config.properties"}]
-                }
-            }])
+            json!([
+                {"name": "config", "configMap": {"name": "orders"}},
+                {"name": "config-0", "secret": {"secretName": "kafka-config"}}
+            ])
         );
-        // we never read the Secret, so we cannot hash its contents
-        assert!(
-            deployment["spec"]["template"]["metadata"]["annotations"]
-                .get("restate.dev/config-hash")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn config_from_a_configmap_defaults_the_key() {
-        let deployment = built(&minimal(
-            json!({"configFrom": {"configMapRef": {"name": "kafka-config"}}}),
-        ));
         assert_eq!(
-            deployment["spec"]["template"]["spec"]["volumes"][0]["configMap"],
+            container(&deployment)["volumeMounts"][1],
             json!({
-                "name": "kafka-config",
-                "items": [{"key": "config.properties", "path": "config.properties"}]
+                "name": "config-0",
+                "mountPath": "/etc/restate-kafka/config-0.properties",
+                "subPath": "kafka.properties",
+                "readOnly": true
             })
         );
+        // the Secret contents are not hashed (we do not read them), so the hash matches the
+        // ingress-only hash: editing the Secret does not roll the pods
+        assert_eq!(
+            deployment["spec"]["template"]["metadata"]["annotations"]["restate.dev/config-hash"],
+            config_hash(&managed_config_data(CLUSTER_URL, None))
+        );
     }
 
     #[test]
-    fn both_config_sources_is_rejected() {
+    fn a_config_ref_to_a_configmap_defaults_the_key() {
+        let deployment = built(&minimal(
+            json!({"configRefs": [{"configMapRef": {"name": "kafka-config"}}]}),
+        ));
+        assert_eq!(
+            deployment["spec"]["template"]["spec"]["volumes"][1],
+            json!({"name": "config-0", "configMap": {"name": "kafka-config"}})
+        );
+        assert_eq!(
+            container(&deployment)["volumeMounts"][1]["subPath"],
+            "config.properties"
+        );
+    }
+
+    #[test]
+    fn config_and_refs_merge_in_order_after_the_ingress_file() {
+        let deployment = built(&minimal(json!({
+            "config": "group.id=orders\n",
+            "configRefs": [
+                {"secretRef": {"name": "creds"}},
+                {"configMapRef": {"name": "tuning"}}
+            ]
+        })));
+
+        // ingress, then inline config, then each ref in order
+        assert_eq!(
+            container(&deployment)["env"][0]["value"],
+            "/etc/restate-kafka/restate.properties,\
+             /etc/restate-kafka/config.properties,\
+             /etc/restate-kafka/config-0.properties,\
+             /etc/restate-kafka/config-1.properties"
+        );
+        // the operator volume (ingress + inline) plus one per ref
+        assert_eq!(
+            deployment["spec"]["template"]["spec"]["volumes"],
+            json!([
+                {"name": "config", "configMap": {"name": "orders"}},
+                {"name": "config-0", "secret": {"secretName": "creds"}},
+                {"name": "config-1", "configMap": {"name": "tuning"}}
+            ])
+        );
+    }
+
+    #[test]
+    fn a_config_ref_with_two_sources_is_rejected() {
         let spec = minimal(json!({
-            "config": "a=b\n",
-            "configFrom": {"secretRef": {"name": "s"}}
+            "configRefs": [{"secretRef": {"name": "s"}, "configMapRef": {"name": "c"}}]
         }));
-        let err = base_deployment(&meta(), &spec, "http://restate:8080/", "img").expect_err("both");
+        let err = base_deployment(&meta(), &spec, "http://restate:8080/", "img")
+            .expect_err("two sources");
         assert!(matches!(err, Error::InvalidRestateConfig(_)));
     }
 
@@ -550,7 +654,7 @@ mod tests {
         assert_eq!(container["image"], "mine:2");
         assert_eq!(container["resources"]["requests"]["cpu"], "500m");
         // the operator's own env survives, and the user's is appended
-        assert_eq!(container["env"][0]["name"], "RESTATE_INGRESS_URL");
+        assert_eq!(container["env"][0]["name"], "CONFIG_FILE");
         assert_eq!(container["env"][1]["name"], "JDK_JAVA_OPTIONS");
         // the generated port is untouched
         assert_eq!(container["ports"][0]["containerPort"], METRICS_PORT);

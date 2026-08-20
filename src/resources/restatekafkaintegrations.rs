@@ -16,12 +16,17 @@ use crate::{
     },
 };
 
-/// The path the operator mounts `spec.config` / `spec.configFrom` at, and the value it
-/// gives the container's `CONFIG_FILE` environment variable.
-pub const CONFIG_FILE_PATH: &str = "/etc/restate-kafka/config.properties";
+/// The directory the operator mounts every configuration file under. The container's
+/// `CONFIG_FILE` is a comma-separated list of paths inside it.
+pub const CONFIG_DIR: &str = "/etc/restate-kafka";
 
-/// The key the operator writes inline `spec.config` under in the ConfigMap it owns, and the
-/// default key read from a `spec.configFrom` Secret or ConfigMap.
+/// The ConfigMap key (and mounted file name) the operator writes the resolved Restate ingress
+/// location under. It is listed *first* in `CONFIG_FILE`, so any `spec.config` entry a user
+/// adds can override it.
+pub const RESTATE_CONFIG_KEY: &str = "restate.properties";
+
+/// The default key read from a `secretRef` / `configMapRef` `spec.config` entry when the
+/// entry does not name one.
 pub const CONFIG_FILE_KEY: &str = "config.properties";
 
 /// RestateKafkaIntegration runs the Restate Kafka ingress integration
@@ -30,8 +35,8 @@ pub const CONFIG_FILE_KEY: &str = "config.properties";
 ///
 /// The operator only models where Restate is and how to authenticate to it; everything else
 /// (Kafka connection, consumer settings, record mapper, metrics, retry policy) is the
-/// container's own configuration surface and is passed through verbatim as a `.properties`
-/// file via `spec.config` or `spec.configFrom`.
+/// container's own configuration surface and is passed through verbatim as one or more
+/// `.properties` files via `spec.config`.
 #[derive(CustomResource, Deserialize, Serialize, Clone, Debug, KubeSchema)]
 #[kube(
     kind = "RestateKafkaIntegration",
@@ -48,10 +53,6 @@ pub const CONFIG_FILE_KEY: &str = "config.properties";
 )]
 #[kube(status = "RestateKafkaIntegrationStatus", shortname = "rki")]
 #[serde(rename_all = "camelCase")]
-// The two config sources are alternatives, not layers: the container reads a single
-// CONFIG_FILE, so there is nothing sensible to do with both.
-#[x_kube(validation = Rule::new("!(has(self.config) && has(self.configFrom))")
-    .message("only one of spec.config and spec.configFrom may be set"))]
 pub struct RestateKafkaIntegrationSpec {
     /// Number of desired pods. Defaults to 1.
     ///
@@ -76,37 +77,32 @@ pub struct RestateKafkaIntegrationSpec {
     /// Where to send the invocations produced from Kafka records, and how to authenticate.
     pub restate: RestateIngressSpec,
 
-    /// Inline configuration for the integration, in Java `.properties` format. The operator
-    /// stores this in a ConfigMap it owns, mounts it, and points the container's
-    /// `CONFIG_FILE` at it. Editing it rolls the pods.
+    /// Inline configuration for the integration, in Java `.properties` format.
     ///
     /// Every option documented at
     /// https://github.com/restatedev/ingress-integration-kafka/blob/main/CONFIGURATION.md
     /// is accepted, using the property-key spelling (not the environment-variable one).
     /// At a minimum the integration needs `bootstrap.servers`, `group.id` and `topics`.
     ///
-    /// `restate.ingress.url` and `restate.auth.token` set here have no effect: the operator
-    /// supplies both as environment variables, which the container prefers over the file.
+    /// The operator stores this in a ConfigMap it owns and mounts it as a config file, merged
+    /// after its own resolved `restate.ingress.url` (so this can override the ingress URL) and
+    /// before `spec.configRefs` (so a ref can override this). Editing it rolls the pods.
     ///
-    /// This is the CR's own body, so it is stored and displayed in plain text - keep
-    /// credentials (`sasl.jaas.config`, `sasl.password`, ...) in `spec.configFrom` with a
-    /// Secret instead.
-    ///
-    /// Mutually exclusive with `configFrom`.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// This is part of the custom resource, so it is stored and displayed in plain text - keep
+    /// credentials (`sasl.jaas.config`, `sasl.password`, ...) in a `spec.configRefs` Secret,
+    /// and the Restate ingress bearer token in `spec.restate.authToken`, never here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<String>,
 
-    /// Configuration for the integration, read from a Secret or ConfigMap in this namespace
-    /// and mounted as the container's `CONFIG_FILE`. Use this rather than `config` when the
-    /// configuration contains credentials.
+    /// Additional configuration sources, read from Secrets or ConfigMaps in this namespace and
+    /// merged on top of `spec.config` in order - a later ref overrides an earlier one, and any
+    /// ref overrides `spec.config`.
     ///
-    /// The operator does not read the referenced object, so changing its contents does not
-    /// restart the pods; run `kubectl rollout restart deployment/<name>` to pick a change up.
-    ///
-    /// Mutually exclusive with `config`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(default, schema_with = "config_source_schema")]
-    pub config_from: Option<ConfigSource>,
+    /// Each entry is a `secretRef` or a `configMapRef`; use a `secretRef` for anything
+    /// sensitive. The operator does not read these objects, so changing their contents does not
+    /// restart the pods; run `kubectl rollout restart deployment/<name>` afterwards.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config_refs: Vec<ConfigRef>,
 
     /// Overrides applied on top of the pod template the operator generates.
     ///
@@ -152,16 +148,6 @@ fn pod_spec_overlay_schema(_g: &mut schemars::SchemaGenerator) -> Schema {
     })
 }
 
-fn config_source_schema(generator: &mut schemars::SchemaGenerator) -> Schema {
-    // Hand-wrapped rather than left to `Option<ConfigSource>`: schemars represents an
-    // optional field whose type has a custom schema as `anyOf: [<schema>, {nullable: true}]`,
-    // and a structural schema may not set `nullable` inside a logical combinator, so the
-    // apiserver rejects the whole CRD.
-    let mut schema = generator.subschema_for::<ConfigSource>();
-    schema.insert("nullable".into(), serde_json::Value::Bool(true));
-    schema
-}
-
 fn default_replicas() -> i32 {
     1
 }
@@ -174,7 +160,11 @@ pub struct RestateIngressSpec {
     pub ingress: RestateIngressEndpoint,
 
     /// A Secret key in this namespace holding a bearer token for the Restate ingress,
-    /// supplied to the container as `RESTATE_AUTH_TOKEN`.
+    /// supplied to the container as the `RESTATE_AUTH_TOKEN` environment variable.
+    ///
+    /// This is where the token belongs: it stays in a Secret and is never written into the
+    /// plain-text `.properties` files. The container prefers the environment variable over any
+    /// `restate.auth.token` in a config file, so nothing in `spec.config` can shadow it.
     ///
     /// Required when `ingress.cloud` is set; optional (and usually unnecessary) otherwise.
     /// The operator never reads this Secret - it is referenced from the pod spec, so the
@@ -192,10 +182,10 @@ pub struct SecretKeyRef {
     pub key: String,
 }
 
-/// Configuration read from a Secret or ConfigMap and mounted as the container's `CONFIG_FILE`
+/// One additional source of `.properties` configuration: a Secret key or a ConfigMap key.
 #[derive(Deserialize, Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
-pub struct ConfigSource {
+pub struct ConfigRef {
     /// A Secret in this namespace holding the `.properties` configuration.
     /// Exactly one of `secretRef` or `configMapRef` must be specified.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -207,9 +197,9 @@ pub struct ConfigSource {
 }
 
 // Custom JsonSchema implementation so that exactly one of secretRef, configMapRef is required.
-impl JsonSchema for ConfigSource {
+impl JsonSchema for ConfigRef {
     fn schema_name() -> std::borrow::Cow<'static, str> {
-        "ConfigSource".into()
+        "ConfigRef".into()
     }
 
     fn json_schema(generator: &mut schemars::SchemaGenerator) -> Schema {
@@ -229,7 +219,7 @@ impl JsonSchema for ConfigSource {
         );
 
         schemars::json_schema!({
-            "description": "Configuration read from a Secret or ConfigMap and mounted as the container's `CONFIG_FILE`",
+            "description": "One additional source of `.properties` configuration: a Secret key or a ConfigMap key",
             "properties": {
                 "secretRef": secret_schema,
                 "configMapRef": config_map_schema
@@ -243,23 +233,23 @@ impl JsonSchema for ConfigSource {
     }
 }
 
-impl ConfigSource {
+impl ConfigRef {
     /// The referenced object, or an error if not exactly one of the two was given.
-    pub fn resolve(&self) -> crate::Result<ConfigSourceKind<'_>> {
+    pub fn resolve(&self) -> crate::Result<ConfigRefKind<'_>> {
         match (self.secret_ref.as_ref(), self.config_map_ref.as_ref()) {
-            (Some(secret), None) => Ok(ConfigSourceKind::Secret(secret)),
-            (None, Some(config_map)) => Ok(ConfigSourceKind::ConfigMap(config_map)),
+            (Some(secret), None) => Ok(ConfigRefKind::Secret(secret)),
+            (None, Some(config_map)) => Ok(ConfigRefKind::ConfigMap(config_map)),
             _ => Err(crate::Error::InvalidRestateConfig(
-                "Exactly one of `secretRef` or `configMapRef` must be specified in spec.configFrom"
+                "Exactly one of `secretRef` or `configMapRef` must be specified in each spec.configRefs entry"
                     .into(),
             )),
         }
     }
 }
 
-/// The resolved form of a [`ConfigSource`]
+/// The resolved form of a [`ConfigRef`]
 #[derive(Debug, Clone, Copy)]
-pub enum ConfigSourceKind<'a> {
+pub enum ConfigRefKind<'a> {
     Secret(&'a ConfigKeyRef),
     ConfigMap(&'a ConfigKeyRef),
 }
@@ -359,7 +349,8 @@ impl JsonSchema for RestateIngressEndpoint {
 pub const RESTATE_INGRESS_PORT: i32 = 8080;
 
 impl RestateIngressEndpoint {
-    /// The URL to give the integration as `RESTATE_INGRESS_URL`.
+    /// The resolved ingress URL, which the operator writes as `restate.ingress.url` into the
+    /// first (lowest-precedence) config file it mounts.
     pub fn ingress_url(
         &self,
         rce_store: &Store<RestateCloudEnvironment>,
@@ -549,30 +540,30 @@ mod tests {
     }
 
     #[test]
-    fn config_source_resolves_exactly_one_reference() {
-        let secret: ConfigSource =
+    fn config_ref_resolves_exactly_one_reference() {
+        let secret: ConfigRef =
             serde_json::from_value(serde_json::json!({"secretRef": {"name": "s"}})).unwrap();
         assert!(matches!(
             secret.resolve().unwrap(),
-            ConfigSourceKind::Secret(r) if r.name == "s" && r.key() == "config.properties"
+            ConfigRefKind::Secret(r) if r.name == "s" && r.key() == "config.properties"
         ));
 
-        let config_map: ConfigSource = serde_json::from_value(
+        let config_map: ConfigRef = serde_json::from_value(
             serde_json::json!({"configMapRef": {"name": "c", "key": "other.properties"}}),
         )
         .unwrap();
         assert!(matches!(
             config_map.resolve().unwrap(),
-            ConfigSourceKind::ConfigMap(r) if r.name == "c" && r.key() == "other.properties"
+            ConfigRefKind::ConfigMap(r) if r.name == "c" && r.key() == "other.properties"
         ));
 
         for json in [
             serde_json::json!({}),
             serde_json::json!({"secretRef": {"name": "s"}, "configMapRef": {"name": "c"}}),
         ] {
-            let source: ConfigSource = serde_json::from_value(json).unwrap();
+            let entry: ConfigRef = serde_json::from_value(json).unwrap();
             assert!(matches!(
-                source.resolve(),
+                entry.resolve(),
                 Err(crate::Error::InvalidRestateConfig(_))
             ));
         }

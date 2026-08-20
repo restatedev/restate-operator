@@ -8,7 +8,7 @@ A fourth CRD, `RestateKafkaIntegration` (`restate.dev/v1alpha1`, short name `rki
 [Restate Kafka ingress integration](https://github.com/restatedev/ingress-integration-kafka) --
 a container that consumes Kafka topics and turns each record into a Restate invocation. The
 operator manages an `apps/v1` `Deployment` of it in the custom resource's own namespace, and a
-`ConfigMap` when the configuration is given inline.
+`ConfigMap` holding the resolved ingress URL plus any inline configuration.
 
 ```yaml
 apiVersion: restate.dev/v1alpha1
@@ -35,13 +35,18 @@ Only the Restate destination is modelled as fields:
   than the admin port. A `RestateCluster` named `X` resolves to
   `http://restate.X.svc.<clusterDns>:8080`.
 - `spec.restate.authToken` is a `{name, key}` reference to a Secret **in the custom resource's
-  own namespace**, passed to the container as `RESTATE_AUTH_TOKEN`. It is required with
-  `ingress.cloud`, and optional otherwise.
+  own namespace**, passed to the container as the `RESTATE_AUTH_TOKEN` environment variable. It
+  is required with `ingress.cloud`, and optional otherwise. The token stays in the Secret and is
+  never written into a `.properties` file.
 
-Everything Kafka-side is the container's own configuration surface and is passed through
-verbatim as a Java `.properties` file, either inline (`spec.config`) or from a Secret or
-ConfigMap (`spec.configFrom`). `spec.template` is a partial pod template strategic-merged over
-the generated one, for resources, probes, sidecars, node placement and the like.
+Everything Kafka-side is the container's own configuration surface, given as `spec.config` (an
+inline `.properties` block) plus `spec.configRefs` (a list of `secretRef` / `configMapRef`
+sources). The container merges them -- the operator's own resolved `restate.ingress.url` first,
+then `spec.config`, then each `spec.configRefs` entry in order -- with a later source winning on
+shared keys. So you can mix a plain-text inline base with a `secretRef` overlay for credentials,
+and override the ingress URL if you must. `spec.template` is a partial pod template
+strategic-merged over the generated one, for resources, probes, sidecars, node placement and the
+like.
 
 ### Why This Matters
 
@@ -63,9 +68,11 @@ upstream option is usable the day it ships, instead of waiting for an operator r
   `RestateKafkaIntegration` as pending until the CRD is installed. Users who manage CRDs
   out-of-band must apply the new one, or the operator will stay `NotReady`.
 - **RBAC**: the operator now needs cluster-wide access to `apps/deployments`
-  (get/list/watch/create/patch/delete) and `delete` on `configmaps`, because these children
-  land in the user's namespace rather than the operator's. `helm upgrade` applies this; a
-  hand-managed ClusterRole needs updating.
+  (get/list/watch/create/patch/delete), because these children land in the user's namespace
+  rather than the operator's. The owned `ConfigMap` is covered by the existing cluster-wide
+  `configmaps` get/list/watch/create/patch grant (it is torn down by garbage collection, never
+  deleted by the operator). `helm upgrade` applies this; a hand-managed ClusterRole needs
+  updating.
 
 ### Migration Guidance
 

@@ -219,12 +219,17 @@ impl RestateKafkaIntegration {
             .ingress
             .ingress_url(&ctx.rce_store, &ctx.cluster_dns)?;
 
-        // Created before the Deployment that mounts it, and removed only after the Deployment
-        // has stopped mounting it, so neither switch between `config` and `configFrom` leaves
-        // running pods pointing at an object that is not there.
-        if let Some(config) = self.spec.config.as_deref() {
-            reconcilers::config::apply_config_map(ctx, namespace, &base_metadata, config).await?;
-        }
+        // Applied before the Deployment that mounts it. The operator's ConfigMap always exists
+        // -- it carries at least the resolved ingress URL -- so there is nothing to delete when
+        // `spec.config` is empty; server-side apply prunes any inline keys that went away.
+        reconcilers::config::apply_config_map(
+            ctx,
+            namespace,
+            &base_metadata,
+            ingress_url.as_str(),
+            self.spec.config.as_deref(),
+        )
+        .await?;
 
         let status = reconcilers::deployment::reconcile_deployment(
             ctx,
@@ -234,10 +239,6 @@ impl RestateKafkaIntegration {
             ingress_url.as_str(),
         )
         .await?;
-
-        if self.spec.config.is_none() {
-            reconcilers::config::delete_config_map(ctx, namespace, &base_metadata).await?;
-        }
 
         Ok((status, ingress_url.into()))
     }

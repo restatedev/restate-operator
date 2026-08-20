@@ -161,8 +161,8 @@ mod tests {
     #[test]
     fn env_merges_by_name() {
         let base = json!({"containers": [{"name": "c", "env": [
-            {"name": "RESTATE_INGRESS_URL", "value": "http://restate:8080/"},
-            {"name": "CONFIG_FILE", "value": "/etc/config.properties"}
+            {"name": "RESTATE_AUTH_TOKEN", "valueFrom": {"secretKeyRef": {"name": "tok", "key": "k"}}},
+            {"name": "CONFIG_FILE", "value": "/etc/restate-kafka/restate.properties"}
         ]}]});
         let merged = strategic_merge(
             base,
@@ -174,7 +174,7 @@ mod tests {
         assert_eq!(
             merged,
             json!({"containers": [{"name": "c", "env": [
-                {"name": "RESTATE_INGRESS_URL", "value": "http://restate:8080/"},
+                {"name": "RESTATE_AUTH_TOKEN", "valueFrom": {"secretKeyRef": {"name": "tok", "key": "k"}}},
                 {"name": "CONFIG_FILE", "value": "/somewhere/else.properties"},
                 {"name": "JDK_JAVA_OPTIONS", "value": "-Xmx512m"}
             ]}]})

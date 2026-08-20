@@ -136,12 +136,29 @@ RestateDeployment supports two modes (see `src/resources/restatedeployments.rs:2
 (`spec.restate.ingress`, the same `cluster`/`cloud`/`service`/`url` union as
 `RestateDeployment` but resolved to the *ingress* port 8080) and its credentials
 (`spec.restate.authToken`) are typed CRD fields. Everything Kafka-side is the container's own
-`.properties` surface, passed through inline (`spec.config`) or from a Secret/ConfigMap
-(`spec.configFrom`) -- so upstream config options need no CRD change. Do not add typed fields
-mirroring `CONFIGURATION.md` upstream; that was a deliberate design decision.
+`.properties` surface: `spec.config` (an inline block) plus `spec.configRefs` (a list of
+`secretRef` / `configMapRef` sources), which may be set together -- so upstream config options
+need no CRD change. Do not add typed fields mirroring `CONFIGURATION.md` upstream; that was a
+deliberate design decision.
 
-- The operator supplies `RESTATE_INGRESS_URL`, `RESTATE_AUTH_TOKEN` and `CONFIG_FILE` as env
-  vars, which the container prefers over the properties file.
+- **Config is a merged file list, not env vars.** The container's `CONFIG_FILE` is a
+  comma-separated list of `.properties` files merged left to right (later wins), and the
+  environment still wins over all files. The operator mounts each source as its own read-only
+  file under `/etc/restate-kafka/` and lists them in `CONFIG_FILE` in this order: its own
+  `restate.properties` (the resolved `restate.ingress.url`) *first* and lowest-precedence, then
+  `spec.config` as `config.properties`, then each `spec.configRefs` entry as
+  `config-<i>.properties` (`<i>` = list position). So `spec.config` can override the ingress
+  URL and a ref can override `spec.config`. There is no `RESTATE_INGRESS_URL` env var any more.
+- **The auth token stays in a Secret.** `spec.restate.authToken` is still injected as the
+  `RESTATE_AUTH_TOKEN` env var via a `secretKeyRef` (the operator never reads the Secret); it
+  must never be written into the plain-text ConfigMap / `.properties` files. There is no
+  file-based token property upstream, and env wins over files, so this is both necessary and
+  safe.
+- **The owned ConfigMap always exists** (it carries at least the ingress URL) and also holds
+  the inline `spec.config` under `config.properties`. Its digest is on the pod template, so
+  editing the ingress URL or `spec.config` rolls the pods; `spec.configRefs` are not read, so
+  they are not hashed (manual `kubectl rollout restart`). GC via owner reference tears the
+  ConfigMap down -- the operator never deletes it, so no `configmaps` `delete` RBAC.
 - `spec.template` is a *partial* pod template strategic-merged over the generated one
   (`src/controllers/restatekafkaintegration/merge.rs`). Absent overlay fields must stay absent:
   a `null` in the overlay deletes a key, so never serialize `None` into the overlay.

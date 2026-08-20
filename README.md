@@ -822,8 +822,8 @@ The `RestateKafkaIntegration` CRD runs the
 [Restate Kafka ingress integration](https://github.com/restatedev/ingress-integration-kafka) --
 a standalone container that consumes Kafka topics and turns each record into a Restate
 invocation. The operator manages a `Deployment` of it in the custom resource's own namespace,
-resolves the Restate ingress URL from the reference you give it, and (for inline configuration)
-a `ConfigMap` to hold it.
+resolves the Restate ingress URL from the reference you give it, and owns a `ConfigMap` holding
+that URL plus any inline configuration.
 
 The CRD is `restate.dev/v1alpha1`; its shape may still change.
 
@@ -864,8 +864,8 @@ See [`examples/kafka`](./examples/kafka) for a runnable version, including a thr
 | `replicas` | `integer` | Number of desired pods. Defaults to `1`. |
 | `image` | `string` | Container image. Defaults to the operator's built-in default (override cluster-wide with the `kafkaIntegrationImage` Helm value). |
 | `imagePullPolicy` | `string` | One of `Always`, `Never`, `IfNotPresent`. |
-| `config` | `string` | Inline `.properties` configuration. Mutually exclusive with `configFrom`. |
-| `configFrom` | `object` | Read the `.properties` configuration from a Secret or ConfigMap. Mutually exclusive with `config`. |
+| `config` | `string` | Inline `.properties` configuration. See details below. |
+| `configRefs` | `array` | Additional `.properties` sources (Secrets/ConfigMaps) merged on top of `config`, in order. See details below. |
 | `template` | `object` | Overrides merged over the pod template the operator generates. See details below. |
 
 Throughput scales with replicas up to your topics' partition count -- Kafka distributes
@@ -879,7 +879,7 @@ count). `kubectl scale rki/<name> --replicas=N` works, as does pointing a
 | Field | Type | Description |
 |---|---|---|
 | `ingress` | `object` | **Required**. Exactly one of `cluster`, `cloud`, `service` or `url`. |
-| `authToken` | `object` | A `{name, key}` reference to a Secret **in this namespace** holding a bearer token, passed to the container as `RESTATE_AUTH_TOKEN`. |
+| `authToken` | `object` | A `{name, key}` reference to a Secret **in this namespace** holding a bearer token, passed to the container as `RESTATE_AUTH_TOKEN`. The token stays in the Secret and never lands in a config file. |
 
 **`ingress` Fields**
 
@@ -898,32 +898,37 @@ access to Secrets.
 
 #### Configuration
 
-The container reads a `.properties` file and lets environment variables override it. The
-operator uses both layers:
+Everything Kafka-side -- `bootstrap.servers`, `group.id`, `topics`, `sasl.*`,
+`restate.record.mapper.*`, ... -- is the container's own `.properties` surface, given as two
+fields that layer:
 
-| Layer | Set by | Contents |
-|---|---|---|
-| `.properties` file at `/etc/restate-kafka/config.properties` | you | everything: `bootstrap.servers`, `group.id`, `topics`, `sasl.*`, `restate.record.mapper.*`, ... |
-| environment variables | the operator | `RESTATE_INGRESS_URL`, `RESTATE_AUTH_TOKEN`, `CONFIG_FILE` |
-| `spec.template` | you | anything else, applied last |
+- **`spec.config`** is an inline `.properties` block, stored in the custom resource.
+- **`spec.configRefs`** is a list of Secret/ConfigMap references, each setting exactly one of:
 
-Because environment variables win, `restate.ingress.url` and `restate.auth.token` in the
-properties file have no effect -- the operator owns the destination.
+  | Field | Type | Description |
+  |---|---|---|
+  | `secretRef` | `object` | `{name, key}` pointing at a Secret; `key` defaults to `config.properties`. |
+  | `configMapRef` | `object` | `{name, key}` pointing at a ConfigMap; `key` defaults to `config.properties`. |
 
-**`spec.config`** is stored in a `ConfigMap` the operator owns, named after the custom
-resource. The pod template carries a digest of it, so editing `spec.config` rolls the pods.
+Each source is mounted as its own read-only file under `/etc/restate-kafka/`, and the
+container's `CONFIG_FILE` lists them in merge order (later wins): the operator's own resolved
+`restate.ingress.url` first, then `spec.config`, then each `spec.configRefs` entry in order. So
+`spec.config` can override the ingress URL, and a ref can override `spec.config` -- e.g. a
+plain-text inline base with a `secretRef` overlay for credentials.
 
-**`spec.configFrom`** takes exactly one of:
+The Restate ingress **bearer token** is the exception: it goes in `spec.restate.authToken`,
+never in a config file, and reaches the container as the `RESTATE_AUTH_TOKEN` environment
+variable -- which the container prefers over any `restate.auth.token` in a file -- so it stays a
+Secret reference and never lands in plain text.
 
-| Field | Type | Description |
-|---|---|---|
-| `secretRef` | `object` | `{name, key}`; `key` defaults to `config.properties`. |
-| `configMapRef` | `object` | `{name, key}`; `key` defaults to `config.properties`. |
+`spec.config` lives in a `ConfigMap` the operator owns, named after the custom resource; the pod
+template carries a digest of that ConfigMap, so editing `spec.config` -- or a change to the
+resolved ingress URL -- rolls the pods. The operator does **not** read `spec.configRefs`
+objects, so changing their contents does not restart the pods -- run `kubectl rollout restart
+deployment/<name>`.
 
-Use `configFrom` with a Secret as soon as the configuration contains credentials:
-`spec.config` is part of the custom resource, so it is stored and displayed in plain text. The
-operator does not read the referenced object, so changing its contents does **not** restart the
-pods -- run `kubectl rollout restart deployment/<name>`.
+Keep credentials (`sasl.jaas.config`, `sasl.password`, ...) in a `spec.configRefs` Secret:
+`spec.config` is part of the custom resource, so it is stored and displayed in plain text.
 
 #### `spec.template`
 
