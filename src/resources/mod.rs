@@ -4,5 +4,6 @@ pub mod podidentityassociations;
 pub mod restatecloudenvironments;
 pub mod restateclusters;
 pub mod restatedeployments;
+pub mod restatekafkaintegrations;
 pub mod secretproviderclasses;
 pub mod securitygrouppolicies;

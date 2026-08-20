@@ -4,10 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Kubernetes operator for [Restate](https://restate.dev/), written in Rust. The operator manages three main Custom Resource Definitions (CRDs):
+This is a Kubernetes operator for [Restate](https://restate.dev/), written in Rust. The operator manages four main Custom Resource Definitions (CRDs):
 - `RestateCluster` - Manages Restate server clusters with StatefulSets
 - `RestateDeployment` - Manages Restate SDK service deployments (similar to Kubernetes Deployments but with Restate-specific versioning)
 - `RestateCloudEnvironment` - Integrates with Restate Cloud environments
+- `RestateKafkaIntegration` - Runs the Kafka ingress integration container, consuming Kafka topics into Restate invocations (`restate.dev/v1alpha1`)
 
 The operator enforces network isolation by default, handles service versioning/draining, and supports both ReplicaSet and Knative Serving deployment modes.
 
@@ -88,10 +89,17 @@ just check
 
 ### Controller Structure
 
-The operator runs three concurrent controllers (see `src/main.rs:94-105`):
+The operator runs four concurrent controllers (see `src/main.rs`):
 1. **RestateCluster Controller** (`src/controllers/restatecluster/`) - Manages StatefulSets, Services, NetworkPolicies for Restate server clusters
 2. **RestateCloudEnvironment Controller** (`src/controllers/restatecloudenvironment/`) - Manages tunnel deployments for Restate Cloud integration
 3. **RestateDeployment Controller** (`src/controllers/restatedeployment/`) - Manages service deployments with versioning and draining
+4. **RestateKafkaIntegration Controller** (`src/controllers/restatekafkaintegration/`) - Manages the Kafka ingress integration Deployment (and its ConfigMap)
+
+Adding a controller means adding a `ReadinessGate` variant in `src/controllers/mod.rs` (the
+`ALL` array is fixed-size and indexed by discriminant, with a test enforcing the ordering), a
+`tokio::pin!` and a slot in the `tokio::join!` in `src/main.rs`, a `<name>_crdgen` /
+`<name>_schemagen` bin pair, a `justfile` generate line, a symlink under
+`charts/restate-operator-crds/crd-manifests/`, and RBAC.
 
 Each controller implements a reconciliation loop using the Kube-rs runtime.
 
@@ -101,6 +109,7 @@ CRD structs are defined in `src/resources/`:
 - `restateclusters.rs` - RestateCluster CRD
 - `restatedeployments.rs` - RestateDeployment CRD
 - `restatecloudenvironments.rs` - RestateCloudEnvironment CRD
+- `restatekafkaintegrations.rs` - RestateKafkaIntegration CRD
 - `knative.rs` - Knative Serving resource definitions
 
 Additional AWS-specific resources:
@@ -120,6 +129,26 @@ RestateDeployment supports two modes (see `src/resources/restatedeployments.rs:2
 - Same tag = in-place update (new Knative Revision within same Restate deployment)
 - Changed tag = versioned update (new Restate deployment ID)
 - No tag = template hash as tag (every template change creates new deployment)
+
+### RestateKafkaIntegration
+
+**Key Concept - pass-through configuration**: only the Restate destination
+(`spec.restate.ingress`, the same `cluster`/`cloud`/`service`/`url` union as
+`RestateDeployment` but resolved to the *ingress* port 8080) and its credentials
+(`spec.restate.authToken`) are typed CRD fields. Everything Kafka-side is the container's own
+`.properties` surface, passed through inline (`spec.config`) or from a Secret/ConfigMap
+(`spec.configFrom`) -- so upstream config options need no CRD change. Do not add typed fields
+mirroring `CONFIGURATION.md` upstream; that was a deliberate design decision.
+
+- The operator supplies `RESTATE_INGRESS_URL`, `RESTATE_AUTH_TOKEN` and `CONFIG_FILE` as env
+  vars, which the container prefers over the properties file.
+- `spec.template` is a *partial* pod template strategic-merged over the generated one
+  (`src/controllers/restatekafkaintegration/merge.rs`). Absent overlay fields must stay absent:
+  a `null` in the overlay deletes a key, so never serialize `None` into the overlay.
+- No finalizer: there is nothing to deregister, so owner references and GC are enough.
+- **NetworkPolicy gotcha**: reaching a `RestateCluster`'s ingress requires
+  `spec.security.networkPeers.ingress` on the cluster. The `allow.restate.dev/<cluster>` pod
+  label only governs the cluster's *egress*.
 
 ### Network Isolation
 

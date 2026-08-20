@@ -1,0 +1,345 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: restatekafkaintegrations.restate.dev
+spec:
+  group: restate.dev
+  names:
+    kind: RestateKafkaIntegration
+    plural: restatekafkaintegrations
+    shortNames:
+    - rki
+    singular: restatekafkaintegration
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.replicas
+      name: Desired
+      type: integer
+    - jsonPath: .status.readyReplicas
+      name: Ready
+      type: integer
+    - jsonPath: .status.availableReplicas
+      name: Available
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    - jsonPath: .status.ingressUrl
+      name: Ingress
+      priority: 1
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].message
+      name: Status
+      priority: 1
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for RestateKafkaIntegrationSpec via `CustomResource`
+        properties:
+          spec:
+            description: |-
+              RestateKafkaIntegration runs the Restate Kafka ingress integration
+              (`ghcr.io/restatedev/ingress-integration-kafka`), which consumes Kafka topics and turns
+              each record into a Restate invocation.
+
+              The operator only models where Restate is and how to authenticate to it; everything else
+              (Kafka connection, consumer settings, record mapper, metrics, retry policy) is the
+              container's own configuration surface and is passed through verbatim as a `.properties`
+              file via `spec.config` or `spec.configFrom`.
+            properties:
+              config:
+                description: |-
+                  Inline configuration for the integration, in Java `.properties` format. The operator
+                  stores this in a ConfigMap it owns, mounts it, and points the container's
+                  `CONFIG_FILE` at it. Editing it rolls the pods.
+
+                  Every option documented at
+                  https://github.com/restatedev/ingress-integration-kafka/blob/main/CONFIGURATION.md
+                  is accepted, using the property-key spelling (not the environment-variable one).
+                  At a minimum the integration needs `bootstrap.servers`, `group.id` and `topics`.
+
+                  `restate.ingress.url` and `restate.auth.token` set here have no effect: the operator
+                  supplies both as environment variables, which the container prefers over the file.
+
+                  This is the CR's own body, so it is stored and displayed in plain text - keep
+                  credentials (`sasl.jaas.config`, `sasl.password`, ...) in `spec.configFrom` with a
+                  Secret instead.
+
+                  Mutually exclusive with `configFrom`.
+                nullable: true
+                type: string
+              configFrom:
+                description: |-
+                  Configuration for the integration, read from a Secret or ConfigMap in this namespace
+                  and mounted as the container's `CONFIG_FILE`. Use this rather than `config` when the
+                  configuration contains credentials.
+
+                  The operator does not read the referenced object, so changing its contents does not
+                  restart the pods; run `kubectl rollout restart deployment/<name>` to pick a change up.
+
+                  Mutually exclusive with `config`.
+                nullable: true
+                oneOf:
+                - required:
+                  - secretRef
+                - required:
+                  - configMapRef
+                properties:
+                  configMapRef:
+                    description: A ConfigMap in this namespace holding the `.properties` configuration. Exactly one of `secretRef` or `configMapRef` must be specified
+                    properties:
+                      key:
+                        description: The key to read the `.properties` configuration from. Defaults to `config.properties`.
+                        nullable: true
+                        type: string
+                      name:
+                        description: The name of the referenced object. It must be in the same namespace as this resource.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  secretRef:
+                    description: A Secret in this namespace holding the `.properties` configuration. Exactly one of `secretRef` or `configMapRef` must be specified
+                    properties:
+                      key:
+                        description: The key to read the `.properties` configuration from. Defaults to `config.properties`.
+                        nullable: true
+                        type: string
+                      name:
+                        description: The name of the referenced object. It must be in the same namespace as this resource.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                type: object
+              image:
+                description: |-
+                  Container image name. Defaults to a suggested version of
+                  ghcr.io/restatedev/ingress-integration-kafka.
+                nullable: true
+                type: string
+              imagePullPolicy:
+                description: |-
+                  Image pull policy. One of Always, Never, IfNotPresent. Defaults to Always if :latest
+                  tag is specified, or IfNotPresent otherwise.
+                  More info: https://kubernetes.io/docs/concepts/containers/images#updating-images
+                nullable: true
+                type: string
+              replicas:
+                default: 1
+                description: |-
+                  Number of desired pods. Defaults to 1.
+
+                  Kafka distributes the subscribed partitions across the whole consumer group, so
+                  throughput scales with replicas up to the partition count; replicas beyond that sit
+                  idle. Note that each pod itself runs `restate.kafka.consumer.instances` consumers
+                  (defaulting to twice the container's CPU count).
+                format: int32
+                minimum: 0.0
+                type: integer
+              restate:
+                description: Where to send the invocations produced from Kafka records, and how to authenticate.
+                properties:
+                  authToken:
+                    description: |-
+                      A Secret key in this namespace holding a bearer token for the Restate ingress,
+                      supplied to the container as `RESTATE_AUTH_TOKEN`.
+
+                      Required when `ingress.cloud` is set; optional (and usually unnecessary) otherwise.
+                      The operator never reads this Secret - it is referenced from the pod spec, so the
+                      kubelet resolves it.
+                    nullable: true
+                    properties:
+                      key:
+                        description: The key to read from the referenced Secret
+                        type: string
+                      name:
+                        description: The name of the referenced Secret. It must be in the same namespace as this resource.
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                  ingress:
+                    description: The location of the Restate ingress to send invocations to.
+                    oneOf:
+                    - required:
+                      - cluster
+                    - required:
+                      - cloud
+                    - required:
+                      - service
+                    - required:
+                      - url
+                    properties:
+                      cloud:
+                        description: The name of a RestateCloudEnvironment whose ingress to send invocations to. Requires `spec.restate.authToken`. Exactly one of `cluster`, `cloud`, `service` or `url` must be specified
+                        type: string
+                      cluster:
+                        description: The name of a RestateCluster whose ingress to send invocations to. Exactly one of `cluster`, `cloud`, `service` or `url` must be specified
+                        type: string
+                      service:
+                        description: A reference to a Service hosting the Restate ingress. If `port` is unset it defaults to 8080. Exactly one of `cluster`, `cloud`, `service` or `url` must be specified
+                        properties:
+                          name:
+                            description: '`name` is the name of the service. Required'
+                            type: string
+                          namespace:
+                            description: '`namespace` is the namespace of the service. Required'
+                            type: string
+                          path:
+                            description: '`path` is an optional URL path which will be prepended before admin api paths. Should not end in a /.'
+                            nullable: true
+                            type: string
+                          port:
+                            description: If specified, the port on the service that hosts the admin api. Defaults to 9070. `port` should be a valid port number (1-65535, inclusive).
+                            format: int32
+                            maximum: 65535.0
+                            minimum: 1.0
+                            nullable: true
+                            type: integer
+                        required:
+                        - name
+                        - namespace
+                        type: object
+                      url:
+                        description: A url of the Restate ingress to send invocations to. Exactly one of `cluster`, `cloud`, `service` or `url` must be specified
+                        type: string
+                    type: object
+                required:
+                - ingress
+                type: object
+              template:
+                description: |-
+                  Overrides applied on top of the pod template the operator generates.
+
+                  This is a partial pod template, strategic-merged over the generated one: objects are
+                  merged key by key, and lists whose Kubernetes merge key the operator knows
+                  (`containers`, `initContainers`, `volumes`, `env`, `volumeMounts`, `ports`,
+                  `imagePullSecrets`, `hostAliases`) are merged entry by entry, so you can override a
+                  single field without restating the rest. Any other list replaces the generated one,
+                  and an explicit `null` removes a generated field.
+
+                  The operator's own container is named `kafka-integration`; target it by name to set
+                  resources, probes, extra environment variables or volume mounts. The generated pod
+                  deliberately has no readiness or liveness probe (the image exposes no health endpoint
+                  and exits non-zero on unrecoverable errors), so add one here if you want one.
+                nullable: true
+                properties:
+                  metadata:
+                    description: Labels and annotations to merge into the generated pod template's metadata.
+                    nullable: true
+                    properties:
+                      annotations:
+                        additionalProperties:
+                          type: string
+                        description: 'Annotations is an unstructured key value map stored with a resource that may be set by external tools to store and retrieve arbitrary metadata. They are not queryable and should be preserved when modifying objects. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations'
+                        nullable: true
+                        type: object
+                      labels:
+                        additionalProperties:
+                          type: string
+                        description: 'Map of string keys and values that can be used to organize and categorize (scope and select) objects. May match selectors of replication controllers and services. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels'
+                        nullable: true
+                        type: object
+                    type: object
+                  spec:
+                    description: |-
+                      Pod spec fields to merge over the generated pod spec.
+
+                      Passed through verbatim, so it accepts any field the target Kubernetes version
+                      understands.
+                    nullable: true
+                    x-kubernetes-preserve-unknown-fields: true
+                type: object
+            required:
+            - restate
+            type: object
+            x-kubernetes-validations:
+            - message: only one of spec.config and spec.configFrom may be set
+              rule: '!(has(self.config) && has(self.configFrom))'
+          status:
+            description: |-
+              Status of the RestateKafkaIntegration
+              This is set and managed automatically by the controller
+            nullable: true
+            properties:
+              availableReplicas:
+                description: Total number of available pods (ready for at least minReadySeconds)
+                format: int32
+                nullable: true
+                type: integer
+              conditions:
+                description: Represents the latest available observations of current state
+                items:
+                  description: A condition of a RestateKafkaIntegration
+                  properties:
+                    lastTransitionTime:
+                      description: Last time the condition transitioned from one status to another.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      description: Human-readable message indicating details about last transition.
+                      nullable: true
+                      type: string
+                    reason:
+                      description: Unique, one-word, CamelCase reason for the condition's last transition.
+                      nullable: true
+                      type: string
+                    status:
+                      description: Status is the status of the condition. Can be True, False, Unknown.
+                      type: string
+                    type:
+                      description: Type of the condition, known values are (`Ready`).
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              ingressUrl:
+                description: The resolved Restate ingress URL the integration was configured with
+                nullable: true
+                type: string
+              labelSelector:
+                description: The label selector of this RestateKafkaIntegration as a string, for the scale subresource
+                nullable: true
+                type: string
+              observedGeneration:
+                description: The generation observed by the controller
+                format: int64
+                nullable: true
+                type: integer
+              readyReplicas:
+                description: Total number of ready pods
+                format: int32
+                nullable: true
+                type: integer
+              replicas:
+                description: Total number of non-terminated pods targeted by this RestateKafkaIntegration
+                format: int32
+                type: integer
+              unavailableReplicas:
+                description: Total number of unavailable pods
+                format: int32
+                nullable: true
+                type: integer
+            required:
+            - replicas
+            type: object
+        required:
+        - spec
+        title: RestateKafkaIntegration
+        type: object
+    served: true
+    storage: true
+    subresources:
+      scale:
+        labelSelectorPath: .status.labelSelector
+        specReplicasPath: .spec.replicas
+        statusReplicasPath: .status.replicas
+      status: {}
