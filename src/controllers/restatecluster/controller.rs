@@ -35,8 +35,11 @@ use tokio::{sync::RwLock, time::Duration};
 use tracing::*;
 
 use crate::controllers::{
-    CrdWait, Diagnostics, ReadinessGate, State, wait_for_api_groups, wait_for_crd,
+    CrdWait, Diagnostics, RECONCILING_CONDITION, ReadinessGate, State, log_suspended,
+    reconciliation_suspended, state_after_reconcile, suspended_message, wait_for_api_groups,
+    wait_for_crd,
 };
+use crate::resources::ReconciliationState;
 use crate::resources::iampolicymembers::IAMPolicyMember;
 use crate::resources::podidentityassociations::PodIdentityAssociation;
 use crate::resources::restateclusters::{
@@ -127,6 +130,12 @@ async fn reconcile(rc: Arc<RestateCluster>, ctx: Arc<Context>) -> Result<Action>
     let _timer = ctx.metrics.count_and_measure::<RestateCluster>();
     ctx.diagnostics.write().await.last_event = Utc::now();
     let rcs: Api<RestateCluster> = Api::all(ctx.client.clone());
+
+    // Check this before the finalizer helper, which adds our finalizer to resources that
+    // don't have one yet. That's a write, and we've been asked not to write to this one.
+    if reconciliation_suspended(rc.as_ref()) {
+        return rc.reconcile_suspended(&rcs).await;
+    }
 
     info!("Reconciling RestateCluster \"{}\"", rc.name_any());
     match finalizer(&rcs, RESTATE_CLUSTER_FINALIZER, rc.clone(), |event| async {
@@ -248,6 +257,68 @@ impl RestateCluster {
         Ok(())
     }
 
+    /// Note the suspension in the status, and leave everything else alone.
+    ///
+    /// The status is ours to write, so this doesn't disturb anything that was changed by hand.
+    /// The rest of it stays as the last real reconcile left it, `observedGeneration` included:
+    /// if the spec has moved on since, that's how you can tell.
+    async fn reconcile_suspended(&self, rcs: &Api<RestateCluster>) -> Result<Action> {
+        let name = self.name_any();
+        let message = suspended_message();
+        let reason = ReconciliationState::Disabled.as_str();
+        let previous = self.status.as_ref().and_then(|s| s.reconciliation);
+
+        log_suspended("RestateCluster", &name, previous);
+
+        let existing = self
+            .status
+            .as_ref()
+            .and_then(|s| s.conditions.as_ref())
+            .and_then(|c| c.iter().find(|cond| cond.r#type == RECONCILING_CONDITION));
+        let now = k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(Utc::now());
+
+        let suspended = RestateClusterCondition {
+            // Only the start of the suspension is a transition.
+            last_transition_time: Some(
+                match existing {
+                    Some(cond) if cond.status == "False" => cond.last_transition_time.clone(),
+                    _ => None,
+                }
+                .unwrap_or(now),
+            ),
+            message: Some(message),
+            reason: Some(reason.into()),
+            status: "False".into(),
+            r#type: RECONCILING_CONDITION.into(),
+        };
+
+        // Leave the other conditions alone. A stale `Ready` is still worth having, and it
+        // says when it was last true.
+        let mut conditions: Vec<_> = self
+            .status
+            .as_ref()
+            .and_then(|s| s.conditions.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|cond| cond.r#type != RECONCILING_CONDITION)
+            .collect();
+        conditions.push(suspended);
+
+        let new_status = Patch::Apply(json!({
+            "apiVersion": "restate.dev/v1",
+            "kind": "RestateCluster",
+            "status": RestateClusterStatus {
+                conditions: Some(conditions),
+                reconciliation: Some(ReconciliationState::Disabled),
+                provisioned: self.status.as_ref().and_then(|s| s.provisioned),
+            }
+        }));
+        let ps = PatchParams::apply("restate-operator").force();
+        rcs.patch_status(&name, &ps, &new_status).await?;
+
+        Ok(Action::await_change())
+    }
+
     async fn reconcile_status(&self, ctx: Arc<Context>) -> Result<Action> {
         let rcs: Api<RestateCluster> = Api::all(ctx.client.clone());
 
@@ -345,6 +416,8 @@ impl RestateCluster {
             ready.last_transition_time = Some(now)
         }
 
+        let ready_status = ready.status.clone();
+
         // Preserve the provisioned status from the existing status, or set it if we just provisioned
         let provisioned = if set_provisioned {
             Some(true)
@@ -355,7 +428,13 @@ impl RestateCluster {
             "apiVersion": "restate.dev/v1",
             "kind": "RestateCluster",
             "status": RestateClusterStatus {
+                // Replacing the whole list is what clears the `Reconciling` condition after
+                // a suspension.
                 conditions: Some(vec![ready]),
+                reconciliation: Some(state_after_reconcile(
+                    self.status.as_ref().and_then(|s| s.reconciliation),
+                    &ready_status,
+                )),
                 provisioned,
             }
         }));

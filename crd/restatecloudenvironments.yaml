@@ -803,6 +803,53 @@ spec:
             - region
             - signingPublicKey
             type: object
+          status:
+            description: |-
+              Status of the RestateCloudEnvironment.
+              This is set and managed automatically by the controller.
+              Read-only.
+            nullable: true
+            properties:
+              conditions:
+                items:
+                  properties:
+                    lastTransitionTime:
+                      description: Last time the condition transitioned from one status to another.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      description: Human-readable message indicating details about last transition.
+                      nullable: true
+                      type: string
+                    reason:
+                      description: Unique, one-word, CamelCase reason for the condition's last transition.
+                      nullable: true
+                      type: string
+                    status:
+                      description: Status is the status of the condition. Can be True, False, Unknown.
+                      type: string
+                    type:
+                      description: Type of the condition, known values are (`Ready`, `Reconciling`).
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              reconciliation:
+                description: |-
+                  What the operator is currently doing with this environment: `Reconciling`, `Disabled`
+                  (suspended by the `restate.dev/reconcile: disabled` annotation), or
+                  `ResumingReconciliation` (the annotation has gone but the tunnel is not ready yet).
+                enum:
+                - Reconciling
+                - Disabled
+                - ResumingReconciliation
+                nullable: true
+                type: string
+            type: object
         required:
         - metadata
         - spec
@@ -810,4 +857,5 @@ spec:
         type: object
     served: true
     storage: true
-    subresources: {}
+    subresources:
+      status: {}

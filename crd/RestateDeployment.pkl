@@ -204,6 +204,11 @@ class Status {
   /// Total number of updated ready pods
   readyReplicas: Int?
 
+  /// What the operator is currently doing with this deployment: `Reconciling`, `Disabled` (suspended by
+  /// the `restate.dev/reconcile: disabled` annotation), or `ResumingReconciliation` (the annotation has
+  /// gone but the deployment is not ready yet).
+  reconciliation: ("Reconciling"|"Disabled"|"ResumingReconciliation")?
+
   /// Total number of updated non-terminated pods targeted by this RestateDeployment
   replicas: Int
 

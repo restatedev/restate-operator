@@ -278,6 +278,11 @@ class Status {
   /// Whether the cluster has been provisioned by the operator. This is set to true after successful
   /// provisioning to avoid repeated provisioning attempts.
   provisioned: Boolean?
+
+  /// What the operator is currently doing with this cluster: `Reconciling`, `Disabled` (suspended by the
+  /// `restate.dev/reconcile: disabled` annotation), or `ResumingReconciliation` (the annotation has gone
+  /// but the cluster is not ready yet).
+  reconciliation: ("Reconciling"|"Disabled"|"ResumingReconciliation")?
 }
 
 class Condition {

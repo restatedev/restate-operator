@@ -24,7 +24,7 @@ pub static RESTATE_CLOUD_ENVIRONMENT_FINALIZER: &str = "cloudenvironments.restat
     printcolumn = r#"{"name":"Region", "type":"string", "jsonPath":".spec.region"}"#,
     printcolumn = r#"{"name":"Age", "description": "CreationTimestamp is a timestamp representing the server time when this object was created. It is not guaranteed to be set in happens-before order across separate operations. Clients may not set this value. It is represented in RFC3339 form and is in UTC", "type":"date", "jsonPath":".metadata.creationTimestamp"}"#
 )]
-#[kube(shortname = "rce")]
+#[kube(status = "RestateCloudEnvironmentStatus", shortname = "rce")]
 #[serde(rename_all = "camelCase")]
 pub struct RestateCloudEnvironmentSpec {
     /// The ID of your environment, which begins `env_`
@@ -49,6 +49,7 @@ impl schemars::JsonSchema for RestateCloudEnvironment {
     }
     fn json_schema(generator: &mut schemars::SchemaGenerator) -> Schema {
         let spec_schema = generator.subschema_for::<RestateCloudEnvironmentSpec>();
+        let status_schema = generator.subschema_for::<Option<RestateCloudEnvironmentStatus>>();
 
         schemars::json_schema!({
             "type": "object",
@@ -65,11 +66,46 @@ impl schemars::JsonSchema for RestateCloudEnvironment {
                         }
                     }
                 },
-                "spec": spec_schema
+                "spec": spec_schema,
+                "status": status_schema
             },
             "required": ["metadata", "spec"]
         })
     }
+}
+
+/// Status of the RestateCloudEnvironment.
+/// This is set and managed automatically by the controller.
+/// Read-only.
+#[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
+pub struct RestateCloudEnvironmentStatus {
+    pub conditions: Option<Vec<RestateCloudEnvironmentCondition>>,
+
+    /// What the operator is currently doing with this environment: `Reconciling`, `Disabled`
+    /// (suspended by the `restate.dev/reconcile: disabled` annotation), or
+    /// `ResumingReconciliation` (the annotation has gone but the tunnel is not ready yet).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(default, schema_with = "crate::resources::reconciliation_schema")]
+    pub reconciliation: Option<crate::resources::ReconciliationState>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RestateCloudEnvironmentCondition {
+    /// Last time the condition transitioned from one status to another.
+    pub last_transition_time: Option<k8s_openapi::apimachinery::pkg::apis::meta::v1::Time>,
+
+    /// Human-readable message indicating details about last transition.
+    pub message: Option<String>,
+
+    /// Unique, one-word, CamelCase reason for the condition's last transition.
+    pub reason: Option<String>,
+
+    /// Status is the status of the condition. Can be True, False, Unknown.
+    pub status: String,
+
+    /// Type of the condition, known values are (`Ready`, `Reconciling`).
+    pub r#type: String,
 }
 
 impl RestateCloudEnvironment {

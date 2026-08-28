@@ -6,7 +6,7 @@ use futures::StreamExt;
 
 use k8s_openapi::api::apps::v1::Deployment;
 
-use kube::api::{Api, ObjectMeta};
+use kube::api::{Api, ObjectMeta, Patch, PatchParams};
 use kube::client::Client;
 use kube::runtime::controller;
 use kube::runtime::controller::Action;
@@ -15,13 +15,19 @@ use kube::runtime::finalizer::{Event as Finalizer, finalizer};
 use kube::runtime::watcher::Config;
 
 use kube::{Resource, ResourceExt};
+use serde_json::json;
 use tokio::sync::RwLock;
 use tracing::*;
 
-use crate::controllers::{CrdWait, Diagnostics, ReadinessGate, State, wait_for_crd};
+use crate::controllers::{
+    CrdWait, Diagnostics, RECONCILING_CONDITION, ReadinessGate, State, log_suspended,
+    reconciliation_suspended, state_after_reconcile, suspended_message, wait_for_crd,
+};
 use crate::metrics::Metrics;
+use crate::resources::ReconciliationState;
 use crate::resources::restatecloudenvironments::{
-    RESTATE_CLOUD_ENVIRONMENT_FINALIZER, RestateCloudEnvironment,
+    RESTATE_CLOUD_ENVIRONMENT_FINALIZER, RestateCloudEnvironment, RestateCloudEnvironmentCondition,
+    RestateCloudEnvironmentStatus,
 };
 use crate::telemetry;
 use crate::{Error, Result};
@@ -67,6 +73,12 @@ async fn reconcile(rs: Arc<RestateCloudEnvironment>, ctx: Arc<Context>) -> Resul
 
     let services_api: Api<RestateCloudEnvironment> = Api::all(ctx.client.clone());
 
+    // Check this before the finalizer helper, which adds our finalizer to resources that
+    // don't have one yet. That's a write, and we've been asked not to write to this one.
+    if reconciliation_suspended(rs.as_ref()) {
+        return rs.reconcile_suspended(&services_api).await;
+    }
+
     info!("Reconciling RestateCloudEnvironment {}", rs.name_any(),);
     match finalizer(
         &services_api,
@@ -74,7 +86,7 @@ async fn reconcile(rs: Arc<RestateCloudEnvironment>, ctx: Arc<Context>) -> Resul
         rs.clone(),
         |event| async {
             match event {
-                Finalizer::Apply(rs) => rs.reconcile(ctx.clone(), &rs.name_any()).await,
+                Finalizer::Apply(rs) => rs.reconcile_status(ctx.clone()).await,
                 Finalizer::Cleanup(rs) => rs.cleanup(ctx.clone()).await,
             }
         },
@@ -110,6 +122,128 @@ fn error_policy<K, C>(_rs: Arc<K>, _: &Error, _ctx: C) -> Action {
 }
 
 impl RestateCloudEnvironment {
+    /// Note the suspension in the status, and leave everything else alone.
+    async fn reconcile_suspended(&self, rces: &Api<RestateCloudEnvironment>) -> Result<Action> {
+        let name = self.name_any();
+        let message = suspended_message();
+        let previous = self.status.as_ref().and_then(|s| s.reconciliation);
+
+        log_suspended("RestateCloudEnvironment", &name, previous);
+
+        let existing = self
+            .status
+            .as_ref()
+            .and_then(|s| s.conditions.as_ref())
+            .and_then(|c| c.iter().find(|cond| cond.r#type == RECONCILING_CONDITION));
+        let now = k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(Utc::now());
+
+        let suspended = RestateCloudEnvironmentCondition {
+            last_transition_time: Some(
+                match existing {
+                    Some(cond) if cond.status == "False" => cond.last_transition_time.clone(),
+                    _ => None,
+                }
+                .unwrap_or(now),
+            ),
+            message: Some(message),
+            reason: Some(ReconciliationState::Disabled.as_str().into()),
+            status: "False".into(),
+            r#type: RECONCILING_CONDITION.into(),
+        };
+
+        let mut conditions: Vec<_> = self
+            .status
+            .as_ref()
+            .and_then(|s| s.conditions.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|cond| cond.r#type != RECONCILING_CONDITION)
+            .collect();
+        conditions.push(suspended);
+
+        let new_status = Patch::Apply(json!({
+            "apiVersion": RestateCloudEnvironment::api_version(&()),
+            "kind": RestateCloudEnvironment::kind(&()),
+            "status": RestateCloudEnvironmentStatus {
+                conditions: Some(conditions),
+                reconciliation: Some(ReconciliationState::Disabled),
+            }
+        }));
+        let ps = PatchParams::apply("restate-operator").force();
+        rces.patch_status(&name, &ps, &new_status).await?;
+
+        Ok(Action::await_change())
+    }
+
+    /// Reconcile, then record the outcome in the status.
+    ///
+    /// Without this write a resumed environment would keep the `Disabled` left over from its
+    /// suspension, and claim forever that we aren't managing it.
+    async fn reconcile_status(&self, ctx: Arc<Context>) -> Result<Action> {
+        let rces: Api<RestateCloudEnvironment> = Api::all(ctx.client.clone());
+        let name = self.name_any();
+
+        let (result, message, reason, status) = match self.reconcile(ctx, &name).await {
+            Ok(action) => (
+                Ok(action),
+                "Restate Cloud environment reconciled successfully".into(),
+                "Reconciled".into(),
+                "True".into(),
+            ),
+            Err(err) => {
+                let message = err.to_string();
+                (
+                    Err(err),
+                    message,
+                    "FailedReconcile".into(),
+                    "Unknown".into(),
+                )
+            }
+        };
+
+        let existing_ready = self
+            .status
+            .as_ref()
+            .and_then(|s| s.conditions.as_ref())
+            .and_then(|c| c.iter().find(|cond| cond.r#type == "Ready"));
+        let now = k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(Utc::now());
+
+        let mut ready = RestateCloudEnvironmentCondition {
+            last_transition_time: Some(
+                existing_ready
+                    .and_then(|r| r.last_transition_time.clone())
+                    .unwrap_or_else(|| now.clone()),
+            ),
+            message: Some(message),
+            reason: Some(reason),
+            status,
+            r#type: "Ready".into(),
+        };
+
+        if existing_ready.map(|r| &r.status) != Some(&ready.status) {
+            ready.last_transition_time = Some(now)
+        }
+
+        let ready_status = ready.status.clone();
+        let new_status = Patch::Apply(json!({
+            "apiVersion": RestateCloudEnvironment::api_version(&()),
+            "kind": RestateCloudEnvironment::kind(&()),
+            "status": RestateCloudEnvironmentStatus {
+                // Replacing the whole list is what clears the `Reconciling` condition after
+                // a suspension.
+                conditions: Some(vec![ready]),
+                reconciliation: Some(state_after_reconcile(
+                    self.status.as_ref().and_then(|s| s.reconciliation),
+                    &ready_status,
+                )),
+            }
+        }));
+        let ps = PatchParams::apply("restate-operator").force();
+        rces.patch_status(&name, &ps, &new_status).await?;
+
+        result
+    }
+
     // Reconcile (for non-finalizer related changes)
     async fn reconcile(&self, ctx: Arc<Context>, name: &str) -> Result<Action> {
         let oref = self.controller_owner_ref(&()).unwrap();

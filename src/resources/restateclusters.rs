@@ -367,6 +367,10 @@ pub struct SecretProviderSigningKeySource {
 #[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
 pub struct RestateClusterStatus {
     pub conditions: Option<Vec<RestateClusterCondition>>,
+    /// What the operator is currently doing with this cluster.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(default, schema_with = "crate::resources::reconciliation_schema")]
+    pub reconciliation: Option<crate::resources::ReconciliationState>,
     /// Whether the cluster has been provisioned by the operator.
     /// This is set to true after successful provisioning to avoid repeated provisioning attempts.
     #[serde(skip_serializing_if = "Option::is_none")]

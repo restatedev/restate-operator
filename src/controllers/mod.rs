@@ -16,6 +16,7 @@ use tracing::{debug, info, warn};
 use url::Url;
 
 use crate::Metrics;
+use crate::resources::ReconciliationState;
 
 pub mod restatecloudenvironment;
 pub mod restatecluster;
@@ -24,6 +25,63 @@ pub mod restatedeployment;
 /// How often each controller re-checks for its missing CRD, and how often the aggregate
 /// `WaitingForCRD` event is re-published while any are missing.
 const CRD_POLL_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Break-glass annotation. Set to `disabled` on a resource and every controller leaves it,
+/// and everything it owns, completely alone until the annotation is removed.
+pub const RECONCILE_ANNOTATION: &str = "restate.dev/reconcile";
+
+/// The one annotation value that suspends reconciliation.
+pub const RECONCILE_DISABLED: &str = "disabled";
+
+/// The condition we write while a resource is suspended. It says in words what
+/// [`ReconciliationState`] says as a value, and the normal status writes replace the whole
+/// condition list, so it clears itself on resume.
+pub const RECONCILING_CONDITION: &str = "Reconciling";
+
+/// Whether reconciliation of this resource is suspended by [`RECONCILE_ANNOTATION`].
+///
+/// Deletion is deliberately not covered: the annotation suspends management of the resource,
+/// not its teardown, so a resource with a deletion timestamp reconciles as normal.
+pub fn reconciliation_suspended<K: kube::ResourceExt>(obj: &K) -> bool {
+    obj.meta().deletion_timestamp.is_none()
+        && obj
+            .annotations()
+            .get(RECONCILE_ANNOTATION)
+            .is_some_and(|value| value == RECONCILE_DISABLED)
+}
+
+/// The `Reconciling` condition message for a suspended resource.
+pub fn suspended_message() -> String {
+    format!(
+        "Reconciliation is suspended by the {RECONCILE_ANNOTATION}={RECONCILE_DISABLED} \
+         annotation."
+    )
+}
+
+/// Log a skipped reconcile: once at info when the suspension starts, at debug for as long as
+/// it lasts. A resource can sit suspended for days, and every watch resync comes back here.
+pub fn log_suspended(kind: &str, name: &str, previous: Option<ReconciliationState>) {
+    if previous == Some(ReconciliationState::Disabled) {
+        debug!("Skipping {kind} {name}: {}", suspended_message());
+    } else {
+        info!("Skipping {kind} {name}: {}", suspended_message());
+    }
+}
+
+/// The state to report after a reconcile that actually ran.
+pub fn state_after_reconcile(
+    previous: Option<ReconciliationState>,
+    ready_status: &str,
+) -> ReconciliationState {
+    match previous {
+        Some(ReconciliationState::Disabled | ReconciliationState::ResumingReconciliation)
+            if ready_status != "True" =>
+        {
+            ReconciliationState::ResumingReconciliation
+        }
+        _ => ReconciliationState::Reconciling,
+    }
+}
 
 /// Diagnostics to be exposed by the web server
 #[derive(Clone, Serialize)]
@@ -609,7 +667,89 @@ async fn publish_crd_wait_event(
 
 #[cfg(test)]
 mod tests {
-    use super::{Readiness, ReadinessGate, pending_crds_note};
+    use super::{
+        RECONCILE_ANNOTATION, Readiness, ReadinessGate, pending_crds_note,
+        reconciliation_suspended, state_after_reconcile, suspended_message,
+    };
+    use crate::resources::ReconciliationState;
+    use crate::resources::restateclusters::{RestateCluster, RestateClusterSpec};
+    use chrono::Utc;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
+    use kube::ResourceExt;
+
+    fn annotated(annotations: &[(&str, &str)]) -> RestateCluster {
+        let mut rc = RestateCluster::new("cluster", RestateClusterSpec::default());
+        rc.annotations_mut().extend(
+            annotations
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string())),
+        );
+        rc
+    }
+
+    /// Only `disabled` suspends, so a typo in the annotation can't quietly stop the operator.
+    #[test]
+    fn only_disabled_suspends_reconciliation() {
+        assert!(!reconciliation_suspended(&annotated(&[])));
+        assert!(reconciliation_suspended(&annotated(&[(
+            RECONCILE_ANNOTATION,
+            "disabled"
+        )])));
+
+        for value in ["enabled", "", "Disabled", "true", "suspended"] {
+            assert!(
+                !reconciliation_suspended(&annotated(&[(RECONCILE_ANNOTATION, value)])),
+                "{RECONCILE_ANNOTATION}={value} must not suspend reconciliation"
+            );
+        }
+    }
+
+    /// The suspension has to name the annotation, or there's no way to tell what stopped it.
+    #[test]
+    fn the_suspension_message_names_the_annotation() {
+        let message = suspended_message();
+        assert!(message.contains(RECONCILE_ANNOTATION), "{message}");
+    }
+
+    /// The annotation suspends management, not teardown: a delete goes through regardless.
+    #[test]
+    fn deletion_is_not_suspended() {
+        let mut rc = annotated(&[(RECONCILE_ANNOTATION, "disabled")]);
+        assert!(reconciliation_suspended(&rc));
+
+        rc.metadata.deletion_timestamp = Some(Time(Utc::now()));
+        assert!(!reconciliation_suspended(&rc));
+    }
+
+    /// Resuming lasts until the resource is ready again, not just until the annotation goes.
+    #[test]
+    fn resuming_lasts_until_the_resource_is_ready_again() {
+        use ReconciliationState::*;
+
+        // still converging after the annotation was removed
+        assert_eq!(
+            state_after_reconcile(Some(Disabled), "False"),
+            ResumingReconciliation
+        );
+        assert_eq!(
+            state_after_reconcile(Some(ResumingReconciliation), "Unknown"),
+            ResumingReconciliation
+        );
+
+        // ready again, so the resume is over
+        assert_eq!(
+            state_after_reconcile(Some(ResumingReconciliation), "True"),
+            Reconciling
+        );
+        assert_eq!(state_after_reconcile(Some(Disabled), "True"), Reconciling);
+
+        // never suspended, so never resuming, however unready it is
+        assert_eq!(state_after_reconcile(None, "False"), Reconciling);
+        assert_eq!(
+            state_after_reconcile(Some(Reconciling), "False"),
+            Reconciling
+        );
+    }
 
     /// One event has to describe every controller's wait, so the note is the only place the
     /// missing CRDs get named.

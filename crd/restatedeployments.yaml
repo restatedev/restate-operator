@@ -430,6 +430,17 @@ spec:
                 format: int32
                 nullable: true
                 type: integer
+              reconciliation:
+                description: |-
+                  What the operator is currently doing with this deployment: `Reconciling`, `Disabled`
+                  (suspended by the `restate.dev/reconcile: disabled` annotation), or
+                  `ResumingReconciliation` (the annotation has gone but the deployment is not ready yet).
+                enum:
+                - Reconciling
+                - Disabled
+                - ResumingReconciliation
+                nullable: true
+                type: string
               replicas:
                 description: Total number of updated non-terminated pods targeted by this RestateDeployment
                 format: int32
