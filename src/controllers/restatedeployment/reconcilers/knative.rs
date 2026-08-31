@@ -10,8 +10,9 @@ use tracing::*;
 use url::Url;
 
 use crate::controllers::restatedeployment::cleanup::{
-    BlockingVersion, CleanupMode, DeploymentUsageMap, RESTATE_REMOVE_VERSION_AT_ANNOTATION,
-    retain_for_rollback, schedule_version_removal, unschedule_version_removal,
+    BlockingVersion, CleanupMode, CleanupOutcome, DeploymentUsageMap,
+    RESTATE_REMOVE_VERSION_AT_ANNOTATION, retain_for_rollback, schedule_version_removal,
+    unschedule_version_removal,
 };
 use crate::controllers::restatedeployment::controller::{
     Context, RESTATE_DEPLOYMENT_ID_ANNOTATION, propagated_labels,
@@ -240,10 +241,18 @@ pub async fn reconcile_knative(
     status.deployment_id = Some(deployment_id);
 
     // Cleanup old Configurations (mirrors ReplicaSet cleanup pattern)
-    let (_, next_removal) =
-        cleanup_old_configurations(namespace, ctx, &rsd_uid, rsd, &deployments, Some(&tag)).await?;
+    let outcome = cleanup_old_configurations(
+        namespace,
+        ctx,
+        &rsd_uid,
+        rsd,
+        CleanupMode::Rollout,
+        &deployments,
+        Some(&tag),
+    )
+    .await?;
 
-    Ok(next_removal)
+    Ok(outcome.next_removal)
 }
 
 /// Determine the tag for this deployment
@@ -823,9 +832,10 @@ pub async fn cleanup_old_configurations(
     ctx: &Context,
     rsd_uid: &str,
     rsd: &RestateDeployment,
+    mode: CleanupMode,
     deployments: &DeploymentUsageMap,
     active_tag: Option<&str>,
-) -> Result<(Vec<BlockingVersion>, Option<chrono::DateTime<chrono::Utc>>)> {
+) -> Result<CleanupOutcome> {
     // Use reflector cache instead of API list() call
     let configurations_cell = std::cell::Cell::new(Vec::new());
 
@@ -887,9 +897,6 @@ pub async fn cleanup_old_configurations(
     let mut next_removal = None;
 
     let now = chrono::Utc::now();
-
-    // As in `cleanup_old_replicasets`.
-    let mode = CleanupMode::for_rsd(rsd);
 
     for config in configurations {
         let config_name = config.name_any();
@@ -1021,7 +1028,10 @@ pub async fn cleanup_old_configurations(
         );
     }
 
-    Ok((blocking, next_removal))
+    Ok(CleanupOutcome {
+        blocking,
+        next_removal,
+    })
 }
 
 /// Get tag from Configuration annotation

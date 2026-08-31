@@ -189,6 +189,15 @@ pub(crate) fn blocked_deletion_requeue(blocked_for: Duration) -> Duration {
     (blocked_for / 4).clamp(FLOOR, CEILING)
 }
 
+/// What one pass of cleanup did and did not manage to remove.
+#[derive(Debug, Default)]
+pub(crate) struct CleanupOutcome {
+    /// Versions Restate still needs, which cleanup therefore left alone.
+    pub blocking: Vec<BlockingVersion>,
+    /// When the soonest drained-but-not-yet-due version comes up for removal.
+    pub next_removal: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 /// A version that cleanup could not remove because Restate still needs it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BlockingVersion {

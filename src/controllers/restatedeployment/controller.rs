@@ -48,7 +48,7 @@ use crate::{Error, Result};
 
 // Import our reconcilers
 use crate::controllers::restatedeployment::cleanup::{
-    CleanupMode, DeploymentUsage, DeploymentUsageMap, DeploymentUsageRows,
+    CleanupMode, CleanupOutcome, DeploymentUsage, DeploymentUsageMap, DeploymentUsageRows,
     RESTATE_REMOVE_VERSION_AT_ANNOTATION, blocked_deletion_requeue, deployment_usage_query,
     describe_blocking_versions, unschedule_version_removal,
 };
@@ -565,12 +565,13 @@ impl RestateDeployment {
                         &rs_api,
                         &my_uid,
                         self,
+                        CleanupMode::Rollout,
                         &deployments,
                         Some(&versioned_name), // exclude the replicaset which may not be registered
                     )
                     .await
                     {
-                        Ok((_, _)) => return Err(ready_err),
+                        Ok(_) => return Err(ready_err),
                         Err(cleanup_err) => {
                             error!(
                                 "Failed to clean up old replicasets while waiting for current replicaset to become ready: {cleanup_err}"
@@ -682,18 +683,19 @@ impl RestateDeployment {
 
         // Clean up old ReplicaSets that are no longer needed
 
-        let (_, next_removal) = reconcilers::replicaset::cleanup_old_replicasets(
+        let outcome = reconcilers::replicaset::cleanup_old_replicasets(
             namespace,
             &ctx,
             &rs_api,
             &my_uid,
             self,
+            CleanupMode::Rollout,
             &deployments,
             Some(&versioned_name),
         )
         .await?;
 
-        Ok((replicaset, next_removal))
+        Ok((replicaset, outcome.next_removal))
     }
 
     /// Note the suspension in the status, and leave everything else alone.
@@ -1227,7 +1229,8 @@ impl RestateDeployment {
             };
         }
 
-        let deployments = self.list_deployments(&ctx, CleanupMode::Deleting).await?;
+        let mode = CleanupMode::for_rsd(self);
+        let deployments = self.list_deployments(&ctx, mode).await?;
 
         let my_uid = self.uid().expect("RestateDeployment to have a uid");
 
@@ -1237,13 +1240,17 @@ impl RestateDeployment {
             Some(crate::resources::restatedeployments::DeploymentMode::Knative)
         );
 
-        let (blocking, next_removal) = if is_knative {
+        let CleanupOutcome {
+            blocking,
+            next_removal,
+        } = if is_knative {
             // Knative cleanup path
             reconcilers::knative::cleanup_old_configurations(
                 namespace,
                 &ctx,
                 &my_uid,
                 self,
+                mode,
                 &deployments,
                 None,
             )
@@ -1256,6 +1263,7 @@ impl RestateDeployment {
                 &rs_api,
                 &my_uid,
                 self,
+                mode,
                 &deployments,
                 None,
             )

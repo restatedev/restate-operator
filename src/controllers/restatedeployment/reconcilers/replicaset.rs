@@ -14,8 +14,9 @@ use serde_json::json;
 use tracing::*;
 
 use crate::controllers::restatedeployment::cleanup::{
-    BlockingVersion, CleanupMode, DeploymentUsageMap, RESTATE_REMOVE_VERSION_AT_ANNOTATION,
-    retain_for_rollback, schedule_version_removal, unschedule_version_removal,
+    BlockingVersion, CleanupMode, CleanupOutcome, DeploymentUsageMap,
+    RESTATE_REMOVE_VERSION_AT_ANNOTATION, retain_for_rollback, schedule_version_removal,
+    unschedule_version_removal,
 };
 use crate::controllers::restatedeployment::controller::{
     APP_MANAGED_BY_LABEL, Context, OWNED_BY_LABEL, RESTATE_DEPLOYMENT_ID_ANNOTATION,
@@ -275,9 +276,10 @@ pub async fn cleanup_old_replicasets(
     rs_api: &Api<ReplicaSet>,
     rsd_uid: &str,
     rsd: &RestateDeployment,
+    mode: CleanupMode,
     deployments: &DeploymentUsageMap,
     except_rs: Option<&str>,
-) -> Result<(Vec<BlockingVersion>, Option<chrono::DateTime<chrono::Utc>>)> {
+) -> Result<CleanupOutcome> {
     let replicasets_cell = std::cell::Cell::new(Vec::new());
 
     let _ = ctx.replicasets_store.find(|rs| {
@@ -331,8 +333,6 @@ pub async fn cleanup_old_replicasets(
 
     let now = chrono::Utc::now();
 
-    let mode = CleanupMode::for_rsd(rsd);
-
     for rs in replicasets {
         let rs_name = rs.name_any();
 
@@ -355,7 +355,7 @@ pub async fn cleanup_old_replicasets(
             // handled unconditionally below, before scale-down.)
             match super::autoscaling::plan_active_version_hpa(
                 rsd.spec.autoscaling.is_some(),
-                rsd.metadata.deletion_timestamp.is_some(),
+                mode.is_deleting(),
             ) {
                 HpaPlan::Ensure => {
                     if let Some(template) = rsd.spec.autoscaling.as_ref()
@@ -567,7 +567,10 @@ pub async fn cleanup_old_replicasets(
         );
     }
 
-    Ok((blocking, next_removal))
+    Ok(CleanupOutcome {
+        blocking,
+        next_removal,
+    })
 }
 
 #[cfg(test)]
@@ -1056,12 +1059,16 @@ mod tests {
             let rsd = rsd(true, false);
             let harness = harness(vec![version("dp_gone", None)], vec![version_hpa()]);
 
-            let (blocking, next_removal) = cleanup_old_replicasets(
+            let CleanupOutcome {
+                blocking,
+                next_removal,
+            } = cleanup_old_replicasets(
                 NAMESPACE,
                 &harness.ctx,
                 &harness.rs_api,
                 RSD_UID,
                 &rsd,
+                CleanupMode::Rollout,
                 // the endpoint was deregistered by other means, so the version is
                 // scaled down on this pass rather than waiting out a drain
                 &DeploymentUsageMap::new(),
@@ -1096,12 +1103,16 @@ mod tests {
                 vec![version_hpa()],
             );
 
-            let (blocking, next_removal) = cleanup_old_replicasets(
+            let CleanupOutcome {
+                blocking,
+                next_removal,
+            } = cleanup_old_replicasets(
                 NAMESPACE,
                 &harness.ctx,
                 &harness.rs_api,
                 RSD_UID,
                 &rsd,
+                CleanupMode::Rollout,
                 // registered, superseded, and nothing in flight: drained but not yet due
                 &usage_of("dp_draining", DeploymentUsage::default()),
                 None,
@@ -1136,12 +1147,13 @@ mod tests {
                 unpinned_invocations: 0,
             };
 
-            let (blocking, _) = cleanup_old_replicasets(
+            let CleanupOutcome { blocking, .. } = cleanup_old_replicasets(
                 NAMESPACE,
                 &harness.ctx,
                 &harness.rs_api,
                 RSD_UID,
                 &rsd,
+                CleanupMode::Deleting,
                 &usage_of("dp_busy", busy),
                 None,
             )
@@ -1174,12 +1186,13 @@ mod tests {
 
             // superseded with nothing in flight, so this pass stamps a deadline
             let stamping = harness(vec![version("dp_super", None)], vec![]);
-            let (_, next_removal) = cleanup_old_replicasets(
+            let CleanupOutcome { next_removal, .. } = cleanup_old_replicasets(
                 NAMESPACE,
                 &stamping.ctx,
                 &stamping.rs_api,
                 RSD_UID,
                 &rsd,
+                CleanupMode::Rollout,
                 &usage_of("dp_super", DeploymentUsage::default()),
                 None,
             )
@@ -1201,12 +1214,13 @@ mod tests {
                 pinned_invocations: 1,
                 unpinned_invocations: 0,
             };
-            let (blocking, _) = cleanup_old_replicasets(
+            let CleanupOutcome { blocking, .. } = cleanup_old_replicasets(
                 NAMESPACE,
                 &clearing.ctx,
                 &clearing.rs_api,
                 RSD_UID,
                 &rsd,
+                CleanupMode::Rollout,
                 &usage_of("dp_pinned", pinned),
                 None,
             )
