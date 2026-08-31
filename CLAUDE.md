@@ -202,7 +202,11 @@ Error types are defined in `src/lib.rs`. Use the `Error` enum for controller err
 
 Both RestateCluster and RestateDeployment use finalizers for cleanup:
 - `clusters.restate.dev` - Ensures namespace deletion
-- `deployments.restate.dev` - Ensures service deregistration and ReplicaSet cleanup
+- `deployments.restate.dev` - Ensures service deregistration and ReplicaSet cleanup.
+  How long deletion waits for in-flight invocations is set by
+  `spec.restate.deletePolicy` (`drain` | `force`) and, for a drain,
+  `spec.restate.drain` (`timeoutSeconds` and `onTimeout`: `hold` | `force`);
+  progress is reported on `.status.deletion`. See `docs/delete-policy.md`
 
 ### Restate Invocation Lifecycle and Deployment Status
 
