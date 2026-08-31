@@ -347,6 +347,7 @@ pub async fn cleanup_old_replicasets(
 
         if let Some(usage) = deployment.filter(|usage| usage.is_active(mode)) {
             blocking.push(BlockingVersion {
+                deployment_id: rs_deployment_id.cloned(),
                 name: rs_name.clone(),
                 usage,
             });
@@ -501,6 +502,7 @@ pub async fn cleanup_old_replicasets(
 
                 if let Some(usage) = deployment.filter(|usage| usage.in_flight_invocations() > 0) {
                     abandoned.push(BlockingVersion {
+                        deployment_id: rs_deployment_id.cloned(),
                         name: rs_name.clone(),
                         usage,
                     });
@@ -1227,6 +1229,7 @@ mod tests {
                 abandoned,
                 vec![BlockingVersion {
                     name: VERSION.into(),
+                    deployment_id: Some("dp_busy".into()),
                     usage: busy,
                 }],
             );
@@ -1284,6 +1287,7 @@ mod tests {
                 blocking,
                 vec![BlockingVersion {
                     name: VERSION.into(),
+                    deployment_id: Some("dp_busy".into()),
                     usage: busy,
                 }],
                 "in-flight invocations hold the deletion, and say so"
@@ -1351,6 +1355,7 @@ mod tests {
                 blocking,
                 vec![BlockingVersion {
                     name: VERSION.into(),
+                    deployment_id: Some("dp_pinned".into()),
                     usage: pinned,
                 }],
             );

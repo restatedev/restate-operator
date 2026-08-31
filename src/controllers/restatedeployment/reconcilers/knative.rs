@@ -916,6 +916,7 @@ pub async fn cleanup_old_configurations(
 
         if let Some(usage) = deployment.filter(|usage| usage.is_active(mode)) {
             blocking.push(BlockingVersion {
+                deployment_id: config_deployment_id.cloned(),
                 name: config_name.clone(),
                 usage,
             });
@@ -961,6 +962,7 @@ pub async fn cleanup_old_configurations(
 
                 if let Some(usage) = deployment.filter(|usage| usage.in_flight_invocations() > 0) {
                     abandoned.push(BlockingVersion {
+                        deployment_id: config_deployment_id.cloned(),
                         name: config_name.clone(),
                         usage,
                     });

@@ -253,6 +253,8 @@ pub(crate) struct CleanupOutcome {
 pub(crate) struct BlockingVersion {
     /// The ReplicaSet or Configuration name.
     pub name: String,
+    /// The Restate deployment it is registered as.
+    pub deployment_id: Option<String>,
     pub usage: DeploymentUsage,
 }
 
@@ -261,7 +263,7 @@ pub(crate) struct BlockingVersion {
 pub(crate) fn describe_blocking_versions(blocking: &[BlockingVersion]) -> String {
     blocking
         .iter()
-        .map(|BlockingVersion { name, usage }| {
+        .map(|BlockingVersion { name, usage, .. }| {
             format!(
                 "{name} ({} pinned, {} unpinned invocations)",
                 usage.pinned_invocations, usage.unpinned_invocations
@@ -271,16 +273,24 @@ pub(crate) fn describe_blocking_versions(blocking: &[BlockingVersion]) -> String
         .join(", ")
 }
 
-/// Render the versions a force deletion tore down with work still in flight. The counts
-/// are pinned-only: the query a force deletion runs doesn't attribute unpinned work.
+/// Render the versions a force deletion tore down with work still in flight.
+///
+/// Usually pinned-only, because the query a force deletion runs doesn't attribute unpinned
+/// work -- so the count is labelled "pinned" rather than "unfinished", which would read as
+/// a total it isn't. A pass whose `onTimeout: force` deadline expired after the query ran
+/// does have the unpinned count, and reports it.
 pub(crate) fn describe_abandoned_versions(abandoned: &[BlockingVersion]) -> String {
     abandoned
         .iter()
-        .map(|BlockingVersion { name, usage }| {
-            format!(
-                "{name} ({} unfinished invocations)",
-                usage.pinned_invocations
-            )
+        .map(|BlockingVersion { name, usage, .. }| {
+            if usage.unpinned_invocations > 0 {
+                format!(
+                    "{name} ({} pinned, {} unpinned invocations)",
+                    usage.pinned_invocations, usage.unpinned_invocations
+                )
+            } else {
+                format!("{name} ({} pinned invocations)", usage.pinned_invocations)
+            }
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -631,6 +641,14 @@ mod tests {
         }
     }
 
+    fn blocking(name: &str, usage: DeploymentUsage) -> BlockingVersion {
+        BlockingVersion {
+            name: name.into(),
+            deployment_id: None,
+            usage,
+        }
+    }
+
     fn usage(latest: bool, pinned: u64, unpinned: u64) -> DeploymentUsage {
         DeploymentUsage {
             latest_for_service: latest,
@@ -822,12 +840,18 @@ mod tests {
 
     #[test]
     fn abandoned_versions_report_what_was_walked_over() {
+        // the force query doesn't attribute unpinned work, so the count says "pinned"
+        // rather than claiming to be every unfinished invocation
         assert_eq!(
-            describe_abandoned_versions(&[BlockingVersion {
-                name: "greeter-abc123".into(),
-                usage: usage(false, 4, 0),
-            }]),
-            "greeter-abc123 (4 unfinished invocations)"
+            describe_abandoned_versions(&[blocking("greeter-abc123", usage(false, 4, 0))]),
+            "greeter-abc123 (4 pinned invocations)"
+        );
+
+        // ...but an `onTimeout: force` drain that crossed its deadline after the query ran
+        // does have the unpinned count, and must not drop it
+        assert_eq!(
+            describe_abandoned_versions(&[blocking("greeter-abc123", usage(false, 4, 7))]),
+            "greeter-abc123 (4 pinned, 7 unpinned invocations)"
         );
     }
 
@@ -889,14 +913,8 @@ mod tests {
     #[test]
     fn blocking_versions_name_the_work_holding_the_deletion() {
         let described = describe_blocking_versions(&[
-            BlockingVersion {
-                name: "greeter-abc123".into(),
-                usage: usage(true, 2, 0),
-            },
-            BlockingVersion {
-                name: "greeter-def456".into(),
-                usage: usage(false, 0, 7),
-            },
+            blocking("greeter-abc123", usage(true, 2, 0)),
+            blocking("greeter-def456", usage(false, 0, 7)),
         ]);
 
         assert_eq!(
