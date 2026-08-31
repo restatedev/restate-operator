@@ -603,6 +603,8 @@ mod tests {
                     use_http11: None,
                     tunnel_mode,
                     drain_delay_seconds: None,
+                    delete_policy: None,
+                    drain: None,
                 },
                 autoscaling: None,
             },

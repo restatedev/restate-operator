@@ -113,6 +113,15 @@ class Knative {
 
 /// Restate specific configuration
 class Restate {
+  /// What to do about in-flight invocations when this RestateDeployment is deleted. Defaults to `drain`.
+  /// - `drain`: wait for in-flight invocations to finish, on the terms set by `drain`. - `force`:
+  /// deregister and tear down immediately, without draining.
+  deletePolicy: ("drain"|"force")?
+
+  /// How `deletePolicy: drain` waits: how long, and whether it eventually gives up. Ignored by
+  /// `deletePolicy: force`, which never waits.
+  drain: Drain?
+
   /// Seconds to wait before removing old versions after they are drained. Defaults to 300 (5 minutes).
   drainDelaySeconds: Int(isPositive)?
 
@@ -134,6 +143,18 @@ class Restate {
 
   /// Force the use of HTTP/1.1 when registering with Restate
   useHttp11: Boolean?
+}
+
+/// How `deletePolicy: drain` waits: how long, and whether it eventually gives up. Ignored by
+/// `deletePolicy: force`, which never waits.
+class Drain {
+  /// What to do once `timeoutSeconds` has passed. Defaults to `hold`. - `hold`: keep waiting, and report
+  /// the drain as overdue - `force`: force-deregister, abandoning whatever is left
+  onTimeout: ("hold"|"force")?
+
+  /// Seconds to wait for in-flight invocations to finish. Defaults to 3600 (1 hour). Under `onTimeout:
+  /// hold` this only sets when the drain reports itself overdue; it never lets the deletion through
+  timeoutSeconds: Int(isPositive)?
 }
 
 /// The location of the Restate Admin API to register this deployment against
@@ -185,6 +206,10 @@ class Status {
   /// Represents the latest available observations of current state
   conditions: Listing<Condition>?
 
+  /// Progress of an in-flight deletion. Only set once the RestateDeployment has been deleted and the
+  /// operator is working through `spec.restate.deletePolicy`
+  deletion: Deletion?
+
   /// Restate deployment ID for the current tag
   deploymentId: String?
 
@@ -204,9 +229,7 @@ class Status {
   /// Total number of updated ready pods
   readyReplicas: Int?
 
-  /// What the operator is currently doing with this deployment: `Reconciling`, `Disabled` (suspended by
-  /// the `restate.dev/reconcile: disabled` annotation), or `ResumingReconciliation` (the annotation has
-  /// gone but the deployment is not ready yet).
+  /// What the operator is currently doing with this deployment.
   reconciliation: ("Reconciling"|"Disabled"|"ResumingReconciliation")?
 
   /// Total number of updated non-terminated pods targeted by this RestateDeployment
@@ -232,6 +255,52 @@ class Condition {
 
   /// Type of condition (Ready, Progressing, Available)
   type: String
+}
+
+/// Progress of an in-flight deletion. Only set once the RestateDeployment has been deleted and the
+/// operator is working through `spec.restate.deletePolicy`
+class Deletion {
+  /// When the drain timeout expires. Unset under `deletePolicy: force`
+  deadline: String?
+
+  /// Human-readable explanation of what the deletion is waiting for
+  message: String?
+
+  /// What happens at the `deadline`: `hold` keeps waiting, `force` gives up and deregisters. Unset under
+  /// `deletePolicy: force`, which has no deadline to reach
+  onTimeout: ("hold"|"force")?
+
+  /// The versions holding the deletion, and the invocations they are waiting on
+  pendingInvocations: Listing<PendingInvocation>?
+
+  /// Where the deletion has got to
+  phase: "Draining"|"Overdue"|"Forcing"
+
+  /// The policy being applied
+  policy: "drain"|"force"
+
+  /// When deletion was requested
+  startedAt: String?
+
+  /// Total invocations across all versions holding the deletion
+  totalPendingInvocations: Int
+}
+
+/// Invocations holding one version of a deleting RestateDeployment
+class PendingInvocation {
+  /// The Restate deployment ID this version is registered as
+  deploymentId: String?
+
+  /// Unfinished invocations already bound to this version
+  pinned: Int
+
+  /// Unfinished invocations not yet bound to any version, but targeting a service this version is the
+  /// endpoint for. Not counted under `deletePolicy: force`, which does not run the query that attributes
+  /// them
+  unpinned: Int
+
+  /// The ReplicaSet (or Knative Configuration) name
+  version: String
 }
 
 /// Knative-specific status
