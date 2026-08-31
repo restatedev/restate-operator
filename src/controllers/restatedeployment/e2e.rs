@@ -263,3 +263,75 @@ async fn legacy_query_tracks_safe_rollout_decisions() {
     })
     .await;
 }
+
+/// The deleting flavour of the query is the one a drain blocks on, and the only one that
+/// attributes unpinned work. Neither its extra CTE nor the columns it reaches for
+/// (`target_service_name`, joined against `sys_service`) are exercised by the rollout
+/// test above, and a schema change under either would silently un-block deletions that
+/// should be held.
+#[tokio::test]
+#[ignore = "needs Docker; run `just test-e2e`"]
+async fn legacy_query_attributes_unpinned_work_when_deleting() {
+    let server = RestateServer::start(LEGACY_IMAGE);
+    let admin = Admin {
+        client: reqwest::Client::new(),
+        admin_url: server.admin_url.clone(),
+    };
+
+    // As above: wait out the partition-placement transient before trusting a result.
+    let _: DeploymentUsageRows = admin
+        .query(&deployment_usage_query(CleanupMode::Deleting))
+        .await;
+
+    let v1 = admin.register(&serve_greeter().await).await;
+
+    // Being a service's endpoint keeps a version alive through a rollout but not through a
+    // deletion -- a deletion is removing the service, so only in-flight work can hold it.
+    let usage = admin.usage(CleanupMode::Deleting).await;
+    assert!(usage[&v1].latest_for_service);
+    assert!(usage[&v1].is_active(CleanupMode::Rollout));
+    assert!(!usage[&v1].is_active(CleanupMode::Deleting));
+
+    // A delayed invocation is accepted but bound to no deployment: it is exactly the
+    // unpinned work only this flavour attributes, and the case the feature exists for --
+    // a scheduled invocation whose execution time is arbitrarily far out.
+    let response = admin
+        .client
+        .post(format!(
+            "{}/Greeter/greet/send?delay=600s",
+            server.ingress_url
+        ))
+        .json(&"unpinned")
+        .send()
+        .await
+        .expect("schedule delayed invocation");
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    assert!(
+        status.is_success(),
+        "delayed send failed ({status}): {body}"
+    );
+
+    await_ok(
+        "delayed invocation to be attributed to v1 as unpinned",
+        || async {
+            admin
+                .usage(CleanupMode::Deleting)
+                .await
+                .get(&v1)
+                .is_some_and(|usage| usage.unpinned_invocations > 0)
+        },
+    )
+    .await;
+
+    // It is unpinned, not pinned, and it holds the drain open.
+    let usage = admin.usage(CleanupMode::Deleting).await;
+    assert_eq!(usage[&v1].pinned_invocations, 0);
+    assert!(usage[&v1].is_active(CleanupMode::Deleting));
+
+    // A force deletion doesn't run the CTE, so the same work reports as zero there and
+    // holds nothing. This is what lets a force deletion skip the expensive half.
+    let forcing = admin.usage(CleanupMode::ForceDeleting).await;
+    assert_eq!(forcing[&v1].unpinned_invocations, 0);
+    assert!(!forcing[&v1].is_active(CleanupMode::ForceDeleting));
+}

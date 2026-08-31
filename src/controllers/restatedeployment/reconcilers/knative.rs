@@ -892,6 +892,8 @@ pub async fn cleanup_old_configurations(
 
     // keep track of the configurations that are still in-use by restate (active services or invocations)
     let mut blocking = Vec::new();
+    // versions a force deletion tore down with invocations still running
+    let mut abandoned = Vec::new();
     // Keep track of how many zero-scaled configurations there are (for revision history limit)
     let mut historic_count = 0;
     let mut next_removal = None;
@@ -936,7 +938,10 @@ pub async fn cleanup_old_configurations(
                     .ok()
             });
 
-        let current_remove_at_in_past = current_remove_at.is_some_and(|c| c < now);
+        // a force deletion doesn't wait out the drain delay, so every version it gets
+        // this far with is due for removal now
+        let current_remove_at_in_past =
+            current_remove_at.is_some_and(|c| c < now) || mode.skips_drain_delay();
 
         match (
             current_remove_at,
@@ -952,6 +957,13 @@ pub async fn cleanup_old_configurations(
                         config_name, historic_count, rsd.spec.revision_history_limit
                     );
                     continue;
+                }
+
+                if let Some(usage) = deployment.filter(|usage| usage.in_flight_invocations() > 0) {
+                    abandoned.push(BlockingVersion {
+                        name: config_name.clone(),
+                        usage,
+                    });
                 }
 
                 if deployment_exists {
@@ -1031,6 +1043,7 @@ pub async fn cleanup_old_configurations(
     Ok(CleanupOutcome {
         blocking,
         next_removal,
+        abandoned,
     })
 }
 

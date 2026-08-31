@@ -50,7 +50,8 @@ use crate::{Error, Result};
 use crate::controllers::restatedeployment::cleanup::{
     CleanupMode, CleanupOutcome, DeploymentUsage, DeploymentUsageMap, DeploymentUsageRows,
     RESTATE_REMOVE_VERSION_AT_ANNOTATION, blocked_deletion_requeue, deployment_usage_query,
-    describe_blocking_versions, unschedule_version_removal,
+    describe_abandoned_versions, describe_blocking_versions, drain_deadline,
+    unschedule_version_removal,
 };
 use crate::controllers::restatedeployment::reconcilers;
 use crate::controllers::restatedeployment::registration::{self, RegistrationAction};
@@ -1195,6 +1196,12 @@ impl RestateDeployment {
             .unwrap_or_default()
     }
 
+    /// How long until the drain gives up waiting, if it hasn't already.
+    fn until_drain_deadline(&self) -> Option<Duration> {
+        let deadline = drain_deadline(self)?;
+        (deadline - chrono::Utc::now()).to_std().ok()
+    }
+
     // Finalizer cleanup (the object was deleted, ensure nothing is orphaned)
     async fn cleanup(&self, ctx: Arc<Context>, namespace: &str) -> Result<Action> {
         ctx.recorder
@@ -1243,6 +1250,7 @@ impl RestateDeployment {
         let CleanupOutcome {
             blocking,
             next_removal,
+            abandoned,
         } = if is_knative {
             // Knative cleanup path
             reconcilers::knative::cleanup_old_configurations(
@@ -1270,6 +1278,40 @@ impl RestateDeployment {
             .await?
         };
 
+        if !abandoned.is_empty() {
+            let abandoned = describe_abandoned_versions(&abandoned);
+
+            warn!(
+                "Force-deleting RestateDeployment '{}' from Restate with unfinished invocations against {abandoned}",
+                self.name_any(),
+            );
+
+            // The teardown above already happened, so a failure to publish here must not
+            // fail the pass: the next one finds nothing abandoned and would never retry
+            // the event. The warning above it is the record that survives either way.
+            if let Err(err) = ctx
+                .recorder
+                .publish(
+                    &Event {
+                        type_: EventType::Warning,
+                        reason: "ForcedDeletion".into(),
+                        note: Some(format!(
+                            "Deregistered version(s) with unfinished invocations: {abandoned}"
+                        )),
+                        action: "Deleting".into(),
+                        secondary: None,
+                    },
+                    &self.object_ref(&()),
+                )
+                .await
+            {
+                warn!(
+                    "Failed to publish ForcedDeletion event for RestateDeployment '{}' in namespace {namespace}: {err}",
+                    self.name_any(),
+                );
+            }
+        }
+
         if !blocking.is_empty() {
             let blocked_by = describe_blocking_versions(&blocking);
 
@@ -1285,7 +1327,10 @@ impl RestateDeployment {
             // can be arbitrarily far out, so "wait for it" is not always sound advice.
             return Err(Error::DeploymentInUse {
                 blocked_by,
-                requeue_after: Some(blocked_deletion_requeue(self.blocked_for())),
+                requeue_after: Some(blocked_deletion_requeue(
+                    self.blocked_for(),
+                    self.until_drain_deadline(),
+                )),
             });
         }
 

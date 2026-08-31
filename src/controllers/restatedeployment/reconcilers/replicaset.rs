@@ -327,6 +327,8 @@ pub async fn cleanup_old_replicasets(
 
     // keep track of the rs that are still in-use by restate (active services or invocations)
     let mut blocking = Vec::new();
+    // versions a force deletion tore down with invocations still running
+    let mut abandoned = Vec::new();
     // Keep track of how many zero-scaled rs there are (for revision history limit)
     let mut historic_count = 0;
     let mut next_removal = None;
@@ -440,7 +442,10 @@ pub async fn cleanup_old_replicasets(
                     .ok()
             });
 
-        let current_remove_at_in_past = current_remove_at.is_some_and(|c| c < now);
+        // a force deletion doesn't wait out the drain delay, so every version it gets
+        // this far with is due for removal now
+        let current_remove_at_in_past =
+            current_remove_at.is_some_and(|c| c < now) || mode.skips_drain_delay();
 
         match (
             current_remove_at,
@@ -492,6 +497,13 @@ pub async fn cleanup_old_replicasets(
                     historic_count += 1;
                     // we haven't hit that limit yet, so we don't need to delete this rs
                     continue;
+                }
+
+                if let Some(usage) = deployment.filter(|usage| usage.in_flight_invocations() > 0) {
+                    abandoned.push(BlockingVersion {
+                        name: rs_name.clone(),
+                        usage,
+                    });
                 }
 
                 if deployment_exists {
@@ -570,6 +582,7 @@ pub async fn cleanup_old_replicasets(
     Ok(CleanupOutcome {
         blocking,
         next_removal,
+        abandoned,
     })
 }
 
@@ -968,6 +981,47 @@ mod tests {
             }
         }
 
+        /// Stand-in for the Restate admin API: records the request line into the same
+        /// call log as the apiserver stub, and answers 200 to everything.
+        async fn admin_stub(calls: Calls) -> url::Url {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("admin stub binds");
+            let url = format!("http://{}/", listener.local_addr().expect("stub address"));
+
+            tokio::spawn(async move {
+                while let Ok((mut socket, _)) = listener.accept().await {
+                    let calls = calls.clone();
+                    tokio::spawn(async move {
+                        let mut buf = [0u8; 2048];
+                        let read = socket.read(&mut buf).await.unwrap_or(0);
+                        if let Some(request_line) =
+                            String::from_utf8_lossy(&buf[..read]).lines().next()
+                        {
+                            let mut parts = request_line.split_whitespace();
+                            let method = parts.next().unwrap_or_default();
+                            let path = parts.next().unwrap_or_default();
+                            calls.0.lock().expect("calls are not poisoned").push(Call {
+                                method: method.to_owned(),
+                                path: path.to_owned(),
+                                field_manager: None,
+                                content_type: None,
+                            });
+                        }
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\n\r\n{}",
+                            )
+                            .await;
+                    });
+                }
+            });
+
+            url.parse().expect("stub url parses")
+        }
+
         fn rsd(autoscaling: bool, deleting: bool) -> RestateDeployment {
             let spec = serde_json::from_value(json!({
                 "replicas": 3,
@@ -1062,6 +1116,7 @@ mod tests {
             let CleanupOutcome {
                 blocking,
                 next_removal,
+                ..
             } = cleanup_old_replicasets(
                 NAMESPACE,
                 &harness.ctx,
@@ -1106,6 +1161,7 @@ mod tests {
             let CleanupOutcome {
                 blocking,
                 next_removal,
+                ..
             } = cleanup_old_replicasets(
                 NAMESPACE,
                 &harness.ctx,
@@ -1126,6 +1182,70 @@ mod tests {
                 harness.calls.matching(VERSION),
                 Vec::<String>::new(),
                 "nothing is touched until the deadline passes"
+            );
+        }
+
+        /// `deletePolicy: force` doesn't wait: a version with invocations in flight and a
+        /// drain deadline still ahead of it is torn down on this pass, and says what it
+        /// walked over.
+        #[tokio::test]
+        async fn force_deletion_tears_down_a_busy_version_immediately() {
+            let remove_at = chrono::Utc::now() + chrono::TimeDelta::seconds(300);
+            let harness = harness(
+                vec![version("dp_busy", Some(remove_at))],
+                vec![version_hpa()],
+            );
+
+            let mut rsd = rsd(true, true);
+            rsd.spec.restate.register.url = Some(admin_stub(harness.calls.clone()).await);
+
+            let busy = DeploymentUsage {
+                latest_for_service: true,
+                pinned_invocations: 4,
+                unpinned_invocations: 0,
+            };
+
+            let CleanupOutcome {
+                blocking,
+                abandoned,
+                ..
+            } = cleanup_old_replicasets(
+                NAMESPACE,
+                &harness.ctx,
+                &harness.rs_api,
+                RSD_UID,
+                &rsd,
+                CleanupMode::ForceDeleting,
+                &usage_of("dp_busy", busy),
+                None,
+            )
+            .await
+            .expect("cleanup succeeds");
+
+            assert!(blocking.is_empty(), "nothing holds a force deletion");
+            assert_eq!(
+                abandoned,
+                vec![BlockingVersion {
+                    name: VERSION.into(),
+                    usage: busy,
+                }],
+            );
+            assert_eq!(
+                harness.calls.matching(VERSION),
+                vec![
+                    format!(
+                        "DELETE /apis/autoscaling/v2/namespaces/{NAMESPACE}/horizontalpodautoscalers/{VERSION}"
+                    ),
+                    format!(
+                        "PATCH /apis/apps/v1/namespaces/{NAMESPACE}/replicasets/{VERSION}/scale"
+                    ),
+                    format!("DELETE /apis/apps/v1/namespaces/{NAMESPACE}/replicasets/{VERSION}"),
+                ],
+                "no remove-version-at patch: the drain delay is skipped entirely"
+            );
+            assert_eq!(
+                harness.calls.matching("/deployments/"),
+                vec!["DELETE /deployments/dp_busy?force=true".to_owned()],
             );
         }
 
