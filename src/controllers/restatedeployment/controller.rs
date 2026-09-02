@@ -1258,6 +1258,80 @@ impl RestateDeployment {
         }
     }
 
+    /// The conditions to keep, or `None` when there are no suspension marks to clear and
+    /// so nothing to write.
+    fn suspension_to_clear(&self) -> Option<Vec<RestateDeploymentCondition>> {
+        let status = self.status.as_ref();
+
+        let stale_state = status
+            .and_then(|status| status.reconciliation)
+            .is_some_and(|state| state != ReconciliationState::Reconciling);
+        let stale_condition = status
+            .and_then(|status| status.conditions.as_ref())
+            .is_some_and(|conditions| {
+                conditions
+                    .iter()
+                    .any(|cond| cond.r#type == RECONCILING_CONDITION)
+            });
+
+        if !stale_state && !stale_condition {
+            return None;
+        }
+
+        // Applying `conditions` claims the whole list, so send it back minus the one that
+        // no longer applies. A stale `Ready` is still worth having; it says when the
+        // deployment was last healthy.
+        Some(
+            status
+                .and_then(|status| status.conditions.clone())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|cond| cond.r#type != RECONCILING_CONDITION)
+                .collect(),
+        )
+    }
+
+    /// Clear the suspension marks left behind by [`Self::reconcile_suspended`].
+    ///
+    /// A paused RestateDeployment reconciles again the moment it is deleted, so its
+    /// `Disabled` state and `Reconciling` condition go stale immediately: they say the
+    /// operator is leaving the resource alone while it is in fact tearing it down, next
+    /// to a `.status.deletion` that updates every pass. Nothing else clears them, because
+    /// the main status apply doesn't run during a deletion.
+    ///
+    /// Written under the field manager that set them, so this is a hand-off rather than a
+    /// fight, and only when there is something to hand over.
+    async fn clear_suspension(&self, ctx: &Context, namespace: &str) {
+        let Some(conditions) = self.suspension_to_clear() else {
+            return;
+        };
+
+        let rsd_api: Api<RestateDeployment> = Api::namespaced(ctx.client.clone(), namespace);
+        let patch = json!({
+            "apiVersion": RestateDeployment::api_version(&()),
+            "kind": RestateDeployment::kind(&()),
+            "status": {
+                "reconciliation": ReconciliationState::Reconciling,
+                "conditions": conditions,
+            },
+        });
+
+        if let Err(err) = rsd_api
+            .patch_status(
+                &self.name_any(),
+                &PatchParams::apply("restate-operator").force(),
+                &Patch::Apply(patch),
+            )
+            .await
+        {
+            // Cosmetic next to the teardown itself, which is about to carry on regardless.
+            warn!(
+                "Failed to clear the suspended status of deleting RestateDeployment '{}' in namespace {namespace}: {err}",
+                self.name_any(),
+            );
+        }
+    }
+
     /// Report deletion progress on `.status.deletion`, under its own field manager: the
     /// main status apply doesn't claim that field, and doesn't run at all while deleting.
     async fn report_deletion(&self, ctx: &Context, namespace: &str, deletion: DeletionStatus) {
@@ -1307,6 +1381,10 @@ impl RestateDeployment {
 
     // Finalizer cleanup (the object was deleted, ensure nothing is orphaned)
     async fn cleanup(&self, ctx: Arc<Context>, namespace: &str) -> Result<Action> {
+        // Before anything reports progress: a paused object arrives here still claiming
+        // the operator is leaving it alone.
+        self.clear_suspension(&ctx, namespace).await;
+
         ctx.recorder
             .publish(
                 &Event {
@@ -2029,6 +2107,87 @@ mod tests {
             crate::resources::restatedeployments::DeletePolicy::Force
         );
         assert_eq!(force_status.deadline, None);
+    }
+
+    fn paused_rsd(policy: &str, on_timeout: &str) -> RestateDeployment {
+        use crate::controllers::{RECONCILE_ANNOTATION, RECONCILE_DISABLED};
+
+        serde_json::from_value(json!({
+            "apiVersion": "restate.dev/v1beta1",
+            "kind": "RestateDeployment",
+            "metadata": {
+                "name": "greeter",
+                "namespace": "apps",
+                "annotations": { RECONCILE_ANNOTATION: RECONCILE_DISABLED },
+            },
+            "spec": {
+                "replicas": 1,
+                "revisionHistoryLimit": 10,
+                "template": { "spec": {} },
+                "restate": {
+                    "register": { "url": "http://restate:9070/" },
+                    "deletePolicy": policy,
+                    "drain": { "timeoutSeconds": 60, "onTimeout": on_timeout },
+                },
+            },
+        }))
+        .expect("test RestateDeployment deserializes")
+    }
+
+    /// The `Disabled` state and its `Reconciling` condition are wrong the moment a paused
+    /// object starts deleting, and nothing else clears them -- the main status apply does
+    /// not run during a deletion. Clearing keeps the other conditions: a stale `Ready`
+    /// still says when the deployment was last healthy.
+    #[test]
+    fn a_deleting_rsd_no_longer_claims_to_be_suspended() {
+        let mut rsd = paused_rsd("drain", "hold");
+        rsd.metadata.deletion_timestamp = Some(Time(chrono::Utc::now()));
+
+        let ready = RestateDeploymentCondition {
+            last_transition_time: None,
+            message: Some("was healthy".into()),
+            reason: Some("Available".into()),
+            status: "True".into(),
+            r#type: "Ready".into(),
+        };
+        let suspended = RestateDeploymentCondition {
+            last_transition_time: None,
+            message: Some(suspended_message()),
+            reason: Some(ReconciliationState::Disabled.as_str().into()),
+            status: "False".into(),
+            r#type: RECONCILING_CONDITION.into(),
+        };
+
+        // nothing to hand over: no suspension marks, so no write at all
+        let mut status = RestateDeploymentStatus {
+            conditions: Some(vec![ready.clone()]),
+            reconciliation: Some(ReconciliationState::Reconciling),
+            ..Default::default()
+        };
+        rsd.status = Some(status.clone());
+        assert_eq!(rsd.suspension_to_clear(), None);
+
+        // ...whereas a paused one hands over the state and drops only its own condition
+        status.conditions = Some(vec![ready.clone(), suspended]);
+        status.reconciliation = Some(ReconciliationState::Disabled);
+        rsd.status = Some(status.clone());
+
+        let kept = rsd
+            .suspension_to_clear()
+            .expect("a suspended deleting RSD has marks to clear");
+        assert_eq!(
+            kept.iter()
+                .map(|cond| cond.r#type.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Ready"],
+            "clearing the suspension must not take the other conditions with it",
+        );
+
+        // a resume that never finished is just as wrong once the object is deleting
+        status.reconciliation = Some(ReconciliationState::ResumingReconciliation);
+        status.conditions = Some(vec![ready]);
+        rsd.status = Some(status);
+        assert!(rsd.suspension_to_clear().is_some());
     }
 
     /// The finalizer wrapper must not swallow the error's identity on the way to metrics,

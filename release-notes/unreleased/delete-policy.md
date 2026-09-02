@@ -50,6 +50,9 @@ There is now a bounded option, and a status field that answers "what is this wai
   Restate is down. See `docs/delete-policy.md`.
 - `spec.restate.deletePolicy` and `spec.restate.drain` are new optional fields; the CRD
   must be updated before they can be set.
+- A paused RestateDeployment (`restate.dev/reconcile: disabled`) still deletes normally,
+  and now drops the `Disabled` reconciliation state and its `Reconciling` condition when
+  the deletion starts, rather than reporting itself suspended throughout the teardown.
 
 ### Migration Guidance
 
