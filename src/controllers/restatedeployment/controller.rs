@@ -2134,6 +2134,23 @@ mod tests {
         .expect("test RestateDeployment deserializes")
     }
 
+    /// The pause annotation suspends management of a RestateDeployment, not its teardown:
+    /// a paused RSD that is deleted has to reconcile anyway, or it is left registered in
+    /// Restate with in-flight invocations and nothing coming back for it.
+    #[test]
+    fn deleting_a_paused_restatedeployment_is_not_suspended() {
+        let mut rsd = paused_rsd("drain", "hold");
+
+        // while it is alive the annotation does what it says
+        assert!(reconciliation_suspended(&rsd));
+
+        rsd.metadata.deletion_timestamp = Some(Time(chrono::Utc::now()));
+        assert!(
+            !reconciliation_suspended(&rsd),
+            "a deleted RestateDeployment must reconcile even while paused",
+        );
+    }
+
     /// The `Disabled` state and its `Reconciling` condition are wrong the moment a paused
     /// object starts deleting, and nothing else clears them -- the main status apply does
     /// not run during a deletion. Clearing keeps the other conditions: a stale `Ready`
