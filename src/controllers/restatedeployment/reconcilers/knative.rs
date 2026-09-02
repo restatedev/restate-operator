@@ -14,7 +14,7 @@ use crate::controllers::restatedeployment::cleanup::{
     retain_for_rollback, schedule_version_removal, unschedule_version_removal,
 };
 use crate::controllers::restatedeployment::controller::{
-    Context, RESTATE_DEPLOYMENT_ID_ANNOTATION,
+    Context, RESTATE_DEPLOYMENT_ID_ANNOTATION, propagated_labels,
 };
 use crate::controllers::restatedeployment::reconcilers::replicaset::generate_pod_template_hash;
 use crate::controllers::restatedeployment::registration;
@@ -359,7 +359,7 @@ fn build_configuration_spec(
         config_annotations.insert(RESTATE_POD_TEMPLATE_ANNOTATION.to_string(), v.to_string());
     }
 
-    let mut config_labels = rsd.labels().clone();
+    let mut config_labels = propagated_labels(rsd.labels());
     config_labels.insert(
         "app.kubernetes.io/managed-by".to_string(),
         "restate-operator".to_string(),
@@ -537,7 +537,7 @@ fn build_route_spec(
     route_annotations.insert(RESTATE_DEPLOYMENT_ANNOTATION.to_string(), rsd.name_any());
 
     // Propagate RestateDeployment labels to Route
-    let mut route_labels = rsd.labels().clone();
+    let mut route_labels = propagated_labels(rsd.labels());
     route_labels.insert(
         "app.kubernetes.io/managed-by".to_string(),
         "restate-operator".to_string(),

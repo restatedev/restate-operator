@@ -59,6 +59,17 @@ use super::reconcilers::replicaset::{
 pub(super) const RESTATE_DEPLOYMENT_ID_ANNOTATION: &str = "restate.dev/deployment-id";
 pub(super) const OWNED_BY_LABEL: &str = "restate.dev/owned-by";
 pub(super) const APP_MANAGED_BY_LABEL: &str = "app.kubernetes.io/managed-by";
+const APPLYSET_LABEL_PREFIX: &str = "applyset.kubernetes.io/";
+
+/// Copy user labels to an operator-owned child without copying ApplySet
+/// bookkeeping. A child that inherits `applyset.kubernetes.io/part-of` becomes
+/// an accidental member of the parent's kubectl ApplySet and can be pruned even
+/// though it was created and is still needed by this operator.
+pub(super) fn propagated_labels(labels: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let mut propagated = labels.clone();
+    propagated.retain(|key, _| !key.starts_with(APPLYSET_LABEL_PREFIX));
+    propagated
+}
 
 pub(super) struct Context {
     /// Kubernetes client
@@ -431,7 +442,7 @@ impl RestateDeployment {
                 .await?;
         }
 
-        let mut service_labels = self.labels().clone();
+        let mut service_labels = propagated_labels(self.labels());
         service_labels.insert(
             APP_MANAGED_BY_LABEL.to_string(),
             "restate-operator".to_string(),
@@ -1734,5 +1745,25 @@ mod tests {
         // ...and it is deterministic for the same template.
         let s1_again = latest_version_label_selector(&v1, None).expect("v1 selector again");
         assert_eq!(s1, s1_again, "selector should be deterministic");
+    }
+
+    #[test]
+    fn propagated_labels_exclude_applyset_bookkeeping() {
+        let labels = BTreeMap::from([
+            ("app.kubernetes.io/name".to_string(), "greeter".to_string()),
+            (
+                "applyset.kubernetes.io/part-of".to_string(),
+                "applyset-parent-id".to_string(),
+            ),
+            (
+                "applyset.kubernetes.io/id".to_string(),
+                "applyset-parent-id".to_string(),
+            ),
+        ]);
+
+        assert_eq!(
+            propagated_labels(&labels),
+            BTreeMap::from([("app.kubernetes.io/name".to_string(), "greeter".to_string())])
+        );
     }
 }
