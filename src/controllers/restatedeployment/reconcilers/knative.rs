@@ -10,7 +10,8 @@ use tracing::*;
 use url::Url;
 
 use crate::controllers::restatedeployment::cleanup::{
-    BlockingVersion, CleanupMode, DeploymentUsageMap, retain_for_rollback,
+    BlockingVersion, CleanupMode, DeploymentUsageMap, RESTATE_REMOVE_VERSION_AT_ANNOTATION,
+    retain_for_rollback, schedule_version_removal, unschedule_version_removal,
 };
 use crate::controllers::restatedeployment::controller::{
     Context, RESTATE_DEPLOYMENT_ID_ANNOTATION,
@@ -303,6 +304,10 @@ async fn reconcile_configuration(
         .patch(name, &params, &Patch::Apply(&config_spec))
         .await?;
 
+    // Rolling back to a tag re-adopts its Configuration, deadline included; the apply
+    // above cannot prune it and cleanup skips the active tag.
+    unschedule_version_removal(&config_api, &config).await?;
+
     Ok(config)
 }
 
@@ -343,6 +348,8 @@ fn build_configuration_spec(
     let mut config_annotations = rsd.annotations().clone();
     config_annotations.remove("kubectl.kubernetes.io/last-applied-configuration");
     config_annotations.remove("serving.knative.dev/rollout-duration"); // Route-only annotation
+    // the drain deadline; a copy would land under a manager the clear can't give up
+    config_annotations.remove(RESTATE_REMOVE_VERSION_AT_ANNOTATION);
     // Add operator-managed annotations
     config_annotations.insert(RESTATE_DEPLOYMENT_ANNOTATION.to_string(), rsd.name_any());
     config_annotations.insert(RESTATE_TAG_ANNOTATION.to_string(), tag.to_string());
@@ -808,8 +815,6 @@ async fn annotate_configuration(
     Ok(())
 }
 
-const RESTATE_REMOVE_VERSION_AT_ANNOTATION: &str = "restate.dev/remove-version-at";
-
 /// Delete Configurations that are no longer needed
 /// Mirrors the pattern from cleanup_old_replicasets() in replicaset.rs:156-399
 #[allow(clippy::too_many_arguments)]
@@ -906,43 +911,9 @@ pub async fn cleanup_old_configurations(
                 usage,
             });
 
-            if config
-                .metadata
-                .annotations
-                .as_ref()
-                .and_then(|a| a.get(RESTATE_REMOVE_VERSION_AT_ANNOTATION))
-                .is_none()
-            {
-                // not scheduled for removal; all good.
-                trace!(
-                    "Keeping active Configuration {} in namespace {namespace}",
-                    config_name,
-                );
-                continue;
-            }
-
-            debug!(
-                "Unscheduling removal of active Configuration {} in namespace {namespace}",
-                config_name,
-            );
-
-            // if we previously scheduled it for removal, but it now seems active, reset the timer by removing the annotation
+            // it was scheduled for removal but looks active again, so reset the timer
             let config_api: Api<Configuration> = Api::namespaced(ctx.client.clone(), namespace);
-            let params: PatchParams =
-                PatchParams::apply("restate-operator/remove-version-at").force();
-            config_api
-                .patch_metadata(
-                    &config_name,
-                    &params,
-                    &Patch::Apply(
-                        ObjectMeta {
-                            annotations: Some(Default::default()),
-                            ..Default::default()
-                        }
-                        .into_request_partial::<Configuration>(),
-                    ),
-                )
-                .await?;
+            unschedule_version_removal(&config_api, &config).await?;
 
             continue;
         }
@@ -1018,40 +989,14 @@ pub async fn cleanup_old_configurations(
             }
             (None, _, true) => {
                 // endpoint exists and there's no valid remove_version_at annotation, create one
-                let drain_delay_seconds = rsd.spec.restate.drain_delay_seconds();
-                info!(
-                    configuration = %config_name,
-                    namespace = %namespace,
-                    drain_delay_seconds,
-                    "Scheduling removal of old Configuration (after drain delay)"
-                );
-
-                let remove_at = chrono::Utc::now()
-                    .checked_add_signed(chrono::TimeDelta::seconds(drain_delay_seconds))
-                    .expect("remove_version_at in bounds");
-
                 let config_api: Api<Configuration> = Api::namespaced(ctx.client.clone(), namespace);
-                let params = PatchParams::apply("restate-operator/remove-version-at").force();
-
-                config_api
-                    .patch_metadata(
-                        &config_name,
-                        &params,
-                        &Patch::Apply(
-                            ObjectMeta {
-                                annotations: Some(
-                                    [(
-                                        RESTATE_REMOVE_VERSION_AT_ANNOTATION.to_string(),
-                                        remove_at.to_rfc3339(),
-                                    )]
-                                    .into(),
-                                ),
-                                ..Default::default()
-                            }
-                            .into_request_partial::<Configuration>(),
-                        ),
-                    )
-                    .await?;
+                let remove_at = schedule_version_removal(
+                    &config_api,
+                    namespace,
+                    &config_name,
+                    rsd.spec.restate.drain_delay_seconds(),
+                )
+                .await?;
 
                 // ensure we keep track of the soonest remove_at
                 next_removal = match next_removal {
