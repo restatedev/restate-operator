@@ -89,6 +89,14 @@ impl RestateCloudEnvironment {
         ))
     }
 
+    pub fn ingress_url(&self) -> Result<Url, url::ParseError> {
+        Url::parse(&format!(
+            "https://{}.env.{}.restate.cloud:8080",
+            self.unprefixed_environment_id(),
+            self.spec.region
+        ))
+    }
+
     pub fn tunnel_url(&self, service_url: Url) -> Result<Url, url::ParseError> {
         let unprefixed_env = self.unprefixed_environment_id();
 

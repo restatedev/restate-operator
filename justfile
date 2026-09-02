@@ -67,6 +67,7 @@ generate:
   cargo run --bin cluster_crdgen | grep -vF 'categories: []' > crd/restateclusters.yaml
   cargo run --bin deployment_crdgen | grep -vF 'categories: []' > crd/restatedeployments.yaml
   cargo run --bin cloud_crdgen | grep -vF 'categories: []' > crd/restatecloudenvironments.yaml
+  cargo run --bin kafka_crdgen | grep -vF 'categories: []' > crd/restatekafkaintegrations.yaml
 
 # Regenerate the Pkl bindings (a convenience for Pkl users) from the CRD YAML. Requires `pkl`;
 # run `just generate` first so the YAML is current. The generator package is pinned by version and
@@ -75,9 +76,10 @@ generate-pkl: _check-pkl
   pkl eval crd/pklgen/generate-cluster.pkl -m crd
   pkl eval crd/pklgen/generate-deployment.pkl -m crd
   pkl eval crd/pklgen/generate-cloud.pkl -m crd
+  pkl eval crd/pklgen/generate-kafka.pkl -m crd
   # pkl resolves the relative `source` to an absolute file:// URI in the generated header comment;
   # rewrite it back to the repo-relative form so the committed files stay portable.
-  sed -i.bak -E 's#<file://[^ ]*/\./crd/#<file:./crd/#' crd/RestateCluster.pkl crd/RestateDeployment.pkl crd/RestateCloudEnvironment.pkl
+  sed -i.bak -E 's#<file://[^ ]*/\./crd/#<file:./crd/#' crd/RestateCluster.pkl crd/RestateDeployment.pkl crd/RestateCloudEnvironment.pkl crd/RestateKafkaIntegration.pkl
   rm -f crd/*.pkl.bak
 
 generate-examples: _check-pkl
@@ -87,6 +89,8 @@ generate-examples: _check-pkl
 install-crds: generate
   kubectl create -f crd/restateclusters.yaml
   kubectl create -f crd/restatedeployments.yaml
+  kubectl create -f crd/restatecloudenvironments.yaml
+  kubectl create -f crd/restatekafkaintegrations.yaml
 
 # Extract dependencies
 chef-prepare:

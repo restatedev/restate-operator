@@ -20,6 +20,7 @@ use crate::Metrics;
 pub mod restatecloudenvironment;
 pub mod restatecluster;
 pub mod restatedeployment;
+pub mod restatekafkaintegration;
 
 /// How often each controller re-checks for its missing CRD, and how often the aggregate
 /// `WaitingForCRD` event is re-published while any are missing.
@@ -49,15 +50,17 @@ pub enum ReadinessGate {
     RestateCluster,
     RestateCloudEnvironment,
     RestateDeployment,
+    RestateKafkaIntegration,
 }
 
 impl ReadinessGate {
     /// Every gate. The order is the order flags are stored in [`Readiness`], so a gate's
     /// position here must match its discriminant; there is a test for that.
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 4] = [
         Self::RestateCluster,
         Self::RestateCloudEnvironment,
         Self::RestateDeployment,
+        Self::RestateKafkaIntegration,
     ];
 
     fn name(self) -> &'static str {
@@ -65,6 +68,7 @@ impl ReadinessGate {
             Self::RestateCluster => "RestateCluster",
             Self::RestateCloudEnvironment => "RestateCloudEnvironment",
             Self::RestateDeployment => "RestateDeployment",
+            Self::RestateKafkaIntegration => "RestateKafkaIntegration",
         }
     }
 }
@@ -183,6 +187,9 @@ pub struct State {
     /// The default image to use for tunnel client pods
     tunnel_client_default_image: String,
 
+    /// The default image to use for Kafka integration pods
+    kafka_integration_default_image: String,
+
     /// The cluster DNS suffix (e.g. "cluster.local")
     pub cluster_dns: String,
 
@@ -205,6 +212,7 @@ impl State {
         operator_label_name: Option<String>,
         operator_label_value: Option<String>,
         tunnel_client_default_image: String,
+        kafka_integration_default_image: String,
         cluster_dns: String,
         canary_image: String,
         operator_pod_name: Option<String>,
@@ -229,6 +237,7 @@ impl State {
             operator_label_name,
             operator_label_value,
             tunnel_client_default_image,
+            kafka_integration_default_image,
             cluster_dns,
             canary_image,
             operator_object_ref,
@@ -657,7 +666,8 @@ mod tests {
             vec![
                 "RestateCluster",
                 "RestateCloudEnvironment",
-                "RestateDeployment"
+                "RestateDeployment",
+                "RestateKafkaIntegration"
             ]
         );
 
@@ -665,6 +675,9 @@ mod tests {
         // marking twice must not affect the other gates
         readiness.mark_ready(ReadinessGate::RestateCluster).await;
         readiness.mark_ready(ReadinessGate::RestateDeployment).await;
+        readiness
+            .mark_ready(ReadinessGate::RestateKafkaIntegration)
+            .await;
 
         let report = readiness.report().await;
         assert!(!report.ready);

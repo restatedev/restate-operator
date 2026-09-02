@@ -86,6 +86,10 @@ spec:
             - name: CLUSTER_DNS
               value: {{ .Values.clusterDns }}
           {{- end }}
+          {{- if .Values.kafkaIntegrationImage }}
+            - name: OPERATOR_KAFKA_INTEGRATION_DEFAULT_IMAGE
+              value: {{ .Values.kafkaIntegrationImage }}
+          {{- end }}
           {{- with .Values.env }}
             {{- toYaml . | nindent 12 }}
           {{- end }}

@@ -43,6 +43,16 @@ doc = false
 name = "cloud_schemagen"
 path = "src/bin/cloud_schemagen.rs"
 
+[[bin]]
+doc = false
+name = "kafka_crdgen"
+path = "src/bin/kafka_crdgen.rs"
+
+[[bin]]
+doc = false
+name = "kafka_schemagen"
+path = "src/bin/kafka_schemagen.rs"
+
 [lib]
 name = "restate_operator"
 path = "src/lib.rs"
