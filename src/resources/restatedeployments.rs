@@ -543,6 +543,11 @@ pub struct RestateDeploymentStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deployment_id: Option<String>,
 
+    /// What the operator is currently doing with this deployment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(default, schema_with = "crate::resources::reconciliation_schema")]
+    pub reconciliation: Option<crate::resources::ReconciliationState>,
+
     /// Knative-specific status
     #[serde(skip_serializing_if = "Option::is_none")]
     pub knative: Option<KnativeDeploymentStatus>,

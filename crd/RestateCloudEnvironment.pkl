@@ -25,6 +25,10 @@ metadata: ObjectMeta?
 /// Represents the configuration of a Restate Cloud environment
 spec: Spec
 
+/// Status of the RestateCloudEnvironment. This is set and managed automatically by the controller.
+/// Read-only.
+status: Status?
+
 /// Represents the configuration of a Restate Cloud environment
 class Spec {
   /// Where to get credentials for communication with the Cloud environment
@@ -102,4 +106,32 @@ class Tunnel {
 
   /// If specified, the pod's tolerations.
   tolerations: Listing<Toleration>?
+}
+
+/// Status of the RestateCloudEnvironment. This is set and managed automatically by the controller.
+/// Read-only.
+class Status {
+  conditions: Listing<Condition>?
+
+  /// What the operator is currently doing with this environment: `Reconciling`, `Disabled` (suspended by
+  /// the `restate.dev/reconcile: disabled` annotation), or `ResumingReconciliation` (the annotation has
+  /// gone but the tunnel is not ready yet).
+  reconciliation: ("Reconciling"|"Disabled"|"ResumingReconciliation")?
+}
+
+class Condition {
+  /// Last time the condition transitioned from one status to another.
+  lastTransitionTime: String?
+
+  /// Human-readable message indicating details about last transition.
+  message: String?
+
+  /// Unique, one-word, CamelCase reason for the condition's last transition.
+  reason: String?
+
+  /// Status is the status of the condition. Can be True, False, Unknown.
+  status: String
+
+  /// Type of the condition, known values are (`Ready`, `Reconciling`).
+  type: String
 }

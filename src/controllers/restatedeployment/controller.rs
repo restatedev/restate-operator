@@ -30,9 +30,12 @@ use tokio::sync::RwLock;
 use tracing::*;
 
 use crate::controllers::{
-    CrdWait, Diagnostics, ReadinessGate, State, prewarmed_reflector, wait_for_crd,
+    CrdWait, Diagnostics, RECONCILING_CONDITION, ReadinessGate, State, log_suspended,
+    prewarmed_reflector, reconciliation_suspended, state_after_reconcile, suspended_message,
+    wait_for_crd,
 };
 use crate::metrics::Metrics;
+use crate::resources::ReconciliationState;
 use crate::resources::knative::{Configuration, Revision, Route};
 use crate::resources::restatecloudenvironments::{InProcessTunnelParams, RestateCloudEnvironment};
 use crate::resources::restateclusters::RestateCluster;
@@ -180,6 +183,12 @@ async fn reconcile(rs: Arc<RestateDeployment>, ctx: Arc<Context>) -> Result<Acti
     };
 
     let services_api: Api<RestateDeployment> = Api::namespaced(ctx.client.clone(), namespace);
+
+    // Check this before the finalizer helper, which adds our finalizer to resources that
+    // don't have one yet. That's a write, and we've been asked not to write to this one.
+    if reconciliation_suspended(rs.as_ref()) {
+        return rs.reconcile_suspended(&services_api).await;
+    }
 
     info!(
         "Reconciling RestateDeployment {} in namespace {namespace}",
@@ -687,6 +696,66 @@ impl RestateDeployment {
         Ok((replicaset, next_removal))
     }
 
+    /// Note the suspension in the status, and leave everything else alone.
+    async fn reconcile_suspended(&self, rsd_api: &Api<RestateDeployment>) -> Result<Action> {
+        let name = self.name_any();
+        let message = suspended_message();
+        let reason = ReconciliationState::Disabled.as_str();
+        let previous = self.status.as_ref().and_then(|s| s.reconciliation);
+
+        log_suspended("RestateDeployment", &name, previous);
+
+        let existing = self
+            .status
+            .as_ref()
+            .and_then(|s| s.conditions.as_ref())
+            .and_then(|c| c.iter().find(|cond| cond.r#type == RECONCILING_CONDITION));
+        let now = Time(Utc::now());
+
+        let suspended = RestateDeploymentCondition {
+            // Only the start of the suspension is a transition.
+            last_transition_time: Some(
+                match existing {
+                    Some(cond) if cond.status == "False" => cond.last_transition_time.clone(),
+                    _ => None,
+                }
+                .unwrap_or(now),
+            ),
+            message: Some(message),
+            reason: Some(reason.into()),
+            status: "False".into(),
+            r#type: RECONCILING_CONDITION.into(),
+        };
+
+        let mut rsd_status = self.status.clone().unwrap_or_default();
+
+        // Leave the other conditions alone. A stale `Ready` is still worth having, and it
+        // says when it was last true.
+        let mut conditions: Vec<_> = rsd_status
+            .conditions
+            .take()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|cond| cond.r#type != RECONCILING_CONDITION)
+            .collect();
+        conditions.push(suspended);
+        rsd_status.conditions = Some(conditions);
+        rsd_status.reconciliation = Some(ReconciliationState::Disabled);
+
+        let new_status = json!({
+            "apiVersion": RestateDeployment::api_version(&()),
+            "kind": RestateDeployment::kind(&()),
+            "status": rsd_status,
+        });
+
+        let ps = PatchParams::apply("restate-operator").force();
+        rsd_api
+            .patch_status(&name, &ps, &Patch::Apply(new_status))
+            .await?;
+
+        Ok(Action::await_change())
+    }
+
     async fn reconcile_status(&self, ctx: Arc<Context>, namespace: &str) -> Result<Action> {
         use crate::resources::restatedeployments::DeploymentMode;
 
@@ -1046,8 +1115,15 @@ impl RestateDeployment {
             status,
             r#type: "Ready".into(),
         };
+        let ready_status = ready_condition.status.clone();
 
+        // Replacing the whole list is what clears the `Reconciling` condition after a
+        // suspension.
         rsd_status.conditions = Some(vec![ready_condition]);
+        rsd_status.reconciliation = Some(state_after_reconcile(
+            self.status.as_ref().and_then(|s| s.reconciliation),
+            &ready_status,
+        ));
 
         // Only set labelSelector for ReplicaSet mode (Knative manages pods directly)
         if !is_knative {
