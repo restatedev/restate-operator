@@ -15,24 +15,59 @@ use tracing::{debug, info};
 
 use crate::Result;
 
+use crate::resources::restatedeployments::{DeletePolicy, OnTimeout, RestateDeployment};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CleanupMode {
     Rollout,
     Deleting,
+    /// Deleting without waiting: `deletePolicy: force`, or a drain with
+    /// `onTimeout: force` whose timeout has run out.
+    ForceDeleting,
 }
 
 impl CleanupMode {
-    pub(crate) fn for_rsd(rsd: &crate::resources::restatedeployments::RestateDeployment) -> Self {
-        if rsd.metadata.deletion_timestamp.is_some() {
-            Self::Deleting
-        } else {
-            Self::Rollout
+    pub(crate) fn for_rsd(rsd: &RestateDeployment) -> Self {
+        if rsd.metadata.deletion_timestamp.is_none() {
+            return Self::Rollout;
+        }
+
+        match rsd.spec.restate.delete_policy() {
+            DeletePolicy::Force => Self::ForceDeleting,
+            DeletePolicy::Drain => match rsd.spec.restate.drain_on_timeout() {
+                OnTimeout::Hold => Self::Deleting,
+                OnTimeout::Force => match drain_deadline(rsd) {
+                    Some(deadline) if deadline <= chrono::Utc::now() => Self::ForceDeleting,
+                    _ => Self::Deleting,
+                },
+            },
         }
     }
 
     pub(crate) fn is_deleting(self) -> bool {
+        !matches!(self, Self::Rollout)
+    }
+
+    /// Whether a version is due for removal the moment it stops being needed, rather
+    /// than after `drainDelaySeconds`.
+    pub(crate) fn skips_drain_delay(self) -> bool {
+        matches!(self, Self::ForceDeleting)
+    }
+
+    /// Whether the usage query has to attribute unpinned invocations. Only a drain
+    /// blocks on them; see [`deployment_usage_query`].
+    fn needs_unpinned_count(self) -> bool {
         matches!(self, Self::Deleting)
     }
+}
+
+/// When a drain stops waiting: under `onTimeout: force` it force-deregisters, under
+/// `onTimeout: hold` it keeps waiting but reports itself overdue.
+pub(crate) fn drain_deadline(rsd: &RestateDeployment) -> Option<chrono::DateTime<chrono::Utc>> {
+    let deleted_at = rsd.metadata.deletion_timestamp.as_ref()?;
+    deleted_at.0.checked_add_signed(chrono::TimeDelta::seconds(
+        rsd.spec.restate.drain_timeout_seconds(),
+    ))
 }
 
 /// What Restate believes about one registered deployment. Kept as separate facts
@@ -66,6 +101,7 @@ impl DeploymentUsage {
     /// Whether Restate still needs this deployment.
     pub(crate) fn is_active(&self, mode: CleanupMode) -> bool {
         match mode {
+            CleanupMode::ForceDeleting => false,
             CleanupMode::Deleting => self.in_flight_invocations() > 0,
             CleanupMode::Rollout => self.latest_for_service || self.in_flight_invocations() > 0,
         }
@@ -78,7 +114,8 @@ impl DeploymentUsage {
 /// `pinned_deployment_id` needs `target_service_name`, which is nested inside the encoded
 /// invocation target and so costs a decode per scanned row, plus a join against
 /// `sys_service` — on top of a second pass over `sys_invocation_status` across every
-/// partition. Only a deletion needs the answer: unpinned work is attributed through
+/// partition. Only a drain needs the answer -- a force deletion blocks on nothing, and
+/// unpinned work is attributed through
 /// `sys_service.deployment_id`, the same column that sets `latest_for_service`, so during a
 /// rollout a non-zero count could only ever name a deployment that flag is already holding.
 /// The rollout query therefore doesn't ask, and selects a constant so both modes return one
@@ -90,7 +127,7 @@ impl DeploymentUsage {
 /// cost of the reconcile path resting on an optimiser pass across server versions we don't
 /// pin.
 pub(crate) fn deployment_usage_query(mode: CleanupMode) -> String {
-    let (unpinned_cte, unpinned_count, unpinned_join) = if mode.is_deleting() {
+    let (unpinned_cte, unpinned_count, unpinned_join) = if mode.needs_unpinned_count() {
         (
             r#",
             unpinned AS (
@@ -182,11 +219,33 @@ impl DeploymentUsageRows {
 /// all-partition scans every 30 seconds for as long as it waits. Most drains finish in the
 /// first minutes, so poll at the floor early and stretch towards a cap the longer the wait
 /// has already run.
-pub(crate) fn blocked_deletion_requeue(blocked_for: Duration) -> Duration {
+/// The backoff is capped by `until_deadline` where there is one, so a drain that has
+/// already settled on the ceiling doesn't sleep through its own timeout.
+pub(crate) fn blocked_deletion_requeue(
+    blocked_for: Duration,
+    until_deadline: Option<Duration>,
+) -> Duration {
     const FLOOR: Duration = Duration::from_secs(30);
     const CEILING: Duration = Duration::from_secs(300);
 
-    (blocked_for / 4).clamp(FLOOR, CEILING)
+    let backoff = (blocked_for / 4).clamp(FLOOR, CEILING);
+
+    match until_deadline {
+        Some(until_deadline) => backoff.min(until_deadline.max(Duration::from_secs(1))),
+        None => backoff,
+    }
+}
+
+/// What one pass of cleanup did and did not manage to remove.
+#[derive(Debug, Default)]
+pub(crate) struct CleanupOutcome {
+    /// Versions Restate still needs, which cleanup therefore left alone.
+    pub blocking: Vec<BlockingVersion>,
+    /// When the soonest drained-but-not-yet-due version comes up for removal.
+    pub next_removal: Option<chrono::DateTime<chrono::Utc>>,
+    /// Versions torn down while invocations were still in flight. Only a force deletion
+    /// produces these.
+    pub abandoned: Vec<BlockingVersion>,
 }
 
 /// A version that cleanup could not remove because Restate still needs it.
@@ -194,6 +253,8 @@ pub(crate) fn blocked_deletion_requeue(blocked_for: Duration) -> Duration {
 pub(crate) struct BlockingVersion {
     /// The ReplicaSet or Configuration name.
     pub name: String,
+    /// The Restate deployment it is registered as.
+    pub deployment_id: Option<String>,
     pub usage: DeploymentUsage,
 }
 
@@ -202,11 +263,34 @@ pub(crate) struct BlockingVersion {
 pub(crate) fn describe_blocking_versions(blocking: &[BlockingVersion]) -> String {
     blocking
         .iter()
-        .map(|BlockingVersion { name, usage }| {
+        .map(|BlockingVersion { name, usage, .. }| {
             format!(
                 "{name} ({} pinned, {} unpinned invocations)",
                 usage.pinned_invocations, usage.unpinned_invocations
             )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Render the versions a force deletion tore down with work still in flight.
+///
+/// Usually pinned-only, because the query a force deletion runs doesn't attribute unpinned
+/// work -- so the count is labelled "pinned" rather than "unfinished", which would read as
+/// a total it isn't. A pass whose `onTimeout: force` deadline expired after the query ran
+/// does have the unpinned count, and reports it.
+pub(crate) fn describe_abandoned_versions(abandoned: &[BlockingVersion]) -> String {
+    abandoned
+        .iter()
+        .map(|BlockingVersion { name, usage, .. }| {
+            if usage.unpinned_invocations > 0 {
+                format!(
+                    "{name} ({} pinned, {} unpinned invocations)",
+                    usage.pinned_invocations, usage.unpinned_invocations
+                )
+            } else {
+                format!("{name} ({} pinned invocations)", usage.pinned_invocations)
+            }
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -557,12 +641,110 @@ mod tests {
         }
     }
 
+    fn blocking(name: &str, usage: DeploymentUsage) -> BlockingVersion {
+        BlockingVersion {
+            name: name.into(),
+            deployment_id: None,
+            usage,
+        }
+    }
+
     fn usage(latest: bool, pinned: u64, unpinned: u64) -> DeploymentUsage {
         DeploymentUsage {
             latest_for_service: latest,
             pinned_invocations: pinned,
             unpinned_invocations: unpinned,
         }
+    }
+
+    /// `on_timeout` of `None` leaves the drain block off entirely, so the defaults apply.
+    fn deleting_rsd(
+        policy: &str,
+        on_timeout: Option<&str>,
+        timeout_seconds: i64,
+        deleted_secs_ago: i64,
+    ) -> RestateDeployment {
+        let spec = serde_json::from_value(serde_json::json!({
+            "replicas": 1,
+            "revisionHistoryLimit": 10,
+            "template": { "metadata": null, "spec": {} },
+            "restate": {
+                "register": { "url": "http://restate:9070/" },
+                "deletePolicy": policy,
+                "drain": on_timeout.map(|on_timeout| serde_json::json!({
+                    "timeoutSeconds": timeout_seconds,
+                    "onTimeout": on_timeout,
+                })),
+            },
+        }))
+        .expect("test RestateDeploymentSpec deserializes");
+
+        let mut rsd = RestateDeployment::new("greeter", spec);
+        rsd.metadata.deletion_timestamp =
+            Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                chrono::Utc::now() - chrono::TimeDelta::seconds(deleted_secs_ago),
+            ));
+        rsd
+    }
+
+    #[test]
+    fn force_deletion_waits_for_nothing() {
+        for u in [usage(true, 0, 0), usage(true, 3, 9), usage(false, 1, 0)] {
+            assert!(!u.is_active(CleanupMode::ForceDeleting));
+        }
+    }
+
+    #[test]
+    fn mode_follows_the_delete_policy() {
+        let mut not_deleting = deleting_rsd("force", None, 3600, 0);
+        not_deleting.metadata.deletion_timestamp = None;
+        assert_eq!(CleanupMode::for_rsd(&not_deleting), CleanupMode::Rollout);
+
+        assert_eq!(
+            CleanupMode::for_rsd(&deleting_rsd("force", None, 3600, 0)),
+            CleanupMode::ForceDeleting
+        );
+
+        // a drain waits past its deadline; only the status changes there
+        assert_eq!(
+            CleanupMode::for_rsd(&deleting_rsd("drain", Some("hold"), 3600, 0)),
+            CleanupMode::Deleting
+        );
+        assert_eq!(
+            CleanupMode::for_rsd(&deleting_rsd("drain", Some("hold"), 3600, 7200)),
+            CleanupMode::Deleting
+        );
+
+        assert_eq!(
+            CleanupMode::for_rsd(&deleting_rsd("drain", Some("force"), 3600, 60)),
+            CleanupMode::Deleting
+        );
+        assert_eq!(
+            CleanupMode::for_rsd(&deleting_rsd("drain", Some("force"), 3600, 3601)),
+            CleanupMode::ForceDeleting
+        );
+
+        // no drain block at all is a `hold`, so it holds however far past the deadline
+        // it is -- the one case that must not start forcing by omission
+        assert_eq!(
+            CleanupMode::for_rsd(&deleting_rsd("drain", None, 3600, 7200)),
+            CleanupMode::Deleting
+        );
+    }
+
+    #[test]
+    fn default_delete_policy_is_a_one_hour_drain_that_holds() {
+        let mut rsd = deleting_rsd("drain", Some("force"), 3600, 0);
+        rsd.spec.restate.delete_policy = None;
+        rsd.spec.restate.drain = None;
+
+        assert_eq!(CleanupMode::for_rsd(&rsd), CleanupMode::Deleting);
+        assert_eq!(rsd.spec.restate.drain_timeout_seconds(), 3600);
+        assert_eq!(rsd.spec.restate.drain_on_timeout(), OnTimeout::Hold);
+        assert_eq!(
+            drain_deadline(&rsd),
+            Some(rsd.metadata.deletion_timestamp.as_ref().unwrap().0 + chrono::TimeDelta::hours(1))
+        );
     }
 
     #[test]
@@ -639,6 +821,56 @@ mod tests {
     }
 
     #[test]
+    fn force_deletion_does_not_pay_for_the_unpinned_count_either() {
+        // nothing blocks a force deletion, so there is nothing to attribute
+        let query = deployment_usage_query(CleanupMode::ForceDeleting);
+        assert_eq!(query.matches("sys_invocation_status").count(), 1);
+        assert!(!query.contains("unpinned AS"));
+    }
+
+    #[test]
+    fn force_deletion_still_removes_drained_versions_immediately() {
+        assert!(CleanupMode::ForceDeleting.skips_drain_delay());
+        assert!(!CleanupMode::Deleting.skips_drain_delay());
+        assert!(!CleanupMode::Rollout.skips_drain_delay());
+
+        // the revision history limit must not hold a version back from either deletion
+        assert!(!retain_for_rollback(CleanupMode::ForceDeleting, 0, 10));
+    }
+
+    #[test]
+    fn abandoned_versions_report_what_was_walked_over() {
+        // the force query doesn't attribute unpinned work, so the count says "pinned"
+        // rather than claiming to be every unfinished invocation
+        assert_eq!(
+            describe_abandoned_versions(&[blocking("greeter-abc123", usage(false, 4, 0))]),
+            "greeter-abc123 (4 pinned invocations)"
+        );
+
+        // ...but an `onTimeout: force` drain that crossed its deadline after the query ran
+        // does have the unpinned count, and must not drop it
+        assert_eq!(
+            describe_abandoned_versions(&[blocking("greeter-abc123", usage(false, 4, 7))]),
+            "greeter-abc123 (4 pinned, 7 unpinned invocations)"
+        );
+    }
+
+    #[test]
+    fn blocked_deletion_does_not_sleep_through_the_deadline() {
+        let requeue = |secs, until| {
+            blocked_deletion_requeue(Duration::from_secs(secs), Some(Duration::from_secs(until)))
+        };
+
+        // an `onTimeout: force` drain waiting an hour is on the 300s ceiling, but
+        // its deadline is 45s away
+        assert_eq!(requeue(3600, 45), Duration::from_secs(45));
+        assert_eq!(requeue(3600, 600), Duration::from_secs(300));
+
+        // never zero, or the reconciler spins on the deadline
+        assert_eq!(requeue(3600, 0), Duration::from_secs(1));
+    }
+
+    #[test]
     fn deleting_query_counts_unpinned_work_through_the_service() {
         let query = deployment_usage_query(CleanupMode::Deleting);
 
@@ -664,7 +896,7 @@ mod tests {
 
     #[test]
     fn blocked_deletion_polls_hard_early_and_backs_off_later() {
-        let requeue = |secs| blocked_deletion_requeue(Duration::from_secs(secs));
+        let requeue = |secs| blocked_deletion_requeue(Duration::from_secs(secs), None);
 
         // the common case -- a drain that finishes in the first minutes -- keeps the
         // 30s cadence it had before the backoff
@@ -681,14 +913,8 @@ mod tests {
     #[test]
     fn blocking_versions_name_the_work_holding_the_deletion() {
         let described = describe_blocking_versions(&[
-            BlockingVersion {
-                name: "greeter-abc123".into(),
-                usage: usage(true, 2, 0),
-            },
-            BlockingVersion {
-                name: "greeter-def456".into(),
-                usage: usage(false, 0, 7),
-            },
+            blocking("greeter-abc123", usage(true, 2, 0)),
+            blocking("greeter-def456", usage(false, 0, 7)),
         ]);
 
         assert_eq!(

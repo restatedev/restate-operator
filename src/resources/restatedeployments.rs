@@ -42,6 +42,48 @@ pub enum TunnelMode {
     InProcess,
 }
 
+/// What to do about in-flight invocations when a RestateDeployment is deleted
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DeletePolicy {
+    /// Drain (default): wait for in-flight invocations to finish before removing the
+    /// deployment from Restate. `drain` sets how long to wait and what to do at the
+    /// deadline
+    Drain,
+    /// Deregister and tear down immediately, without draining
+    Force,
+}
+
+/// What a drain does once its timeout has passed
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum OnTimeout {
+    /// Hold (default): keep waiting. The deletion stays held until the invocations
+    /// finish, and `.status.deletion` reports the drain as overdue
+    Hold,
+    /// Force-deregister, abandoning whatever is still in flight
+    Force,
+}
+
+/// How a `deletePolicy: drain` waits
+#[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DrainSpec {
+    /// Seconds to wait for in-flight invocations to finish. Defaults to 3600 (1 hour).
+    /// Under `onTimeout: hold` this only sets when the drain reports itself overdue; it
+    /// never lets the deletion through
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0))]
+    pub timeout_seconds: Option<i64>,
+
+    /// What to do once `timeoutSeconds` has passed. Defaults to `hold`.
+    /// - `hold`: keep waiting, and report the drain as overdue
+    /// - `force`: force-deregister, abandoning whatever is left
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "on_timeout_schema")]
+    pub on_timeout: Option<OnTimeout>,
+}
+
 /// Knative-specific deployment configuration
 #[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -106,7 +148,9 @@ pub struct KnativeDeploymentSpec {
     printcolumn = r#"{"name":"Deployment ID", "type":"string", "jsonPath":".status.deploymentId", "priority": 1}"#,
     printcolumn = r#"{"name":"Containers", "type":"string", "jsonPath":".spec.template.spec.containers[*].name", "priority": 1}"#,
     printcolumn = r#"{"name":"Images", "type":"string", "jsonPath":".spec.template.spec.containers[*].image", "priority": 1}"#,
-    printcolumn = r#"{"name":"Selector", "type":"string", "jsonPath":".status.labelSelector", "priority": 1}"#
+    printcolumn = r#"{"name":"Selector", "type":"string", "jsonPath":".status.labelSelector", "priority": 1}"#,
+    printcolumn = r#"{"name":"Deletion", "type":"string", "jsonPath":".status.deletion.phase", "priority": 1}"#,
+    printcolumn = r#"{"name":"Pending Invocations", "type":"integer", "jsonPath":".status.deletion.totalPendingInvocations", "priority": 1}"#
 )]
 #[kube(status = "RestateDeploymentStatus", shortname = "rsd")]
 #[serde(rename_all = "camelCase")]
@@ -323,6 +367,19 @@ pub struct RestateSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 0))]
     pub drain_delay_seconds: Option<i64>,
+
+    /// What to do about in-flight invocations when this RestateDeployment is deleted.
+    /// Defaults to `drain`.
+    /// - `drain`: wait for in-flight invocations to finish, on the terms set by `drain`.
+    /// - `force`: deregister and tear down immediately, without draining.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "delete_policy_schema")]
+    pub delete_policy: Option<DeletePolicy>,
+
+    /// How `deletePolicy: drain` waits: how long, and whether it eventually gives up.
+    /// Ignored by `deletePolicy: force`, which never waits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drain: Option<DrainSpec>,
 }
 
 impl RestateSpec {
@@ -333,12 +390,51 @@ impl RestateSpec {
     pub fn is_in_process_tunnel(&self) -> bool {
         matches!(self.tunnel_mode, Some(TunnelMode::InProcess))
     }
+
+    pub fn delete_policy(&self) -> DeletePolicy {
+        self.delete_policy.unwrap_or(DeletePolicy::Drain)
+    }
+
+    pub fn drain_timeout_seconds(&self) -> i64 {
+        self.drain
+            .as_ref()
+            .and_then(|drain| drain.timeout_seconds)
+            .unwrap_or(3600)
+            .max(0)
+    }
+
+    /// What the drain does at its deadline. `force` never gets this far, so it reads as
+    /// the default rather than as a decision anyone made.
+    pub fn drain_on_timeout(&self) -> OnTimeout {
+        self.drain
+            .as_ref()
+            .and_then(|drain| drain.on_timeout)
+            .unwrap_or(OnTimeout::Hold)
+    }
 }
 
 fn tunnel_mode_schema(_g: &mut schemars::SchemaGenerator) -> Schema {
     schemars::json_schema!({
         "description": "How Restate Cloud reaches this deployment. Only takes effect with `register.cloud` (`in-process` requires it, and is not supported in Knative mode). `external` (default): invocations are forwarded to this deployment's Service by the tunnel-client pods managed by the RestateCloudEnvironment. `in-process`: the deployment's pods hold their own outbound tunnel connections (e.g. with @restatedev/restate-sdk-tunnel), so no inbound networking to them is needed; the operator injects RESTATE_INPROC_* environment variables identifying the revision into the pod template and registers the per-revision tunnel URL.",
         "enum": ["external", "in-process"],
+        "type": "string",
+        "nullable": true
+    })
+}
+
+fn delete_policy_schema(_g: &mut schemars::SchemaGenerator) -> Schema {
+    schemars::json_schema!({
+        "description": "What to do about in-flight invocations when this RestateDeployment is deleted. Defaults to `drain`. `drain`: wait for in-flight invocations to finish, on the terms set by `drain` (how long, and whether to give up). `force`: deregister and tear down immediately, without draining.",
+        "enum": ["drain", "force"],
+        "type": "string",
+        "nullable": true
+    })
+}
+
+fn on_timeout_schema(_g: &mut schemars::SchemaGenerator) -> Schema {
+    schemars::json_schema!({
+        "description": "What to do once the drain's `timeoutSeconds` has passed. Defaults to `hold`. `hold`: keep waiting; the deletion stays held until the invocations finish, and `.status.deletion` reports the drain as overdue. `force`: force-deregister, abandoning whatever is still in flight.",
+        "enum": ["hold", "force"],
         "type": "string",
         "nullable": true
     })
@@ -586,6 +682,101 @@ pub struct RestateDeploymentStatus {
     /// The label selector of the RestateDeployment as a string, for `kubectl get rsd -o wide`
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label_selector: Option<String>,
+
+    /// Progress of an in-flight deletion. Only set once the RestateDeployment has been
+    /// deleted and the operator is working through `spec.restate.deletePolicy`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deletion: Option<DeletionStatus>,
+}
+
+/// Where a deletion has got to
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq)]
+pub enum DeletionPhase {
+    /// Waiting for in-flight invocations to finish, or for the drain delay to elapse
+    Draining,
+    /// The drain's `timeoutSeconds` has passed and invocations are still in flight.
+    /// Under `onTimeout: hold` the deletion stays blocked until they finish, the
+    /// timeout is raised, or the policy is changed to `force`
+    Overdue,
+    /// Removing the deployment from Restate without waiting for in-flight invocations
+    Forcing,
+}
+
+/// Progress of an in-flight deletion
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletionStatus {
+    /// The policy being applied
+    #[schemars(schema_with = "delete_policy_status_schema")]
+    pub policy: DeletePolicy,
+
+    /// Where the deletion has got to
+    #[schemars(schema_with = "deletion_phase_schema")]
+    pub phase: DeletionPhase,
+
+    /// When deletion was requested
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<k8s_openapi::apimachinery::pkg::apis::meta::v1::Time>,
+
+    /// When the drain timeout expires. Unset under `deletePolicy: force`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<k8s_openapi::apimachinery::pkg::apis::meta::v1::Time>,
+
+    /// What happens at the `deadline`: `hold` keeps waiting, `force` gives up and
+    /// deregisters. Unset under `deletePolicy: force`, which has no deadline to reach
+    // `default` is what tells schemars the field is optional: `schema_with` hides the
+    // `Option` from it, and a required field the operator never sets under `force` would
+    // have the API server reject the status apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "on_timeout_schema")]
+    pub on_timeout: Option<OnTimeout>,
+
+    /// Human-readable explanation of what the deletion is waiting for
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+
+    /// Total invocations across all versions holding the deletion
+    pub total_pending_invocations: i64,
+
+    /// The versions holding the deletion, and the invocations they are waiting on
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_invocations: Vec<PendingInvocations>,
+}
+
+/// Invocations holding one version of a deleting RestateDeployment
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingInvocations {
+    /// The ReplicaSet (or Knative Configuration) name
+    pub version: String,
+
+    /// The Restate deployment ID this version is registered as
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployment_id: Option<String>,
+
+    /// Unfinished invocations already bound to this version
+    pub pinned: i64,
+
+    /// Unfinished invocations not yet bound to any version, but targeting a service this
+    /// version is the endpoint for. Not counted under `deletePolicy: force`, which does
+    /// not run the query that attributes them
+    pub unpinned: i64,
+}
+
+fn delete_policy_status_schema(_g: &mut schemars::SchemaGenerator) -> Schema {
+    schemars::json_schema!({
+        "description": "The policy being applied",
+        "enum": ["drain", "force"],
+        "type": "string"
+    })
+}
+
+fn deletion_phase_schema(_g: &mut schemars::SchemaGenerator) -> Schema {
+    schemars::json_schema!({
+        "description": "Where the deletion has got to. `Draining`: waiting for in-flight invocations to finish, or for the drain delay to elapse. `Overdue`: the drain's `timeoutSeconds` has passed and invocations are still in flight; under `onTimeout: hold` the deletion stays blocked until they finish, the timeout is raised, or the policy is changed to `force`. `Forcing`: removing the deployment from Restate without waiting for in-flight invocations.",
+        "enum": ["Draining", "Overdue", "Forcing"],
+        "type": "string"
+    })
 }
 
 /// Knative deployment status

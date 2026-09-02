@@ -40,17 +40,18 @@ use crate::resources::knative::{Configuration, Revision, Route};
 use crate::resources::restatecloudenvironments::{InProcessTunnelParams, RestateCloudEnvironment};
 use crate::resources::restateclusters::RestateCluster;
 use crate::resources::restatedeployments::{
-    RESTATE_DEPLOYMENT_FINALIZER, RestateAdminEndpoint, RestateDeployment,
-    RestateDeploymentCondition, RestateDeploymentStatus,
+    DeletionPhase, DeletionStatus, PendingInvocations, RESTATE_DEPLOYMENT_FINALIZER,
+    RestateAdminEndpoint, RestateDeployment, RestateDeploymentCondition, RestateDeploymentStatus,
 };
 use crate::telemetry;
 use crate::{Error, Result};
 
 // Import our reconcilers
 use crate::controllers::restatedeployment::cleanup::{
-    CleanupMode, DeploymentUsage, DeploymentUsageMap, DeploymentUsageRows,
-    RESTATE_REMOVE_VERSION_AT_ANNOTATION, blocked_deletion_requeue, deployment_usage_query,
-    describe_blocking_versions, unschedule_version_removal,
+    BlockingVersion, CleanupMode, CleanupOutcome, DeploymentUsage, DeploymentUsageMap,
+    DeploymentUsageRows, RESTATE_REMOVE_VERSION_AT_ANNOTATION, blocked_deletion_requeue,
+    deployment_usage_query, describe_abandoned_versions, describe_blocking_versions,
+    drain_deadline, unschedule_version_removal,
 };
 use crate::controllers::restatedeployment::reconcilers;
 use crate::controllers::restatedeployment::registration::{self, RegistrationAction};
@@ -225,7 +226,10 @@ async fn reconcile(rs: Arc<RestateDeployment>, ctx: Arc<Context>) -> Result<Acti
                 .await?;
 
             let err = Error::FinalizerError(Box::new(err));
-            ctx.metrics.reconcile_failure(rs.as_ref(), &err);
+            // Label the failure with the variant the reconciler actually raised. The
+            // wrapper above would otherwise collapse every one of them into
+            // `FinalizerError`, which is what `error_policy` unwraps for too.
+            ctx.metrics.reconcile_failure(rs.as_ref(), root_cause(&err));
             Err(err)
         }
     }
@@ -257,6 +261,10 @@ fn error_policy<K, C>(_rs: Arc<K>, err: &Error, _ctx: C) -> Action {
             requeue_after: Some(requeue_after),
         }
         | Error::DeploymentInUse {
+            requeue_after: Some(requeue_after),
+            ..
+        }
+        | Error::DeletionDrainOverdue {
             requeue_after: Some(requeue_after),
             ..
         } => Action::requeue(*requeue_after),
@@ -565,12 +573,13 @@ impl RestateDeployment {
                         &rs_api,
                         &my_uid,
                         self,
+                        CleanupMode::Rollout,
                         &deployments,
                         Some(&versioned_name), // exclude the replicaset which may not be registered
                     )
                     .await
                     {
-                        Ok((_, _)) => return Err(ready_err),
+                        Ok(_) => return Err(ready_err),
                         Err(cleanup_err) => {
                             error!(
                                 "Failed to clean up old replicasets while waiting for current replicaset to become ready: {cleanup_err}"
@@ -682,18 +691,19 @@ impl RestateDeployment {
 
         // Clean up old ReplicaSets that are no longer needed
 
-        let (_, next_removal) = reconcilers::replicaset::cleanup_old_replicasets(
+        let outcome = reconcilers::replicaset::cleanup_old_replicasets(
             namespace,
             &ctx,
             &rs_api,
             &my_uid,
             self,
+            CleanupMode::Rollout,
             &deployments,
             Some(&versioned_name),
         )
         .await?;
 
-        Ok((replicaset, next_removal))
+        Ok((replicaset, outcome.next_removal))
     }
 
     /// Note the suspension in the status, and leave everything else alone.
@@ -1193,8 +1203,188 @@ impl RestateDeployment {
             .unwrap_or_default()
     }
 
+    /// Whether the drain is past its deadline and still waiting, so it should say so.
+    ///
+    /// Only `onTimeout: hold` is: it is the one setting still stuck once the deadline
+    /// passes. An `onTimeout: force` drain can be past its deadline for a single pass --
+    /// it crossed while that pass was running -- but force-deregisters on the next one,
+    /// so reporting it `Overdue` and telling the user to force would be wrong.
+    /// `deletePolicy: force` never waits at all.
+    fn drain_overdue(&self) -> bool {
+        use crate::resources::restatedeployments::{DeletePolicy, OnTimeout};
+
+        self.spec.restate.delete_policy() == DeletePolicy::Drain
+            && self.spec.restate.drain_on_timeout() == OnTimeout::Hold
+            && drain_deadline(self).is_some_and(|deadline| deadline <= chrono::Utc::now())
+    }
+
+    fn deletion_status(
+        &self,
+        phase: DeletionPhase,
+        message: String,
+        blocking: &[BlockingVersion],
+    ) -> DeletionStatus {
+        let policy = self.spec.restate.delete_policy();
+        DeletionStatus {
+            policy,
+            phase,
+            started_at: self.metadata.deletion_timestamp.clone(),
+            deadline: if policy == crate::resources::restatedeployments::DeletePolicy::Force {
+                None
+            } else {
+                drain_deadline(self).map(Time)
+            },
+            // `force` has no deadline to reach, so there is nothing for it to do there
+            on_timeout: match policy {
+                crate::resources::restatedeployments::DeletePolicy::Force => None,
+                crate::resources::restatedeployments::DeletePolicy::Drain => {
+                    Some(self.spec.restate.drain_on_timeout())
+                }
+            },
+            message: Some(message),
+            total_pending_invocations: blocking
+                .iter()
+                .map(|version| version.usage.in_flight_invocations() as i64)
+                .sum(),
+            pending_invocations: blocking
+                .iter()
+                .map(|version| PendingInvocations {
+                    version: version.name.clone(),
+                    deployment_id: version.deployment_id.clone(),
+                    pinned: version.usage.pinned_invocations as i64,
+                    unpinned: version.usage.unpinned_invocations as i64,
+                })
+                .collect(),
+        }
+    }
+
+    /// The conditions to keep, or `None` when there are no suspension marks to clear and
+    /// so nothing to write.
+    fn suspension_to_clear(&self) -> Option<Vec<RestateDeploymentCondition>> {
+        let status = self.status.as_ref();
+
+        let stale_state = status
+            .and_then(|status| status.reconciliation)
+            .is_some_and(|state| state != ReconciliationState::Reconciling);
+        let stale_condition = status
+            .and_then(|status| status.conditions.as_ref())
+            .is_some_and(|conditions| {
+                conditions
+                    .iter()
+                    .any(|cond| cond.r#type == RECONCILING_CONDITION)
+            });
+
+        if !stale_state && !stale_condition {
+            return None;
+        }
+
+        // Applying `conditions` claims the whole list, so send it back minus the one that
+        // no longer applies. A stale `Ready` is still worth having; it says when the
+        // deployment was last healthy.
+        Some(
+            status
+                .and_then(|status| status.conditions.clone())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|cond| cond.r#type != RECONCILING_CONDITION)
+                .collect(),
+        )
+    }
+
+    /// Clear the suspension marks left behind by [`Self::reconcile_suspended`].
+    ///
+    /// A paused RestateDeployment reconciles again the moment it is deleted, so its
+    /// `Disabled` state and `Reconciling` condition go stale immediately: they say the
+    /// operator is leaving the resource alone while it is in fact tearing it down, next
+    /// to a `.status.deletion` that updates every pass. Nothing else clears them, because
+    /// the main status apply doesn't run during a deletion.
+    ///
+    /// Written under the field manager that set them, so this is a hand-off rather than a
+    /// fight, and only when there is something to hand over.
+    async fn clear_suspension(&self, ctx: &Context, namespace: &str) {
+        let Some(conditions) = self.suspension_to_clear() else {
+            return;
+        };
+
+        let rsd_api: Api<RestateDeployment> = Api::namespaced(ctx.client.clone(), namespace);
+        let patch = json!({
+            "apiVersion": RestateDeployment::api_version(&()),
+            "kind": RestateDeployment::kind(&()),
+            "status": {
+                "reconciliation": ReconciliationState::Reconciling,
+                "conditions": conditions,
+            },
+        });
+
+        if let Err(err) = rsd_api
+            .patch_status(
+                &self.name_any(),
+                &PatchParams::apply("restate-operator").force(),
+                &Patch::Apply(patch),
+            )
+            .await
+        {
+            // Cosmetic next to the teardown itself, which is about to carry on regardless.
+            warn!(
+                "Failed to clear the suspended status of deleting RestateDeployment '{}' in namespace {namespace}: {err}",
+                self.name_any(),
+            );
+        }
+    }
+
+    /// Report deletion progress on `.status.deletion`, under its own field manager: the
+    /// main status apply doesn't claim that field, and doesn't run at all while deleting.
+    async fn report_deletion(&self, ctx: &Context, namespace: &str, deletion: DeletionStatus) {
+        let rsd_api: Api<RestateDeployment> = Api::namespaced(ctx.client.clone(), namespace);
+        let patch = json!({
+            "apiVersion": RestateDeployment::api_version(&()),
+            "kind": RestateDeployment::kind(&()),
+            "status": { "deletion": deletion },
+        });
+
+        if let Err(err) = rsd_api
+            .patch_status(
+                &self.name_any(),
+                &PatchParams::apply("restate-operator/deletion").force(),
+                &Patch::Apply(patch),
+            )
+            .await
+        {
+            // the error the caller is about to return says the same thing
+            warn!(
+                "Failed to report deletion status of RestateDeployment '{}' in namespace {namespace}: {err}",
+                self.name_any(),
+            );
+        }
+    }
+
+    /// How long until the drain gives up waiting, if it hasn't already.
+    fn until_drain_deadline(&self) -> Option<Duration> {
+        let deadline = drain_deadline(self)?;
+        match (deadline - chrono::Utc::now()).to_std() {
+            Ok(remaining) => Some(remaining),
+            // An `onTimeout: force` drain that crosses its deadline during an awaited
+            // operation must get another pass immediately so cleanup can switch to force
+            // mode. A `hold` has no mode transition to wake up for once its reporting
+            // deadline is in the past.
+            Err(_)
+                if self.spec.restate.delete_policy()
+                    == crate::resources::restatedeployments::DeletePolicy::Drain
+                    && self.spec.restate.drain_on_timeout()
+                        == crate::resources::restatedeployments::OnTimeout::Force =>
+            {
+                Some(Duration::ZERO)
+            }
+            Err(_) => None,
+        }
+    }
+
     // Finalizer cleanup (the object was deleted, ensure nothing is orphaned)
     async fn cleanup(&self, ctx: Arc<Context>, namespace: &str) -> Result<Action> {
+        // Before anything reports progress: a paused object arrives here still claiming
+        // the operator is leaving it alone.
+        self.clear_suspension(&ctx, namespace).await;
+
         ctx.recorder
             .publish(
                 &Event {
@@ -1227,7 +1417,28 @@ impl RestateDeployment {
             };
         }
 
-        let deployments = self.list_deployments(&ctx, CleanupMode::Deleting).await?;
+        let query_mode = CleanupMode::for_rsd(self);
+        if query_mode == CleanupMode::ForceDeleting {
+            // Write this before the first admin call, so a force deletion that is
+            // blocked on an unavailable Restate endpoint still says what it is doing.
+            self.report_deletion(
+                &ctx,
+                namespace,
+                self.deletion_status(
+                    DeletionPhase::Forcing,
+                    "Deregistering from Restate without waiting for in-flight invocations".into(),
+                    &[],
+                ),
+            )
+            .await;
+        }
+
+        let deployments = self.list_deployments(&ctx, query_mode).await?;
+
+        // The usage query can be expensive. Re-evaluate after it so a
+        // an `onTimeout: force` drain whose deadline passed while the query ran tears down
+        // in this pass instead of waiting for the next scheduled reconcile.
+        let mode = CleanupMode::for_rsd(self);
 
         let my_uid = self.uid().expect("RestateDeployment to have a uid");
 
@@ -1237,13 +1448,33 @@ impl RestateDeployment {
             Some(crate::resources::restatedeployments::DeploymentMode::Knative)
         );
 
-        let (blocking, next_removal) = if is_knative {
+        if mode == CleanupMode::ForceDeleting && query_mode != CleanupMode::ForceDeleting {
+            // The deadline crossed during the usage query, so this pass changed to force
+            // mode after the initial status-reporting point.
+            self.report_deletion(
+                &ctx,
+                namespace,
+                self.deletion_status(
+                    DeletionPhase::Forcing,
+                    "Deregistering from Restate without waiting for in-flight invocations".into(),
+                    &[],
+                ),
+            )
+            .await;
+        }
+
+        let CleanupOutcome {
+            blocking,
+            next_removal,
+            abandoned,
+        } = if is_knative {
             // Knative cleanup path
             reconcilers::knative::cleanup_old_configurations(
                 namespace,
                 &ctx,
                 &my_uid,
                 self,
+                mode,
                 &deployments,
                 None,
             )
@@ -1256,14 +1487,51 @@ impl RestateDeployment {
                 &rs_api,
                 &my_uid,
                 self,
+                mode,
                 &deployments,
                 None,
             )
             .await?
         };
 
+        if !abandoned.is_empty() {
+            let abandoned = describe_abandoned_versions(&abandoned);
+
+            warn!(
+                "Force-deleting RestateDeployment '{}' from Restate with unfinished invocations against {abandoned}",
+                self.name_any(),
+            );
+
+            // The teardown above already happened, so a failure to publish here must not
+            // fail the pass: the next one finds nothing abandoned and would never retry
+            // the event. The warning above it is the record that survives either way.
+            if let Err(err) = ctx
+                .recorder
+                .publish(
+                    &Event {
+                        type_: EventType::Warning,
+                        reason: "ForcedDeletion".into(),
+                        note: Some(format!(
+                            "Deregistered version(s) with unfinished invocations: {abandoned}"
+                        )),
+                        action: "Deleting".into(),
+                        secondary: None,
+                    },
+                    &self.object_ref(&()),
+                )
+                .await
+            {
+                warn!(
+                    "Failed to publish ForcedDeletion event for RestateDeployment '{}' in namespace {namespace}: {err}",
+                    self.name_any(),
+                );
+            }
+        }
+
         if !blocking.is_empty() {
             let blocked_by = describe_blocking_versions(&blocking);
+            let timeout_seconds = self.spec.restate.drain_timeout_seconds();
+            let overdue = self.drain_overdue();
 
             debug!(
                 "Cannot process deletion of RestateDeployment '{}' from Restate as {} version(s) still have unfinished invocations: {blocked_by}",
@@ -1271,13 +1539,46 @@ impl RestateDeployment {
                 blocking.len(),
             );
 
+            let (phase, message) = if overdue {
+                (
+                    DeletionPhase::Overdue,
+                    format!(
+                        "Still waiting on {blocked_by} after the {timeout_seconds}s drain timeout"
+                    ),
+                )
+            } else {
+                (
+                    DeletionPhase::Draining,
+                    format!("Waiting for in-flight invocations against {blocked_by}"),
+                )
+            };
+            self.report_deletion(
+                &ctx,
+                namespace,
+                self.deletion_status(phase, message, &blocking),
+            )
+            .await;
+
+            let requeue_after = Some(blocked_deletion_requeue(
+                self.blocked_for(),
+                self.until_drain_deadline(),
+            ));
+
             // Named versions and counts rather than the bare message: `reconcile` publishes
             // this as a Warning event, and it is the only place a stuck deletion explains
             // itself. Unpinned work includes scheduled invocations, whose execution time
             // can be arbitrarily far out, so "wait for it" is not always sound advice.
+            if overdue {
+                return Err(Error::DeletionDrainOverdue {
+                    blocked_by,
+                    timeout_seconds,
+                    requeue_after,
+                });
+            }
+
             return Err(Error::DeploymentInUse {
                 blocked_by,
-                requeue_after: Some(blocked_deletion_requeue(self.blocked_for())),
+                requeue_after,
             });
         }
 
@@ -1287,13 +1588,37 @@ impl RestateDeployment {
                 self.name_any()
             );
 
+            self.report_deletion(
+                &ctx,
+                namespace,
+                self.deletion_status(
+                    DeletionPhase::Draining,
+                    "Drained; waiting out the drain delay before removing old versions".into(),
+                    &[],
+                ),
+            )
+            .await;
+
             // Floor at 1s: `num_seconds` truncates, so a deadline under a second away would
             // otherwise requeue with no delay and spin the reconciler — each turn of which
             // re-runs the admin query above — until the deadline passes.
             let secs_until_next_removal = (next_removal - chrono::Utc::now()).num_seconds().max(1);
+            let mut requeue_after = Duration::from_secs(secs_until_next_removal as u64);
+
+            // An `onTimeout: force` deadline can pass while cleanup is awaiting Kubernetes
+            // or Restate. Never let the drain-delay timer hide that transition; wake up
+            // immediately and recompute the cleanup mode.
+            if self.spec.restate.delete_policy()
+                == crate::resources::restatedeployments::DeletePolicy::Drain
+                && self.spec.restate.drain_on_timeout()
+                    == crate::resources::restatedeployments::OnTimeout::Force
+                && let Some(until_deadline) = self.until_drain_deadline()
+            {
+                requeue_after = requeue_after.min(until_deadline.max(Duration::from_secs(1)));
+            }
 
             return Err(Error::DeploymentDraining {
-                requeue_after: Some(Duration::from_secs(secs_until_next_removal as u64)),
+                requeue_after: Some(requeue_after),
             });
         }
 
@@ -1669,6 +1994,278 @@ mod tests {
             error_policy(Arc::new(()), &wrapped, ()),
             Action::requeue(Duration::from_secs(120))
         );
+    }
+
+    /// A timed-out drain paces its retries the same way.
+    #[test]
+    fn timed_out_drain_backoff_survives_the_finalizer_wrapper() {
+        let wrapped = Error::FinalizerError(Box::new(
+            kube::runtime::finalizer::Error::CleanupFailed(Error::DeletionDrainOverdue {
+                blocked_by: "greeter-abc123 (1 pinned, 0 unpinned invocations)".into(),
+                timeout_seconds: 3600,
+                requeue_after: Some(Duration::from_secs(300)),
+            }),
+        ));
+
+        assert_eq!(
+            error_policy(Arc::new(()), &wrapped, ()),
+            Action::requeue(Duration::from_secs(300))
+        );
+    }
+
+    #[test]
+    fn deletion_status_reports_the_versions_holding_the_deletion() {
+        let mut rsd: RestateDeployment = serde_json::from_value(json!({
+            "apiVersion": "restate.dev/v1beta1",
+            "kind": "RestateDeployment",
+            "metadata": { "name": "greeter", "namespace": "apps" },
+            "spec": {
+                "replicas": 1,
+                "revisionHistoryLimit": 10,
+                "template": { "spec": {} },
+                "restate": {
+                    "register": { "url": "http://restate:9070/" },
+                    "deletePolicy": "drain",
+                    "drain": { "timeoutSeconds": 60, "onTimeout": "force" },
+                },
+            },
+        }))
+        .expect("test RestateDeployment deserializes");
+
+        let deleted_at = chrono::Utc::now() - chrono::TimeDelta::seconds(600);
+        rsd.metadata.deletion_timestamp = Some(Time(deleted_at));
+
+        // an `onTimeout: force` drain past its deadline is about to force, not stuck: it never
+        // reports itself timed out, however far past the deadline it is
+        assert!(!rsd.drain_overdue());
+
+        let status = rsd.deletion_status(
+            DeletionPhase::Overdue,
+            "held up".into(),
+            &[
+                BlockingVersion {
+                    name: "greeter-abc123".into(),
+                    deployment_id: Some("dp_abc123".into()),
+                    usage: DeploymentUsage {
+                        latest_for_service: true,
+                        pinned_invocations: 2,
+                        unpinned_invocations: 3,
+                    },
+                },
+                BlockingVersion {
+                    name: "greeter-def456".into(),
+                    deployment_id: Some("dp_def456".into()),
+                    usage: DeploymentUsage {
+                        latest_for_service: false,
+                        pinned_invocations: 1,
+                        unpinned_invocations: 0,
+                    },
+                },
+            ],
+        );
+
+        assert_eq!(status.total_pending_invocations, 6);
+        assert_eq!(status.started_at, Some(Time(deleted_at)));
+        assert_eq!(
+            status.deadline,
+            Some(Time(deleted_at + chrono::TimeDelta::seconds(60)))
+        );
+        assert_eq!(
+            status
+                .pending_invocations
+                .iter()
+                .map(|pending| (
+                    pending.version.as_str(),
+                    pending.deployment_id.as_deref(),
+                    pending.pinned,
+                    pending.unpinned
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("greeter-abc123", Some("dp_abc123"), 2, 3),
+                ("greeter-def456", Some("dp_def456"), 1, 0),
+            ],
+        );
+
+        // ...whereas a holding drain has nothing else to do at the deadline, so it does
+        rsd.spec
+            .restate
+            .drain
+            .as_mut()
+            .expect("drain block")
+            .on_timeout = Some(crate::resources::restatedeployments::OnTimeout::Hold);
+        assert!(rsd.drain_overdue());
+
+        // ...and `force` never waits in the first place, so it neither times out nor
+        // carries a deadline
+        rsd.spec.restate.delete_policy =
+            Some(crate::resources::restatedeployments::DeletePolicy::Force);
+        assert!(!rsd.drain_overdue());
+        let force_status = rsd.deletion_status(DeletionPhase::Forcing, "forcing".into(), &[]);
+        assert_eq!(
+            force_status.policy,
+            crate::resources::restatedeployments::DeletePolicy::Force
+        );
+        assert_eq!(force_status.deadline, None);
+    }
+
+    fn paused_rsd(policy: &str, on_timeout: &str) -> RestateDeployment {
+        use crate::controllers::{RECONCILE_ANNOTATION, RECONCILE_DISABLED};
+
+        serde_json::from_value(json!({
+            "apiVersion": "restate.dev/v1beta1",
+            "kind": "RestateDeployment",
+            "metadata": {
+                "name": "greeter",
+                "namespace": "apps",
+                "annotations": { RECONCILE_ANNOTATION: RECONCILE_DISABLED },
+            },
+            "spec": {
+                "replicas": 1,
+                "revisionHistoryLimit": 10,
+                "template": { "spec": {} },
+                "restate": {
+                    "register": { "url": "http://restate:9070/" },
+                    "deletePolicy": policy,
+                    "drain": { "timeoutSeconds": 60, "onTimeout": on_timeout },
+                },
+            },
+        }))
+        .expect("test RestateDeployment deserializes")
+    }
+
+    /// The pause annotation suspends management of a RestateDeployment, not its teardown:
+    /// a paused RSD that is deleted has to reconcile anyway, or it is left registered in
+    /// Restate with in-flight invocations and nothing coming back for it.
+    #[test]
+    fn deleting_a_paused_restatedeployment_is_not_suspended() {
+        let mut rsd = paused_rsd("drain", "hold");
+
+        // while it is alive the annotation does what it says
+        assert!(reconciliation_suspended(&rsd));
+
+        rsd.metadata.deletion_timestamp = Some(Time(chrono::Utc::now()));
+        assert!(
+            !reconciliation_suspended(&rsd),
+            "a deleted RestateDeployment must reconcile even while paused",
+        );
+    }
+
+    /// The `Disabled` state and its `Reconciling` condition are wrong the moment a paused
+    /// object starts deleting, and nothing else clears them -- the main status apply does
+    /// not run during a deletion. Clearing keeps the other conditions: a stale `Ready`
+    /// still says when the deployment was last healthy.
+    #[test]
+    fn a_deleting_rsd_no_longer_claims_to_be_suspended() {
+        let mut rsd = paused_rsd("drain", "hold");
+        rsd.metadata.deletion_timestamp = Some(Time(chrono::Utc::now()));
+
+        let ready = RestateDeploymentCondition {
+            last_transition_time: None,
+            message: Some("was healthy".into()),
+            reason: Some("Available".into()),
+            status: "True".into(),
+            r#type: "Ready".into(),
+        };
+        let suspended = RestateDeploymentCondition {
+            last_transition_time: None,
+            message: Some(suspended_message()),
+            reason: Some(ReconciliationState::Disabled.as_str().into()),
+            status: "False".into(),
+            r#type: RECONCILING_CONDITION.into(),
+        };
+
+        // nothing to hand over: no suspension marks, so no write at all
+        let mut status = RestateDeploymentStatus {
+            conditions: Some(vec![ready.clone()]),
+            reconciliation: Some(ReconciliationState::Reconciling),
+            ..Default::default()
+        };
+        rsd.status = Some(status.clone());
+        assert_eq!(rsd.suspension_to_clear(), None);
+
+        // ...whereas a paused one hands over the state and drops only its own condition
+        status.conditions = Some(vec![ready.clone(), suspended]);
+        status.reconciliation = Some(ReconciliationState::Disabled);
+        rsd.status = Some(status.clone());
+
+        let kept = rsd
+            .suspension_to_clear()
+            .expect("a suspended deleting RSD has marks to clear");
+        assert_eq!(
+            kept.iter()
+                .map(|cond| cond.r#type.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Ready"],
+            "clearing the suspension must not take the other conditions with it",
+        );
+
+        // a resume that never finished is just as wrong once the object is deleting
+        status.reconciliation = Some(ReconciliationState::ResumingReconciliation);
+        status.conditions = Some(vec![ready]);
+        rsd.status = Some(status);
+        assert!(rsd.suspension_to_clear().is_some());
+    }
+
+    /// The finalizer wrapper must not swallow the error's identity on the way to metrics,
+    /// or every RestateDeployment failure is labelled `FinalizerError`.
+    #[test]
+    fn metrics_label_the_error_the_reconciler_raised() {
+        let wrapped = Error::FinalizerError(Box::new(
+            kube::runtime::finalizer::Error::CleanupFailed(Error::DeletionDrainOverdue {
+                blocked_by: "greeter-abc123 (1 pinned, 0 unpinned invocations)".into(),
+                timeout_seconds: 3600,
+                requeue_after: Some(Duration::from_secs(300)),
+            }),
+        ));
+
+        assert_eq!(wrapped.metric_label(), "FinalizerError");
+        assert_eq!(root_cause(&wrapped).metric_label(), "DeletionDrainOverdue");
+    }
+
+    #[test]
+    fn an_expired_force_on_timeout_deadline_requeues_immediately() {
+        let mut rsd: RestateDeployment = serde_json::from_value(json!({
+            "apiVersion": "restate.dev/v1beta1",
+            "kind": "RestateDeployment",
+            "metadata": { "name": "greeter", "namespace": "apps" },
+            "spec": {
+                "replicas": 1,
+                "revisionHistoryLimit": 10,
+                "template": { "spec": {} },
+                "restate": {
+                    "register": { "url": "http://restate:9070/" },
+                    "deletePolicy": "drain",
+                    "drain": { "timeoutSeconds": 60, "onTimeout": "force" },
+                },
+            },
+        }))
+        .expect("test RestateDeployment deserializes");
+        rsd.metadata.deletion_timestamp =
+            Some(Time(chrono::Utc::now() - chrono::TimeDelta::seconds(61)));
+
+        assert_eq!(rsd.until_drain_deadline(), Some(Duration::ZERO));
+
+        // A holding drain uses the same deadline for status only; once it has passed,
+        // normal backoff applies because there is no cleanup-mode transition to wake.
+        rsd.spec
+            .restate
+            .drain
+            .as_mut()
+            .expect("drain block")
+            .on_timeout = Some(crate::resources::restatedeployments::OnTimeout::Hold);
+        assert_eq!(rsd.until_drain_deadline(), None);
+
+        // ...and neither does a `force`, which never had a drain to wait out
+        rsd.spec.restate.delete_policy =
+            Some(crate::resources::restatedeployments::DeletePolicy::Force);
+        rsd.spec
+            .restate
+            .drain
+            .as_mut()
+            .expect("drain block")
+            .on_timeout = Some(crate::resources::restatedeployments::OnTimeout::Force);
+        assert_eq!(rsd.until_drain_deadline(), None);
     }
 
     #[test]

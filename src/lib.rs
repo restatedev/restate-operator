@@ -86,6 +86,15 @@ pub enum Error {
     },
 
     #[error(
+        "This RestateDeployment is still backing active versions in Restate after the {timeout_seconds}s drain timeout: {blocked_by}. Cancel/complete the outstanding invocations, raise `spec.restate.drain.timeoutSeconds`, or set `spec.restate.drain.onTimeout: force` (or `spec.restate.deletePolicy: force`) to delete without waiting for them."
+    )]
+    DeletionDrainOverdue {
+        blocked_by: String,
+        timeout_seconds: i64,
+        requeue_after: Option<Duration>,
+    },
+
+    #[error(
         "This RestateDeployment is backing recently-active versions in Restate. It will be removed after the drain delay period."
     )]
     DeploymentDraining { requeue_after: Option<Duration> },
@@ -129,6 +138,7 @@ impl Error {
             Error::HashCollision => "HashCollision",
             Error::DeploymentNotLatest { .. } => "DeploymentNotLatest",
             Error::DeploymentInUse { .. } => "DeploymentInUse",
+            Error::DeletionDrainOverdue { .. } => "DeletionDrainOverdue",
             Error::DeploymentDraining { .. } => "DeploymentDraining",
             Error::ConfigurationNotReady { .. } => "ConfigurationNotReady",
             Error::RouteNotReady { .. } => "RouteNotReady",

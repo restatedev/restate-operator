@@ -10,8 +10,9 @@ use tracing::*;
 use url::Url;
 
 use crate::controllers::restatedeployment::cleanup::{
-    BlockingVersion, CleanupMode, DeploymentUsageMap, RESTATE_REMOVE_VERSION_AT_ANNOTATION,
-    retain_for_rollback, schedule_version_removal, unschedule_version_removal,
+    BlockingVersion, CleanupMode, CleanupOutcome, DeploymentUsageMap,
+    RESTATE_REMOVE_VERSION_AT_ANNOTATION, retain_for_rollback, schedule_version_removal,
+    unschedule_version_removal,
 };
 use crate::controllers::restatedeployment::controller::{
     Context, RESTATE_DEPLOYMENT_ID_ANNOTATION, propagated_labels,
@@ -240,10 +241,18 @@ pub async fn reconcile_knative(
     status.deployment_id = Some(deployment_id);
 
     // Cleanup old Configurations (mirrors ReplicaSet cleanup pattern)
-    let (_, next_removal) =
-        cleanup_old_configurations(namespace, ctx, &rsd_uid, rsd, &deployments, Some(&tag)).await?;
+    let outcome = cleanup_old_configurations(
+        namespace,
+        ctx,
+        &rsd_uid,
+        rsd,
+        CleanupMode::Rollout,
+        &deployments,
+        Some(&tag),
+    )
+    .await?;
 
-    Ok(next_removal)
+    Ok(outcome.next_removal)
 }
 
 /// Determine the tag for this deployment
@@ -823,9 +832,10 @@ pub async fn cleanup_old_configurations(
     ctx: &Context,
     rsd_uid: &str,
     rsd: &RestateDeployment,
+    mode: CleanupMode,
     deployments: &DeploymentUsageMap,
     active_tag: Option<&str>,
-) -> Result<(Vec<BlockingVersion>, Option<chrono::DateTime<chrono::Utc>>)> {
+) -> Result<CleanupOutcome> {
     // Use reflector cache instead of API list() call
     let configurations_cell = std::cell::Cell::new(Vec::new());
 
@@ -882,14 +892,13 @@ pub async fn cleanup_old_configurations(
 
     // keep track of the configurations that are still in-use by restate (active services or invocations)
     let mut blocking = Vec::new();
+    // versions a force deletion tore down with invocations still running
+    let mut abandoned = Vec::new();
     // Keep track of how many zero-scaled configurations there are (for revision history limit)
     let mut historic_count = 0;
     let mut next_removal = None;
 
     let now = chrono::Utc::now();
-
-    // As in `cleanup_old_replicasets`.
-    let mode = CleanupMode::for_rsd(rsd);
 
     for config in configurations {
         let config_name = config.name_any();
@@ -907,6 +916,7 @@ pub async fn cleanup_old_configurations(
 
         if let Some(usage) = deployment.filter(|usage| usage.is_active(mode)) {
             blocking.push(BlockingVersion {
+                deployment_id: config_deployment_id.cloned(),
                 name: config_name.clone(),
                 usage,
             });
@@ -929,7 +939,10 @@ pub async fn cleanup_old_configurations(
                     .ok()
             });
 
-        let current_remove_at_in_past = current_remove_at.is_some_and(|c| c < now);
+        // a force deletion doesn't wait out the drain delay, so every version it gets
+        // this far with is due for removal now
+        let current_remove_at_in_past =
+            current_remove_at.is_some_and(|c| c < now) || mode.skips_drain_delay();
 
         match (
             current_remove_at,
@@ -945,6 +958,14 @@ pub async fn cleanup_old_configurations(
                         config_name, historic_count, rsd.spec.revision_history_limit
                     );
                     continue;
+                }
+
+                if let Some(usage) = deployment.filter(|usage| usage.in_flight_invocations() > 0) {
+                    abandoned.push(BlockingVersion {
+                        deployment_id: config_deployment_id.cloned(),
+                        name: config_name.clone(),
+                        usage,
+                    });
                 }
 
                 if deployment_exists {
@@ -1021,7 +1042,11 @@ pub async fn cleanup_old_configurations(
         );
     }
 
-    Ok((blocking, next_removal))
+    Ok(CleanupOutcome {
+        blocking,
+        next_removal,
+        abandoned,
+    })
 }
 
 /// Get tag from Configuration annotation

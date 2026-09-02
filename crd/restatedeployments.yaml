@@ -44,6 +44,14 @@ spec:
       name: Selector
       priority: 1
       type: string
+    - jsonPath: .status.deletion.phase
+      name: Deletion
+      priority: 1
+      type: string
+    - jsonPath: .status.deletion.totalPendingInvocations
+      name: Pending Invocations
+      priority: 1
+      type: integer
     name: v1beta1
     schema:
       openAPIV3Schema:
@@ -162,6 +170,43 @@ spec:
               restate:
                 description: Restate specific configuration
                 properties:
+                  deletePolicy:
+                    description: |-
+                      What to do about in-flight invocations when this RestateDeployment is deleted.
+                      Defaults to `drain`.
+                      - `drain`: wait for in-flight invocations to finish, on the terms set by `drain`.
+                      - `force`: deregister and tear down immediately, without draining.
+                    enum:
+                    - drain
+                    - force
+                    nullable: true
+                    type: string
+                  drain:
+                    description: |-
+                      How `deletePolicy: drain` waits: how long, and whether it eventually gives up.
+                      Ignored by `deletePolicy: force`, which never waits.
+                    nullable: true
+                    properties:
+                      onTimeout:
+                        description: |-
+                          What to do once `timeoutSeconds` has passed. Defaults to `hold`.
+                          - `hold`: keep waiting, and report the drain as overdue
+                          - `force`: force-deregister, abandoning whatever is left
+                        enum:
+                        - hold
+                        - force
+                        nullable: true
+                        type: string
+                      timeoutSeconds:
+                        description: |-
+                          Seconds to wait for in-flight invocations to finish. Defaults to 3600 (1 hour).
+                          Under `onTimeout: hold` this only sets when the drain reports itself overdue; it
+                          never lets the deletion through
+                        format: int64
+                        minimum: 0.0
+                        nullable: true
+                        type: integer
+                    type: object
                   drainDelaySeconds:
                     description: |-
                       Seconds to wait before removing old versions after they are drained.
@@ -383,6 +428,86 @@ spec:
                   type: object
                 nullable: true
                 type: array
+              deletion:
+                description: |-
+                  Progress of an in-flight deletion. Only set once the RestateDeployment has been
+                  deleted and the operator is working through `spec.restate.deletePolicy`
+                nullable: true
+                properties:
+                  deadline:
+                    description: 'When the drain timeout expires. Unset under `deletePolicy: force`'
+                    format: date-time
+                    nullable: true
+                    type: string
+                  message:
+                    description: Human-readable explanation of what the deletion is waiting for
+                    nullable: true
+                    type: string
+                  onTimeout:
+                    description: |-
+                      What happens at the `deadline`: `hold` keeps waiting, `force` gives up and
+                      deregisters. Unset under `deletePolicy: force`, which has no deadline to reach
+                    enum:
+                    - hold
+                    - force
+                    nullable: true
+                    type: string
+                  pendingInvocations:
+                    description: The versions holding the deletion, and the invocations they are waiting on
+                    items:
+                      description: Invocations holding one version of a deleting RestateDeployment
+                      properties:
+                        deploymentId:
+                          description: The Restate deployment ID this version is registered as
+                          nullable: true
+                          type: string
+                        pinned:
+                          description: Unfinished invocations already bound to this version
+                          format: int64
+                          type: integer
+                        unpinned:
+                          description: |-
+                            Unfinished invocations not yet bound to any version, but targeting a service this
+                            version is the endpoint for. Not counted under `deletePolicy: force`, which does
+                            not run the query that attributes them
+                          format: int64
+                          type: integer
+                        version:
+                          description: The ReplicaSet (or Knative Configuration) name
+                          type: string
+                      required:
+                      - pinned
+                      - unpinned
+                      - version
+                      type: object
+                    type: array
+                  phase:
+                    description: Where the deletion has got to
+                    enum:
+                    - Draining
+                    - Overdue
+                    - Forcing
+                    type: string
+                  policy:
+                    description: The policy being applied
+                    enum:
+                    - drain
+                    - force
+                    type: string
+                  startedAt:
+                    description: When deletion was requested
+                    format: date-time
+                    nullable: true
+                    type: string
+                  totalPendingInvocations:
+                    description: Total invocations across all versions holding the deletion
+                    format: int64
+                    type: integer
+                required:
+                - phase
+                - policy
+                - totalPendingInvocations
+                type: object
               deploymentId:
                 description: Restate deployment ID for the current tag
                 nullable: true
@@ -431,10 +556,7 @@ spec:
                 nullable: true
                 type: integer
               reconciliation:
-                description: |-
-                  What the operator is currently doing with this deployment: `Reconciling`, `Disabled`
-                  (suspended by the `restate.dev/reconcile: disabled` annotation), or
-                  `ResumingReconciliation` (the annotation has gone but the deployment is not ready yet).
+                description: What the operator is currently doing with this deployment.
                 enum:
                 - Reconciling
                 - Disabled
