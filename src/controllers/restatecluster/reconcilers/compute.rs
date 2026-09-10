@@ -1147,14 +1147,15 @@ fn check_canary_conditions(job: &Job) -> CanaryResult {
 
 /// Shared canary job logic for cloud credential validation.
 /// Creates a one-shot Job and checks whether credentials are available.
-/// Returns the CanaryResult so callers can distinguish Complete from Pending.
+/// Returns the CanaryResult so callers can distinguish Complete from Pending, along with the
+/// applied Job so they can scope any pod lookup to this Job's own pods.
 async fn run_canary_job(
     namespace: &str,
     base_metadata: &ObjectMeta,
     tolerations: Option<&Vec<Toleration>>,
     job_api: &Api<Job>,
     config: &CanaryConfig,
-) -> Result<CanaryResult, Error> {
+) -> Result<(CanaryResult, Job), Error> {
     let name = config.name;
     let params: PatchParams = PatchParams::apply("restate-operator").force();
     let job = canary_job_spec(base_metadata, tolerations, config);
@@ -1200,7 +1201,7 @@ async fn run_canary_job(
             debug!("Canary {name} not yet succeeded in namespace {namespace}");
         }
     }
-    Ok(result)
+    Ok((result, created))
 }
 
 async fn check_pia(
@@ -1225,7 +1226,9 @@ async fn check_pia(
         pending_message: "Canary Job has not yet succeeded; PIA webhook may need to catch up",
     };
 
-    match run_canary_job(namespace, base_metadata, tolerations, job_api, &config).await? {
+    let (result, job) =
+        run_canary_job(namespace, base_metadata, tolerations, job_api, &config).await?;
+    match result {
         CanaryResult::Complete => return Ok(()),
         CanaryResult::Failed => unreachable!("run_canary_job returns Err for Failed"),
         CanaryResult::Pending => {}
@@ -1233,36 +1236,46 @@ async fn check_pia(
 
     // job hasn't completed yet - try the pod volume shortcut before declaring pending.
     // the eks-pod-identity-token volume is visible immediately at pod creation.
-    // no need for a controller-uid filter since the job name is unique within the namespace.
+    //
+    // Only this Job's pods count. A Job deleted by an earlier reconcile can leave its pods behind
+    // (see delete_job), and matching on the job-name label alone then keeps finding the stale
+    // pod, deleting the fresh Job on every reconcile. Observed in production: one such pod spawned
+    // ~2000 orphaned canary pods in 13 minutes until a newer pod happened to sort first.
     let name = config.name;
-    if let Ok(pods) = pod_api
-        .list(&ListParams::default().labels(&format!("batch.kubernetes.io/job-name={name}")))
-        .await
-        && let Some(pod) = pods.items.first()
-    {
-        if pod
-            .spec
-            .as_ref()
-            .and_then(|s| s.volumes.as_ref())
-            .map(|vs| vs.iter().any(|v| v.name == "eks-pod-identity-token"))
-            .unwrap_or(false)
-        {
-            debug!(
-                "PodIdentityAssociation canary check succeeded via pod lookup in namespace {namespace}"
-            );
-            return Ok(());
-        }
-
-        debug!(
-            "PodIdentityAssociation canary check failed via pod lookup in namespace {namespace}, deleting Job"
-        );
-        delete_job(namespace, job_api, name).await?;
-
+    let Some(job_uid) = job.metadata.uid.as_deref() else {
         return Err(Error::NotReady {
-            reason: "PodIdentityAssociationCanaryFailed".into(),
-            message: config.failure_message.into(),
+            reason: "PodIdentityAssociationCanaryPending".into(),
+            message: config.pending_message.into(),
             requeue_after: None,
         });
+    };
+    if let Ok(pods) = pod_api
+        .list(&ListParams::default().labels(&format!(
+            "batch.kubernetes.io/job-name={name},batch.kubernetes.io/controller-uid={job_uid}"
+        )))
+        .await
+    {
+        match pia_canary_pods_verdict(&pods.items) {
+            Some(true) => {
+                debug!(
+                    "PodIdentityAssociation canary check succeeded via pod lookup in namespace {namespace}"
+                );
+                return Ok(());
+            }
+            Some(false) => {
+                debug!(
+                    "PodIdentityAssociation canary check failed via pod lookup in namespace {namespace}, deleting Job"
+                );
+                delete_job(namespace, job_api, name).await?;
+
+                return Err(Error::NotReady {
+                    reason: "PodIdentityAssociationCanaryFailed".into(),
+                    message: config.failure_message.into(),
+                    requeue_after: None,
+                });
+            }
+            None => {}
+        }
     }
 
     Err(Error::NotReady {
@@ -1270,6 +1283,22 @@ async fn check_pia(
         message: config.pending_message.into(),
         requeue_after: None,
     })
+}
+
+/// Whether the Pod Identity webhook injected credentials into this Job's pods: `Some(true)` if any
+/// pod carries the token volume, `Some(false)` if pods exist and none does, `None` with no pods
+/// yet. Any-of, because a retried pod (backoff_limit 1) may get the volume its predecessor missed.
+fn pia_canary_pods_verdict(pods: &[Pod]) -> Option<bool> {
+    if pods.is_empty() {
+        return None;
+    }
+    Some(pods.iter().any(|pod| {
+        pod.spec
+            .as_ref()
+            .and_then(|s| s.volumes.as_ref())
+            .map(|vs| vs.iter().any(|v| v.name == "eks-pod-identity-token"))
+            .unwrap_or(false)
+    }))
 }
 
 fn is_pod_identity_association_synced(pia: PodIdentityAssociation) -> bool {
@@ -1307,7 +1336,9 @@ async fn delete_job(namespace: &str, job_api: &Api<Job>, name: &str) -> Result<(
         "Ensuring Job {} in namespace {} does not exist",
         name, namespace
     );
-    match job_api.delete(name, &DeleteParams::default()).await {
+    // batch/v1 Jobs default to orphan propagation when deleted through the API, which would leave
+    // every canary pod behind as an owner-less object. Cascade so the pods go with the Job.
+    match job_api.delete(name, &DeleteParams::background()).await {
         Err(kube::Error::Api(kube::error::ErrorResponse { code: 404, .. })) => Ok(()),
         Err(err) => Err(err.into()),
         Ok(_) => Ok(()),
@@ -1452,7 +1483,9 @@ async fn check_workload_identity(
         pending_message: "Canary Job has not yet succeeded; Workload Identity may need to propagate",
     };
 
-    match run_canary_job(namespace, base_metadata, tolerations, job_api, &config).await? {
+    let (result, _) =
+        run_canary_job(namespace, base_metadata, tolerations, job_api, &config).await?;
+    match result {
         CanaryResult::Complete => Ok(()),
         CanaryResult::Failed => unreachable!("run_canary_job returns Err for Failed"),
         CanaryResult::Pending => Err(Error::NotReady {
@@ -2185,6 +2218,44 @@ mod tests {
     }
 
     // canary_job_spec tests
+
+    fn pod_with_volumes(names: &[&str]) -> Pod {
+        Pod {
+            spec: Some(PodSpec {
+                volumes: Some(
+                    names
+                        .iter()
+                        .map(|n| Volume {
+                            name: (*n).into(),
+                            ..Default::default()
+                        })
+                        .collect(),
+                ),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_pia_canary_pods_verdict_no_pods() {
+        assert_eq!(pia_canary_pods_verdict(&[]), None);
+    }
+
+    #[test]
+    fn test_pia_canary_pods_verdict_token_missing() {
+        let pods = [pod_with_volumes(&["kube-api-access-abcde"])];
+        assert_eq!(pia_canary_pods_verdict(&pods), Some(false));
+    }
+
+    #[test]
+    fn test_pia_canary_pods_verdict_any_pod_with_token() {
+        let pods = [
+            pod_with_volumes(&["kube-api-access-abcde"]),
+            pod_with_volumes(&["eks-pod-identity-token", "kube-api-access-fghij"]),
+        ];
+        assert_eq!(pia_canary_pods_verdict(&pods), Some(true));
+    }
 
     #[test]
     fn test_canary_job_spec_structure() {
