@@ -1097,6 +1097,8 @@ fn canary_job_spec(
         metadata,
         spec: Some(JobSpec {
             backoff_limit: Some(1),
+            // Bound scheduling, image pulls, and credential checks as well as failed attempts.
+            active_deadline_seconds: Some(300),
             template: PodTemplateSpec {
                 metadata: None,
                 spec: Some(PodSpec {
@@ -1147,7 +1149,8 @@ fn check_canary_conditions(job: &Job) -> CanaryResult {
 
 /// Shared canary job logic for cloud credential validation.
 /// Creates a one-shot Job and checks whether credentials are available.
-/// Returns the CanaryResult so callers can distinguish Complete from Pending, along with the
+/// Deletes terminally failed Jobs and returns NotReady so the next reconcile can retry.
+/// Otherwise returns Complete or Pending, along with the
 /// applied Job so they can scope any pod lookup to this Job's own pods.
 async fn run_canary_job(
     namespace: &str,
@@ -1255,26 +1258,13 @@ async fn check_pia(
         )))
         .await
     {
-        match pia_canary_pods_verdict(&pods.items) {
-            Some(true) => {
-                debug!(
-                    "PodIdentityAssociation canary check succeeded via pod lookup in namespace {namespace}"
-                );
-                return Ok(());
-            }
-            Some(false) => {
-                debug!(
-                    "PodIdentityAssociation canary check failed via pod lookup in namespace {namespace}, deleting Job"
-                );
-                delete_job(namespace, job_api, name).await?;
-
-                return Err(Error::NotReady {
-                    reason: "PodIdentityAssociationCanaryFailed".into(),
-                    message: config.failure_message.into(),
-                    requeue_after: None,
-                });
-            }
-            None => {}
+        // Missing credentials on an early pod are not a terminal failure: let the Job retry.
+        // Only run_canary_job may delete a failed Job, after Kubernetes marks it Failed.
+        if pia_canary_pods_verdict(&pods.items) == Some(true) {
+            debug!(
+                "PodIdentityAssociation canary check succeeded via pod lookup in namespace {namespace}"
+            );
+            return Ok(());
         }
     }
 
@@ -2257,6 +2247,140 @@ mod tests {
         assert_eq!(pia_canary_pods_verdict(&pods), Some(true));
     }
 
+    #[tokio::test]
+    async fn test_pia_canary_reconcile_lifecycle() {
+        use http::{Request, Response};
+        use kube::client::Body;
+        use serde_json::json;
+        use std::sync::{Arc, Mutex};
+
+        // Exercise the real API path: no pod shortcut may delete a pending Job, and terminal
+        // failures must delete with cascading propagation without consulting pods at all.
+        for (status, pods, expected_reason, methods) in [
+            (
+                json!({}),
+                vec![],
+                Some("PodIdentityAssociationCanaryPending"),
+                vec!["PATCH", "GET"],
+            ),
+            (
+                json!({"failed": 1}),
+                vec![pod_with_volumes(&[])],
+                Some("PodIdentityAssociationCanaryPending"),
+                vec!["PATCH", "GET"],
+            ),
+            (
+                json!({"failed": 1}),
+                vec![
+                    pod_with_volumes(&[]),
+                    pod_with_volumes(&["eks-pod-identity-token"]),
+                ],
+                None,
+                vec!["PATCH", "GET"],
+            ),
+            (
+                json!({"conditions": [{"type": "Complete", "status": "True"}]}),
+                vec![],
+                None,
+                vec!["PATCH"],
+            ),
+            (
+                json!({"failed": 2, "conditions": [{"type": "Failed", "status": "True", "reason": "BackoffLimitExceeded"}]}),
+                vec![],
+                Some("PodIdentityAssociationCanaryFailed"),
+                vec!["PATCH", "DELETE"],
+            ),
+            // A never-scheduled pod can exhaust its deadline without any failed attempts.
+            (
+                json!({"conditions": [{"type": "Failed", "status": "True", "reason": "DeadlineExceeded"}]}),
+                vec![],
+                Some("PodIdentityAssociationCanaryFailed"),
+                vec!["PATCH", "DELETE"],
+            ),
+        ] {
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let recorded = calls.clone();
+            let service = tower::service_fn(move |req: Request<Body>| {
+                let calls = recorded.clone();
+                let status = status.clone();
+                let pods = pods.clone();
+                async move {
+                    let method = req.method().to_string();
+                    calls.lock().unwrap().push(method.clone());
+                    let uri = req.uri().clone();
+                    let bytes = req.into_body().collect_bytes().await.unwrap();
+                    let job = json!({
+                        "apiVersion": "batch/v1", "kind": "Job",
+                        "metadata": {"name": "restate-pia-canary", "uid": "current-job"},
+                        "status": status,
+                    });
+                    let response = match method.as_str() {
+                        "PATCH" => {
+                            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                            assert_eq!(body["spec"]["activeDeadlineSeconds"], 300);
+                            assert_eq!(body["spec"]["backoffLimit"], 1);
+                            assert_eq!(
+                                body["spec"]["template"]["spec"]["containers"][0]["command"],
+                                json!([
+                                    "grep",
+                                    "-q",
+                                    "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+                                    "/proc/self/environ"
+                                ])
+                            );
+                            job
+                        }
+                        "GET" => {
+                            assert!(uri.path().ends_with("/pods"));
+                            let query: std::collections::HashMap<_, _> =
+                                url::form_urlencoded::parse(uri.query().unwrap().as_bytes())
+                                    .into_owned()
+                                    .collect();
+                            assert_eq!(
+                                query["labelSelector"],
+                                "batch.kubernetes.io/job-name=restate-pia-canary,batch.kubernetes.io/controller-uid=current-job"
+                            );
+                            json!({"apiVersion": "v1", "kind": "PodList", "metadata": {}, "items": pods})
+                        }
+                        "DELETE" => {
+                            assert!(uri.path().ends_with("/jobs/restate-pia-canary"));
+                            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                            assert_eq!(body["propagationPolicy"], "Background");
+                            job
+                        }
+                        _ => panic!("unexpected request: {method} {uri}"),
+                    };
+                    Ok::<_, std::convert::Infallible>(
+                        Response::builder()
+                            .header("content-type", "application/json")
+                            .body(Body::from(serde_json::to_vec(&response).unwrap()))
+                            .unwrap(),
+                    )
+                }
+            });
+            let client = kube::Client::new(service, "default");
+            let result = check_pia(
+                "default",
+                &test_base_metadata(),
+                None,
+                &Api::namespaced(client.clone(), "default"),
+                &Api::namespaced(client, "default"),
+                "alpine:3.21",
+            )
+            .await;
+            match (result, expected_reason) {
+                (Ok(()), None) => {}
+                (Err(Error::NotReady { reason, .. }), Some(expected)) => {
+                    assert_eq!(reason, expected)
+                }
+                (result, expected) => {
+                    panic!("unexpected result {result:?}, expected reason {expected:?}")
+                }
+            }
+            assert_eq!(*calls.lock().unwrap(), methods);
+        }
+    }
+
     #[test]
     fn test_canary_job_spec_structure() {
         let config = CanaryConfig {
@@ -2271,6 +2395,8 @@ mod tests {
 
         let spec = job.spec.unwrap();
         assert_eq!(spec.backoff_limit, Some(1));
+        assert_eq!(spec.active_deadline_seconds, Some(300));
+        assert_eq!(spec.ttl_seconds_after_finished, None);
 
         let pod_spec = spec.template.spec.unwrap();
         assert_eq!(pod_spec.service_account_name.as_deref(), Some("restate"));
