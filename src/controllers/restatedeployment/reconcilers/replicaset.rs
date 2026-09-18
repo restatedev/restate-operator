@@ -1377,12 +1377,10 @@ mod tests {
                 vec![version_hpa()],
             );
 
-            let mut rsd = rsd(true, true);
-            rsd.spec.restate.register.url = Some("http://198.51.100.4/".parse().unwrap());
+            let rsd = rsd(true, true);
 
             let mut session = shimforge::Session::new();
-            let sends =
-                session.mock_async(reqwest::Client::new().delete("http://198.51.100.4/").send());
+            let sends = session.mock_async(reqwest::Client::new().get("http://unused/").send());
             let not_found: reqwest::Response = Response::builder()
                 .status(404)
                 .body(String::new())
