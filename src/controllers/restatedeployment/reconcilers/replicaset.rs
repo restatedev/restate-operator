@@ -1380,7 +1380,7 @@ mod tests {
             let rsd = rsd(true, true);
 
             let mut session = shimforge::Session::new();
-            let sends = session.mock_async(reqwest::Client::new().get("http://unused/").send());
+            let sends = session.mock_async(reqwest::Client::new().delete("http://unused/").send());
             let not_found: reqwest::Response = Response::builder()
                 .status(404)
                 .body(String::new())
