@@ -1366,5 +1366,53 @@ mod tests {
                 vec!["application/apply-patch+yaml"],
             );
         }
+
+        /// Restate answering 404 means the deployment is already gone, which the
+        /// force-delete must treat as success and go on to remove the ReplicaSet.
+        #[tokio::test]
+        async fn force_delete_tolerates_a_404_from_restate() {
+            let remove_at = chrono::Utc::now() + chrono::TimeDelta::seconds(300);
+            let harness = harness(
+                vec![version("dp_busy", Some(remove_at))],
+                vec![version_hpa()],
+            );
+
+            let rsd = rsd(true, true);
+
+            let mut session = shimforge::Session::new();
+            let sends = session.mock_async(reqwest::Client::new().delete("http://unused/").send());
+            let not_found: reqwest::Response = Response::builder()
+                .status(404)
+                .body(String::new())
+                .unwrap()
+                .into();
+            sends.expect().once().return_once(Ok(not_found));
+
+            let busy = DeploymentUsage {
+                latest_for_service: true,
+                pinned_invocations: 4,
+                unpinned_invocations: 0,
+            };
+
+            cleanup_old_replicasets(
+                NAMESPACE,
+                &harness.ctx,
+                &harness.rs_api,
+                RSD_UID,
+                &rsd,
+                CleanupMode::ForceDeleting,
+                &usage_of("dp_busy", busy),
+                None,
+            )
+            .await
+            .expect("a 404 from the force-delete must not fail cleanup");
+
+            assert!(
+                harness.calls.matching(VERSION).contains(&format!(
+                    "DELETE /apis/apps/v1/namespaces/{NAMESPACE}/replicasets/{VERSION}"
+                )),
+                "the ReplicaSet is still removed"
+            );
+        }
     }
 }
