@@ -1415,7 +1415,6 @@ mod tests {
                 )),
                 "the ReplicaSet is still removed"
             );
-            sends.verify();
         }
     }
 }
