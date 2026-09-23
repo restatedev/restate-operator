@@ -9,6 +9,7 @@ A Kubernetes operator that creates [Restate](https://restate.dev/) clusters. Sup
 - Sign requests using private keys from Secrets or CSI Secret Store
 - Deploy Restate SDK services using the `RestateDeployment` crd, the operator will manage their versions automatically, draining
   old versions when there are no longer invocations running against them.
+- Consume Kafka topics into Restate invocations using the `RestateKafkaIntegration` crd.
 
 ## Installation
 
@@ -64,7 +65,7 @@ so they and their custom resources are retained on `helm uninstall`.
 
 ## Custom Resource Definitions
 
-The operator introduces three Custom Resource Definitions (CRDs): `RestateCluster`, `RestateDeployment`, and `RestateCloudEnvironment`.
+The operator introduces four Custom Resource Definitions (CRDs): `RestateCluster`, `RestateDeployment`, `RestateCloudEnvironment`, and `RestateKafkaIntegration`.
 
 ### `RestateCluster`
 
@@ -814,6 +815,179 @@ A few things to be aware of:
   Consider a readiness probe that reflects tunnel establishment if you need tighter rollouts.
 - `tunnelMode: in-process` is not supported in Knative mode: the Knative autoscaler sees no
   inbound traffic for tunnel invocations, so scale-to-zero would never scale back up.
+
+### `RestateKafkaIntegration`
+
+The `RestateKafkaIntegration` CRD runs the
+[Restate Kafka ingress integration](https://github.com/restatedev/ingress-integration-kafka) --
+a standalone container that consumes Kafka topics and turns each record into a Restate
+invocation. The operator manages a `Deployment` of it in the custom resource's own namespace,
+resolves the Restate ingress URL from the reference you give it, and owns a `ConfigMap` holding
+that URL plus any inline configuration.
+
+The CRD is `restate.dev/v1alpha1`; its shape may still change.
+
+Only the Restate destination and its credentials are modelled as fields. Everything else --
+the Kafka connection, consumer settings, the record mapper, metrics, retry policy -- is the
+container's own configuration surface, documented in
+[CONFIGURATION.md](https://github.com/restatedev/ingress-integration-kafka/blob/main/CONFIGURATION.md),
+and is passed straight through as a Java `.properties` file. That way a new option upstream is
+usable immediately, without waiting for a CRD change.
+
+#### Minimal Example
+
+```yaml
+apiVersion: restate.dev/v1alpha1
+kind: RestateKafkaIntegration
+metadata:
+  name: orders-to-restate
+spec:
+  replicas: 2
+  restate:
+    ingress:
+      cluster: restate
+  config: |
+    bootstrap.servers=kafka.kafka.svc.cluster.local:9092
+    group.id=orders-to-restate
+    topics=orders
+    restate.record.mapper.service=OrderService
+    restate.record.mapper.handler=onKafkaEvent
+```
+
+See [`examples/kafka`](./examples/kafka) for a runnable version, including a throwaway Kafka.
+
+#### Spec Fields
+
+| Field | Type | Description |
+|---|---|---|
+| `restate` | `object` | **Required**. Where to send invocations, and how to authenticate. See details below. |
+| `replicas` | `integer` | Number of desired pods. Defaults to `1`. |
+| `image` | `string` | Container image. Defaults to the operator's built-in default (override cluster-wide with the `kafkaIntegrationImage` Helm value). |
+| `imagePullPolicy` | `string` | One of `Always`, `Never`, `IfNotPresent`. |
+| `config` | `string` | Inline `.properties` configuration. See details below. |
+| `configRefs` | `array` | Additional `.properties` sources (Secrets/ConfigMaps) merged on top of `config`, in order. See details below. |
+| `template` | `object` | Overrides merged over the pod template the operator generates. See details below. |
+
+Throughput scales with replicas up to your topics' partition count -- Kafka distributes
+partitions across the whole consumer group, so replicas beyond that sit idle. Note each pod
+also runs `restate.kafka.consumer.instances` consumers of its own (default: twice its CPU
+count). `kubectl scale rki/<name> --replicas=N` works, as does pointing a
+`HorizontalPodAutoscaler` at the resource.
+
+#### `spec.restate`
+
+| Field | Type | Description |
+|---|---|---|
+| `ingress` | `object` | **Required**. Exactly one of `cluster`, `cloud`, `service` or `url`. |
+| `authToken` | `object` | A `{name, key}` reference to a Secret **in this namespace** holding a bearer token, passed to the container as `RESTATE_AUTH_TOKEN`. The token stays in the Secret and never lands in a config file. |
+
+**`ingress` Fields**
+
+| Field | Type | Description |
+|---|---|---|
+| `cluster` | `string` | The name of a `RestateCluster`; resolves to `http://restate.<cluster>.svc.<clusterDns>:8080`. |
+| `cloud` | `string` | The name of a `RestateCloudEnvironment`; resolves to its public ingress. Requires `authToken`. |
+| `service` | `object` | A `{name, namespace, port, path}` reference to a Service. `port` defaults to `8080`. |
+| `url` | `string` | A Restate ingress URL. |
+
+The operator never reads the `authToken` Secret: it is referenced from the pod spec, so the
+kubelet resolves it. This is also why `cloud` needs one rather than reusing the
+`RestateCloudEnvironment`'s own credentials, which live in a Secret in the *operator's*
+namespace -- copying it into your namespace would mean granting the operator cluster-wide read
+access to Secrets.
+
+#### Configuration
+
+Everything Kafka-side -- `bootstrap.servers`, `group.id`, `topics`, `sasl.*`,
+`restate.record.mapper.*`, ... -- is the container's own `.properties` surface, given as two
+fields that layer:
+
+- **`spec.config`** is an inline `.properties` block, stored in the custom resource.
+- **`spec.configRefs`** is a list of Secret/ConfigMap references, each setting exactly one of:
+
+  | Field | Type | Description |
+  |---|---|---|
+  | `secretRef` | `object` | `{name, key}` pointing at a Secret; `key` defaults to `config.properties`. |
+  | `configMapRef` | `object` | `{name, key}` pointing at a ConfigMap; `key` defaults to `config.properties`. |
+
+Each source is mounted as its own read-only file under `/etc/restate-kafka/`, and the
+container's `CONFIG_FILE` lists them in merge order (later wins): the operator's own resolved
+`restate.ingress.url` first, then `spec.config`, then each `spec.configRefs` entry in order. So
+`spec.config` can override the ingress URL, and a ref can override `spec.config` -- e.g. a
+plain-text inline base with a `secretRef` overlay for credentials.
+
+The Restate ingress **bearer token** is the exception: it goes in `spec.restate.authToken`,
+never in a config file, and reaches the container as the `RESTATE_AUTH_TOKEN` environment
+variable -- which the container prefers over any `restate.auth.token` in a file -- so it stays a
+Secret reference and never lands in plain text.
+
+`spec.config` lives in a `ConfigMap` the operator owns, named after the custom resource; the pod
+template carries a digest of that ConfigMap, so editing `spec.config` -- or a change to the
+resolved ingress URL -- rolls the pods. The operator does **not** read `spec.configRefs`
+objects, so changing their contents does not restart the pods -- run `kubectl rollout restart
+deployment/<name>`.
+
+Keep credentials (`sasl.jaas.config`, `sasl.password`, ...) in a `spec.configRefs` Secret:
+`spec.config` is part of the custom resource, so it is stored and displayed in plain text.
+
+#### `spec.template`
+
+A partial pod template, strategic-merged over the one the operator generates. Objects merge
+key by key; lists whose Kubernetes merge key the operator knows (`containers`,
+`initContainers`, `volumes`, `env`, `volumeMounts`, `ports`, `imagePullSecrets`, `hostAliases`)
+merge entry by entry, so you can override one field without restating the rest. Any other list
+replaces the generated one, and an explicit `null` removes a generated field.
+
+The operator's container is named `kafka-integration`. Target it by name to set resources,
+probes, extra environment variables or volume mounts:
+
+```yaml
+  template:
+    spec:
+      containers:
+        - name: kafka-integration
+          resources:
+            requests: {cpu: 500m, memory: 512Mi}
+          env:
+            - name: JDK_JAVA_OPTIONS
+              value: -XX:MaxRAMPercentage=75
+```
+
+The pod labels the operator manages (`app.kubernetes.io/name`, `app.kubernetes.io/instance`)
+are re-applied after the merge, because a template whose labels no longer match the
+Deployment's immutable selector is rejected outright by the apiserver.
+
+The generated pod deliberately has **no readiness or liveness probe**: the image exposes no
+health endpoint, and it exits non-zero on unrecoverable errors (bad configuration, exhausted
+reconnect retries), so the restart policy is the real liveness mechanism. Add one via
+`spec.template` if you want one.
+
+Rollouts use `maxSurge: 0, maxUnavailable: 1`, since surging would add consumers to the group
+before the old ones leave and cost an extra Kafka rebalance.
+
+#### NetworkPolicy
+
+A `RestateCluster` denies **all** inbound traffic to its ingress port unless
+`spec.security.networkPeers.ingress` names a peer. The integration dials in to that port, so
+without a peer it will never connect -- and the failure looks like a hang, not a rejection.
+
+Add a peer selecting the integration's pods:
+
+```yaml
+kind: RestateCluster
+spec:
+  security:
+    networkPeers:
+      ingress:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: restate-kafka-integration
+```
+
+The operator also labels the pods `allow.restate.dev/<cluster-name>: "true"`, which is what
+the cluster's *egress* policy matches on; that label alone does not open ingress.
+
 
 ### EKS Pod Identity
 

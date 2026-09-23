@@ -1,0 +1,6 @@
+amends "package://pkg.pkl-lang.org/pkl-pantry/k8s.contrib.crd@2.0.2::sha256:8e07ae25589d38613ce466d2af1cec7609721c34c7e7e5fe301e9efd4de2d462#/generate.pkl"
+
+source = "./crd/restatekafkaintegrations.yaml"
+
+// No converters: `spec.template` is a *partial* pod template merged over the one the operator
+// generates, so mapping it onto k8s' PodTemplateSpec would wrongly demand `containers`.

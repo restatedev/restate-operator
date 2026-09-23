@@ -961,6 +961,7 @@ mod tests {
                     None,
                     None,
                     "tunnel:latest".into(),
+                    "kafka-integration:latest".into(),
                     "cluster.local".into(),
                     "alpine:3.21".into(),
                     None,
