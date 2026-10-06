@@ -63,6 +63,15 @@ pub async fn reconcile_signing_key(
             Ok(Some(reconcile_signing_key_secret(secret)))
         }
         (None, Some(secret_provider)) => {
+            if !ctx.manage_secret_provider_classes {
+                // Unlike a missing CRD, this is an explicit opt-out, so fail rather than quietly
+                // rolling the cluster out without the signing key it asked for.
+                return Err(Error::NotReady {
+                    message: "secretProvider signing requires SecretProviderClass management; enable it or use a Kubernetes Secret signing source".into(),
+                    reason: "SecretProviderClassesDisabled".into(),
+                    requeue_after: None,
+                });
+            }
             if ctx.secret_provider_class_installed {
                 Ok(Some(
                     reconcile_signing_key_secret_provider(
@@ -156,7 +165,7 @@ pub async fn remove_secret_provider_class(
     namespace: &str,
     spc_api: &Api<SecretProviderClass>,
 ) -> Result<(), Error> {
-    if !ctx.secret_provider_class_installed {
+    if !ctx.manage_secret_provider_classes || !ctx.secret_provider_class_installed {
         return Ok(());
     }
     debug!(
@@ -170,5 +179,94 @@ pub async fn remove_secret_provider_class(
         Err(kube::Error::Api(kube::error::ErrorResponse { code: 404, .. })) => Ok(()),
         Err(err) => Err(err.into()),
         Ok(_) => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use kube::runtime::reflector;
+
+    use super::*;
+    use crate::Metrics;
+    use crate::controllers::State;
+
+    /// A context whose apiserver fails every request, along with how many it received. The
+    /// SecretProviderClass CRD counts as installed, so only the switches keep requests away.
+    fn context_with_failing_client(
+        manage_network_policies: bool,
+        manage_secret_provider_classes: bool,
+    ) -> (Arc<Context>, Arc<AtomicUsize>) {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counter = requests.clone();
+        let service = tower::service_fn(move |_: http::Request<kube::client::Body>| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            async {
+                Err::<http::Response<kube::client::Body>, _>(std::io::Error::other("no apiserver"))
+            }
+        });
+        let state = State::new(
+            None,
+            false,
+            manage_network_policies,
+            manage_secret_provider_classes,
+            "restate-operator".into(),
+            None,
+            None,
+            "tunnel:latest".into(),
+            "cluster.local".into(),
+            "alpine:3.21".into(),
+            None,
+            None,
+        );
+        let ctx = Context::new(
+            kube::Client::new(service, "default"),
+            Metrics::default(),
+            state,
+            reflector::store().0,
+            reflector::store().0,
+            false,
+            true,
+        );
+        (ctx, requests)
+    }
+
+    #[tokio::test]
+    async fn unmanaged_secret_provider_classes_are_left_alone() {
+        let (ctx, requests) = context_with_failing_client(true, false);
+        let base_metadata = ObjectMeta::default();
+
+        let none = reconcile_signing_key(&ctx, "test", &base_metadata, None).await;
+        assert!(none.unwrap().is_none());
+
+        let secret = RequestSigningPrivateKey {
+            version: "v1".into(),
+            secret: Some(SecretSigningKeySource {
+                key: "private.pem".into(),
+                secret_name: "signing-key".into(),
+            }),
+            secret_provider: None,
+        };
+        let secret = reconcile_signing_key(&ctx, "test", &base_metadata, Some(&secret)).await;
+        assert!(secret.unwrap().unwrap().0.secret.is_some());
+
+        let secret_provider = RequestSigningPrivateKey {
+            version: "v1".into(),
+            secret: None,
+            secret_provider: Some(SecretProviderSigningKeySource {
+                path: "private.pem".into(),
+                ..Default::default()
+            }),
+        };
+        let secret_provider =
+            reconcile_signing_key(&ctx, "test", &base_metadata, Some(&secret_provider)).await;
+        assert!(matches!(
+            secret_provider,
+            Err(Error::NotReady { reason, .. }) if reason == "SecretProviderClassesDisabled"
+        ));
+
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
     }
 }

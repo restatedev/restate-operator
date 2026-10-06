@@ -279,6 +279,12 @@ pub async fn reconcile_network_policies(
     security: Option<&RestateClusterSecurity>,
     cluster: Option<&Cluster>,
 ) -> Result<(), Error> {
+    if !ctx.manage_network_policies {
+        // Management is off operator-wide: leave whatever policies exist alone, including the
+        // cleanup that spec.security.disableNetworkPolicies would otherwise ask for.
+        return Ok(());
+    }
+
     let disable_network_policies = security
         .and_then(|s| s.disable_network_policies)
         .unwrap_or(false);
@@ -470,5 +476,77 @@ async fn delete_network_policy(
         Err(kube::Error::Api(kube::error::ErrorResponse { code: 404, .. })) => Ok(()),
         Err(err) => Err(err.into()),
         Ok(_) => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use kube::runtime::reflector;
+
+    use super::*;
+    use crate::Metrics;
+    use crate::controllers::State;
+
+    /// A context whose apiserver fails every request, along with how many it received. The
+    /// SecretProviderClass CRD counts as installed, so only the switches keep requests away.
+    fn context_with_failing_client(
+        manage_network_policies: bool,
+        manage_secret_provider_classes: bool,
+    ) -> (Arc<Context>, Arc<AtomicUsize>) {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counter = requests.clone();
+        let service = tower::service_fn(move |_: http::Request<kube::client::Body>| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            async {
+                Err::<http::Response<kube::client::Body>, _>(std::io::Error::other("no apiserver"))
+            }
+        });
+        let state = State::new(
+            None,
+            false,
+            manage_network_policies,
+            manage_secret_provider_classes,
+            "restate-operator".into(),
+            None,
+            None,
+            "tunnel:latest".into(),
+            "cluster.local".into(),
+            "alpine:3.21".into(),
+            None,
+            None,
+        );
+        let ctx = Context::new(
+            kube::Client::new(service, "default"),
+            Metrics::default(),
+            state,
+            reflector::store().0,
+            reflector::store().0,
+            false,
+            true,
+        );
+        (ctx, requests)
+    }
+
+    #[tokio::test]
+    async fn unmanaged_network_policies_are_left_alone() {
+        let (ctx, requests) = context_with_failing_client(false, true);
+        let base_metadata = ObjectMeta {
+            name: Some("test".into()),
+            ..Default::default()
+        };
+
+        for disable_network_policies in [None, Some(false), Some(true)] {
+            let security = RestateClusterSecurity {
+                disable_network_policies,
+                ..Default::default()
+            };
+            reconcile_network_policies(&ctx, "test", &base_metadata, Some(&security), None)
+                .await
+                .unwrap();
+        }
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
     }
 }

@@ -230,6 +230,10 @@ pub struct State {
     aws_pod_identity_association_cluster: Option<String>,
     /// If true, manage GCP Workload Identity via Config Connector IAMPolicyMember
     gcp_workload_identity: bool,
+    /// If false, never touch NetworkPolicies, not even to watch or clean them up
+    manage_network_policies: bool,
+    /// If false, never touch SecretProviderClasses, not even to watch or clean them up
+    manage_secret_provider_classes: bool,
 
     /// Our namespace, needed for network policies and reading secrets
     operator_namespace: String,
@@ -259,6 +263,8 @@ impl State {
     pub fn new(
         aws_pod_identity_association_cluster: Option<String>,
         gcp_workload_identity: bool,
+        manage_network_policies: bool,
+        manage_secret_provider_classes: bool,
         operator_namespace: String,
         operator_label_name: Option<String>,
         operator_label_value: Option<String>,
@@ -283,6 +289,8 @@ impl State {
             registry: prometheus::Registry::default(),
             aws_pod_identity_association_cluster,
             gcp_workload_identity,
+            manage_network_policies,
+            manage_secret_provider_classes,
             operator_namespace,
             operator_label_name,
             operator_label_value,
