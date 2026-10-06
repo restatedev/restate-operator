@@ -3,7 +3,9 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
-use k8s_openapi::api::core::v1::ObjectReference;
+use k8s_openapi::api::core::v1::{
+    Capabilities, ObjectReference, PodSecurityContext, SeccompProfile, SecurityContext,
+};
 use kube::Resource;
 use kube::client::Client;
 use kube::runtime::WatchStreamExt;
@@ -320,6 +322,38 @@ pub fn service_url(
     }
 
     Ok(url)
+}
+
+/// Pod security context for every pod the operator creates. Together with
+/// [`restricted_container_security_context`] this satisfies the Pod Security Standards
+/// `restricted` profile.
+pub fn restricted_pod_security_context() -> PodSecurityContext {
+    PodSecurityContext {
+        run_as_non_root: Some(true),
+        run_as_user: Some(1000),
+        run_as_group: Some(3000),
+        fs_group: Some(2000),
+        fs_group_change_policy: Some("OnRootMismatch".into()),
+        seccomp_profile: Some(SeccompProfile {
+            type_: "RuntimeDefault".into(),
+            localhost_profile: None,
+        }),
+        ..Default::default()
+    }
+}
+
+/// Container security context for every container the operator creates.
+pub fn restricted_container_security_context() -> SecurityContext {
+    SecurityContext {
+        run_as_non_root: Some(true),
+        read_only_root_filesystem: Some(true),
+        allow_privilege_escalation: Some(false),
+        capabilities: Some(Capabilities {
+            drop: Some(vec!["ALL".into()]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
 }
 
 /// Creates a pre-warmed reflector stream that can be passed to controller methods.
