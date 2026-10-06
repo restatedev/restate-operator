@@ -24,6 +24,8 @@ canaryImage: null # defaults to "alpine:3.21"; image must provide cat, grep, wge
 podSecurityContext:
   fsGroup: 2000
   fsGroupChangePolicy: "OnRootMismatch"
+  seccompProfile:
+    type: RuntimeDefault
 securityContext:
   capabilities:
     drop:

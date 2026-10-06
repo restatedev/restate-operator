@@ -12,6 +12,9 @@ existing non-root user, seccomp `RuntimeDefault`, no privilege escalation and re
   as the image's default user (root for `alpine`); they now run as uid 1000 / gid 3000
 - the Restate Cloud tunnel Deployment
 
+The Helm chart's own operator pod now defaults to `podSecurityContext.seccompProfile.type: RuntimeDefault`, the one
+`restricted` requirement it was missing.
+
 ### Why This Matters
 In namespaces enforcing `pod-security.kubernetes.io/enforce=restricted` (or an equivalent cluster-wide default),
 the pods were rejected with `violates PodSecurity "restricted:latest"`. The StatefulSet was created but `restate-0`
