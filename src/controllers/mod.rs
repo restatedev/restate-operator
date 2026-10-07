@@ -342,10 +342,11 @@ pub fn restricted_pod_security_context() -> PodSecurityContext {
     }
 }
 
-/// Container security context for every container the operator creates.
+/// Container security context for every container the operator creates. `runAsNonRoot` is
+/// left to [`restricted_pod_security_context`], so it also covers containers the operator
+/// doesn't build itself, such as `spec.compute.sidecars`.
 pub fn restricted_container_security_context() -> SecurityContext {
     SecurityContext {
-        run_as_non_root: Some(true),
         read_only_root_filesystem: Some(true),
         allow_privilege_escalation: Some(false),
         capabilities: Some(Capabilities {
