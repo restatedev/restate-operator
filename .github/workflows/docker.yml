@@ -7,5 +7,10 @@ on:
 jobs:
   build-docker-image:
     name: Build docker image
-    uses: restatedev/restate/.github/workflows/docker.yml@main
+    # this workflow is from the restate repo, so we pin the revision to
+    # protect ourselves from unexpected changes that might impact CI in
+    # this repo.
+    uses: restatedev/restate/.github/workflows/docker.yml@f901a8e725cb141e3c1919a837945c978d52fb80
+    with:
+      cargoPackage: restate-operator
     secrets: inherit
