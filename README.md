@@ -80,6 +80,8 @@ The `RestateCluster` CRD defines a Restate cluster. The operator watches for the
 **All other traffic is denied by default.**
 
 The default behaviour can be disabled with `spec.security.disableNetworkPolicies: true`.
+To stop the operator managing NetworkPolicies at all, for every cluster, see
+[Opting Out of NetworkPolicy and SecretProviderClass Management](#opting-out-of-networkpolicy-and-secretproviderclass-management).
 Alternatively, you can add new allowed inbound callers of the Restate ports with `spec.security.networkPeers.{ingress,admin,node}`, which are arrays of [`NetworkPolicyPeer`](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#networkpolicypeer-v1-networking-k8s-io).
 You can allow new outbound destinations by adding to the `spec.security.networkEgressRules` list, which is an array of [`NetworkPolicyEgressRule`](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#networkpolicyegressrule-v1-networking-k8s-io).
 
@@ -859,6 +861,29 @@ Restate to public IP access, as well as to obtain VPC flow logs.
 
 The operator can create `SecurityGroupPolicy` objects which put Restate pods into a set of Security Groups. If this CRD
 is installed, you may provide `awsPodSecurityGroups` in the `RestateCluster` spec.
+
+### Opting Out of NetworkPolicy and SecretProviderClass Management
+
+Setting `MANAGE_NETWORK_POLICIES=false` or `MANAGE_SECRET_PROVIDER_CLASSES=false` (or the `--manage-network-policies`
+and `--manage-secret-provider-classes` flags; both default to `true`) stops the operator from reading, watching,
+creating, updating or deleting that resource, so it needs no RBAC for it. Existing objects are left as they are.
+
+- `MANAGE_NETWORK_POLICIES=false` applies to every cluster regardless of `spec.security.disableNetworkPolicies`, and
+  the operator's default network isolation is not applied; provide equivalent policies yourself.
+- `MANAGE_SECRET_PROVIDER_CLASSES=false` still allows signing keys from a Kubernetes `secret`. A cluster asking for a
+  `secretProvider` key is rejected with `Ready=False`, reason `SecretProviderClassesDisabled`.
+
+Set them through the Helm chart's `env` value:
+
+```yaml
+env:
+  - name: MANAGE_NETWORK_POLICIES
+    value: "false"
+  - name: MANAGE_SECRET_PROVIDER_CLASSES
+    value: "false"
+```
+
+The chart's ClusterRole still grants both resources; remove those grants yourself to run without the permissions.
 
 ## Troubleshooting
 
