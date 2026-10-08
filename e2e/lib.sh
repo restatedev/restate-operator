@@ -135,9 +135,20 @@ build_and_load_images() {
 
 deploy_operator() {
   step "Deploy operator"
+  # The chart depends on restate-operator-crds through a local file:// path, and
+  # both the vendored copy under charts/restate-operator-helm/charts/ and Chart.lock
+  # are gitignored. A fresh checkout needs the dependency resolved before install.
+  helm dependency update "${REPO_ROOT}/charts/restate-operator-helm" >/dev/null \
+    || die "could not resolve the operator chart's dependencies"
+
+  # installCrds=false: the CRDs are applied directly from crd/ in install_crds(),
+  # which is the copy under test. Letting the subchart install them too would have
+  # Helm try to adopt objects created by kubectl, which it refuses for want of its
+  # own ownership labels.
   helm --kube-context "$CTX" upgrade --install restate-operator \
     "${REPO_ROOT}/charts/restate-operator-helm" \
     --namespace "$OPERATOR_NS" --create-namespace \
+    --set installCrds=false \
     --set version=local --wait --timeout 180s
   # force a fresh pod so a rebuilt :local image is picked up
   kc -n "$OPERATOR_NS" rollout restart deployment -l app=restate-operator >/dev/null 2>&1 || true
