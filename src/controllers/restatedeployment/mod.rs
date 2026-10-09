@@ -1,6 +1,7 @@
 pub(crate) mod cleanup;
 pub mod controller;
 pub(crate) mod registration;
+pub(crate) mod retry;
 
 mod reconcilers;
 
