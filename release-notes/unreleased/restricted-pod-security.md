@@ -3,8 +3,9 @@
 ## Bug Fix
 
 ### What Changed
-Every pod the operator creates now sets `runAsNonRoot: true` and drops all Linux capabilities, in addition to the
-existing non-root user, seccomp `RuntimeDefault`, no privilege escalation and read-only root filesystem. This covers:
+Every pod the operator creates now sets `runAsNonRoot: true` at pod level, and every container it creates drops all
+Linux capabilities, in addition to the existing non-root user, seccomp `RuntimeDefault`, no privilege escalation and
+read-only root filesystem. This covers:
 
 - the Restate StatefulSet container
 - the `combine-ca-certs` init container (`spec.security.trustedCaCerts`)
@@ -23,5 +24,15 @@ never was, so with a `WaitForFirstConsumer` StorageClass the cluster reported `P
 ### Impact on Users
 - Upgrading the operator changes the pod template, so existing RestateCluster StatefulSets and tunnel Deployments
   roll once.
+- Clusters using PodIdentityAssociation (PIA) or GCP Workload Identity (WI) recreate their canary Job once on
+  upgrade, because a Job's pod template is immutable. Until the new Job succeeds, the cluster briefly reports
+  `Ready=False` with reason `PodIdentityAssociationCanaryPending` or `WorkloadIdentityCanaryPending`.
 - A custom `canaryImage` must be able to run `cat`, `grep` and `wget` as a non-root user.
-- `spec.compute.sidecars` and RestateDeployment pods come from your own spec and are unchanged.
+- `runAsNonRoot: true` at pod level also applies to containers in `spec.compute.sidecars`. A sidecar that sets
+  `runAsUser: 0` fails to start after the upgrade (`container's runAsUser breaks non-root policy`). Sidecars without
+  their own `runAsUser` already ran as uid 1000 from the pod security context and are unaffected.
+- RestateDeployment pods come from your own spec and are unchanged.
+
+### Migration Guidance
+If a sidecar has to run as root, set `runAsNonRoot: false` in that container's `securityContext`; the container-level
+value overrides the pod-level one. Such a pod is not admitted under `restricted` Pod Security.

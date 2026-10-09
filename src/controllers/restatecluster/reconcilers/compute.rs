@@ -1163,8 +1163,7 @@ async fn run_canary_job(
 
             return Err(Error::NotReady {
                 reason: format!("{}CanaryPending", config.reason_prefix),
-                message: "Canary Job has not yet succeeded; recreated Job after tolerations change"
-                    .into(),
+                message: "Canary Job has not yet succeeded; recreated Job after spec change".into(),
                 requeue_after: None,
             });
         }
@@ -2421,6 +2420,21 @@ mod tests {
         assert_eq!(
             container.command.as_ref().unwrap(),
             &vec!["echo".to_string(), "hello".to_string()]
+        );
+
+        let pod_sc = pod_spec.security_context.as_ref().unwrap();
+        assert_eq!(pod_sc.run_as_non_root, Some(true));
+        assert_eq!(pod_sc.run_as_user, Some(1000));
+        assert_eq!(
+            pod_sc.seccomp_profile.as_ref().unwrap().type_,
+            "RuntimeDefault"
+        );
+
+        let sc = container.security_context.as_ref().unwrap();
+        assert_eq!(sc.allow_privilege_escalation, Some(false));
+        assert_eq!(
+            sc.capabilities.as_ref().unwrap().drop,
+            Some(vec!["ALL".to_string()])
         );
     }
 
