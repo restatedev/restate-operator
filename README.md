@@ -868,22 +868,21 @@ Setting `MANAGE_NETWORK_POLICIES=false` or `MANAGE_SECRET_PROVIDER_CLASSES=false
 and `--manage-secret-provider-classes` flags; both default to `true`) stops the operator from reading, watching,
 creating, updating or deleting that resource, so it needs no RBAC for it. Existing objects are left as they are.
 
-- `MANAGE_NETWORK_POLICIES=false` applies to every cluster regardless of `spec.security.disableNetworkPolicies`, and
-  the operator's default network isolation is not applied; provide equivalent policies yourself.
+- `MANAGE_NETWORK_POLICIES=false` applies to every cluster regardless of `spec.security.disableNetworkPolicies`.
+  New clusters get no network isolation from the operator, and the policies of existing clusters stay as they were
+  last applied; provide and maintain policies yourself. A cluster that sets `networkPeers`, `networkEgressRules` or
+  `allowOperatorAccessToAdmin: false` without `disableNetworkPolicies: true` is still reconciled in full, but reports
+  `Ready=False`, reason `NetworkPoliciesDisabled`, rather than silently running without the settings it asked for.
 - `MANAGE_SECRET_PROVIDER_CLASSES=false` still allows signing keys from a Kubernetes `secret`. A cluster asking for a
   `secretProvider` key is rejected with `Ready=False`, reason `SecretProviderClassesDisabled`.
 
-Set them through the Helm chart's `env` value:
+With the Helm chart, set the matching values rather than the environment variables through `env`. They set the
+environment variables and drop the resource from the chart's ClusterRole:
 
 ```yaml
-env:
-  - name: MANAGE_NETWORK_POLICIES
-    value: "false"
-  - name: MANAGE_SECRET_PROVIDER_CLASSES
-    value: "false"
+manageNetworkPolicies: false
+manageSecretProviderClasses: false
 ```
-
-The chart's ClusterRole still grants both resources; remove those grants yourself to run without the permissions.
 
 ## Troubleshooting
 

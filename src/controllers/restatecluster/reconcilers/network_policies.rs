@@ -272,6 +272,67 @@ fn allow_egress(
     }
 }
 
+/// The network settings of a cluster that only take effect through the operator's
+/// NetworkPolicies, so go unapplied while management is off. A cluster with
+/// `disableNetworkPolicies: true` has opted out of them already, so nothing it sets is ignored.
+/// `networkPeers` counts as soon as one of its lists is set, since an empty list allows all
+/// traffic; `networkEgressRules: []` adds no rule and `allowOperatorAccessToAdmin: true` is what
+/// no policies give anyway, so neither counts.
+fn ignored_network_settings(security: Option<&RestateClusterSecurity>) -> Vec<&'static str> {
+    let Some(security) = security else {
+        return Vec::new();
+    };
+    if security.disable_network_policies == Some(true) {
+        return Vec::new();
+    }
+
+    let mut ignored = Vec::new();
+    if security.network_peers.as_ref().is_some_and(|peers| {
+        peers.ingress.is_some()
+            || peers.admin.is_some()
+            || peers.node.is_some()
+            || peers.metrics.is_some()
+    }) {
+        ignored.push("networkPeers");
+    }
+    if security
+        .network_egress_rules
+        .as_ref()
+        .is_some_and(|rules| !rules.is_empty())
+    {
+        ignored.push("networkEgressRules");
+    }
+    if security.allow_operator_access_to_admin == Some(false) {
+        ignored.push("allowOperatorAccessToAdmin: false");
+    }
+    ignored
+}
+
+/// Rejects a cluster whose network settings are ignored because NetworkPolicy management is off
+/// operator-wide, instead of letting it run without the isolation it asked for. This runs after
+/// the rest of the cluster is reconciled, so the cluster keeps working while it is rejected: its
+/// existing policies stay as they are, and only the Ready condition reports it.
+pub fn reject_ignored_network_settings(
+    ctx: &Context,
+    security: Option<&RestateClusterSecurity>,
+) -> Result<(), Error> {
+    if ctx.manage_network_policies {
+        return Ok(());
+    }
+    let ignored = ignored_network_settings(security);
+    if ignored.is_empty() {
+        return Ok(());
+    }
+    Err(Error::NotReady {
+        message: format!(
+            "spec.security sets {} but NetworkPolicy management is disabled operator-wide; set disableNetworkPolicies: true, remove them, or enable NetworkPolicy management",
+            ignored.join(", ")
+        ),
+        reason: "NetworkPoliciesDisabled".into(),
+        requeue_after: None,
+    })
+}
+
 pub async fn reconcile_network_policies(
     ctx: &Context,
     namespace: &str,
@@ -281,7 +342,9 @@ pub async fn reconcile_network_policies(
 ) -> Result<(), Error> {
     if !ctx.manage_network_policies {
         // Management is off operator-wide: leave whatever policies exist alone, including the
-        // cleanup that spec.security.disableNetworkPolicies would otherwise ask for.
+        // cleanup that spec.security.disableNetworkPolicies would otherwise ask for. Settings
+        // this leaves unapplied are reported by `reject_ignored_network_settings`, once the
+        // rest of the cluster is reconciled.
         return Ok(());
     }
 
@@ -481,54 +544,11 @@ async fn delete_network_policy(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use kube::runtime::reflector;
+    use std::sync::atomic::Ordering;
 
     use super::*;
-    use crate::Metrics;
-    use crate::controllers::State;
-
-    /// A context whose apiserver fails every request, along with how many it received. The
-    /// SecretProviderClass CRD counts as installed, so only the switches keep requests away.
-    fn context_with_failing_client(
-        manage_network_policies: bool,
-        manage_secret_provider_classes: bool,
-    ) -> (Arc<Context>, Arc<AtomicUsize>) {
-        let requests = Arc::new(AtomicUsize::new(0));
-        let counter = requests.clone();
-        let service = tower::service_fn(move |_: http::Request<kube::client::Body>| {
-            counter.fetch_add(1, Ordering::SeqCst);
-            async {
-                Err::<http::Response<kube::client::Body>, _>(std::io::Error::other("no apiserver"))
-            }
-        });
-        let state = State::new(
-            None,
-            false,
-            manage_network_policies,
-            manage_secret_provider_classes,
-            "restate-operator".into(),
-            None,
-            None,
-            "tunnel:latest".into(),
-            "cluster.local".into(),
-            "alpine:3.21".into(),
-            None,
-            None,
-        );
-        let ctx = Context::new(
-            kube::Client::new(service, "default"),
-            Metrics::default(),
-            state,
-            reflector::store().0,
-            reflector::store().0,
-            false,
-            true,
-        );
-        (ctx, requests)
-    }
+    use crate::controllers::restatecluster::reconcilers::test_support::context_with_failing_client;
+    use crate::resources::restateclusters::{NetworkPolicyEgressRule, RestateClusterNetworkPeers};
 
     #[tokio::test]
     async fn unmanaged_network_policies_are_left_alone() {
@@ -547,6 +567,70 @@ mod tests {
                 .await
                 .unwrap();
         }
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn unmanaged_network_policies_reject_ignored_settings() {
+        let (ctx, requests) = context_with_failing_client(false, true);
+
+        let rejected = [
+            // an empty peer list allows all traffic, so it counts as a setting
+            RestateClusterSecurity {
+                network_peers: Some(RestateClusterNetworkPeers {
+                    ingress: Some(vec![]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            RestateClusterSecurity {
+                network_egress_rules: Some(vec![NetworkPolicyEgressRule {
+                    ports: None,
+                    to: None,
+                }]),
+                ..Default::default()
+            },
+            RestateClusterSecurity {
+                allow_operator_access_to_admin: Some(false),
+                ..Default::default()
+            },
+        ];
+        for security in &rejected {
+            let result = reject_ignored_network_settings(&ctx, Some(security));
+            assert!(matches!(
+                result,
+                Err(Error::NotReady { reason, .. }) if reason == "NetworkPoliciesDisabled"
+            ));
+        }
+
+        // values that would not change the policies anyway lose nothing
+        let no_ops = [
+            RestateClusterSecurity::default(),
+            RestateClusterSecurity {
+                network_peers: Some(RestateClusterNetworkPeers::default()),
+                network_egress_rules: Some(vec![]),
+                allow_operator_access_to_admin: Some(true),
+                ..Default::default()
+            },
+            // a cluster that opted out of NetworkPolicies itself
+            RestateClusterSecurity {
+                disable_network_policies: Some(true),
+                network_peers: Some(RestateClusterNetworkPeers {
+                    ingress: Some(vec![]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ];
+        reject_ignored_network_settings(&ctx, None).unwrap();
+        for security in &no_ops {
+            reject_ignored_network_settings(&ctx, Some(security)).unwrap();
+        }
+
+        // with management on there is nothing to reject
+        let (managed, _) = context_with_failing_client(true, true);
+        reject_ignored_network_settings(&managed, Some(&rejected[0])).unwrap();
+
         assert_eq!(requests.load(Ordering::SeqCst), 0);
     }
 }

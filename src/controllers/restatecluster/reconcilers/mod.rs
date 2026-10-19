@@ -7,6 +7,8 @@ pub mod network_policies;
 pub mod provisioning;
 mod quantity_parser;
 pub mod signing_key;
+#[cfg(test)]
+mod test_support;
 
 // resource_labels returns labels to apply to all created resources on top of the RestateCluster labels
 // it is not safe to change these; statefulset volume template labels are immutable

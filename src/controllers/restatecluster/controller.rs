@@ -50,7 +50,9 @@ use crate::resources::securitygrouppolicies::SecurityGroupPolicy;
 use crate::{Error, Metrics, Result, telemetry};
 
 use super::reconcilers::compute::reconcile_compute;
-use super::reconcilers::network_policies::reconcile_network_policies;
+use super::reconcilers::network_policies::{
+    reconcile_network_policies, reject_ignored_network_settings,
+};
 use super::reconcilers::object_meta;
 use super::reconcilers::signing_key::reconcile_signing_key;
 
@@ -259,6 +261,11 @@ impl RestateCluster {
             signing_key,
         )
         .await?;
+
+        // Last, so that a rejected cluster is still reconciled in full and only its Ready
+        // condition reports the settings that NetworkPolicy management being off leaves
+        // unapplied.
+        reject_ignored_network_settings(&ctx, self.spec.security.as_ref())?;
 
         Ok(())
     }

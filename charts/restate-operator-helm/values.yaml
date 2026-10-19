@@ -20,6 +20,10 @@ awsPodIdentityAssociationCluster: null
 gcpWorkloadIdentity: null
 clusterDns: null # defaults to "cluster.local" in the operator binary
 canaryImage: null # defaults to "alpine:3.21"; image must provide cat, grep, wget and a CA bundle at /etc/ssl/certs/ca-certificates.crt
+# When false, the operator never reads, watches, creates, updates or deletes that resource, and the ClusterRole grants
+# no access to it. Use these rather than MANAGE_NETWORK_POLICIES / MANAGE_SECRET_PROVIDER_CLASSES in `env`.
+manageNetworkPolicies: true
+manageSecretProviderClasses: true
 
 podSecurityContext:
   fsGroup: 2000
