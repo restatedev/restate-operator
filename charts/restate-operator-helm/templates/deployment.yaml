@@ -86,6 +86,14 @@ spec:
             - name: CLUSTER_DNS
               value: {{ .Values.clusterDns }}
           {{- end }}
+          {{- if ne (include "controller.manageNetworkPolicies" .) "true" }}
+            - name: MANAGE_NETWORK_POLICIES
+              value: "false"
+          {{- end }}
+          {{- if ne (include "controller.manageSecretProviderClasses" .) "true" }}
+            - name: MANAGE_SECRET_PROVIDER_CLASSES
+              value: "false"
+          {{- end }}
           {{- with .Values.env }}
             {{- toYaml . | nindent 12 }}
           {{- end }}

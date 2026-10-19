@@ -50,7 +50,9 @@ use crate::resources::securitygrouppolicies::SecurityGroupPolicy;
 use crate::{Error, Metrics, Result, telemetry};
 
 use super::reconcilers::compute::reconcile_compute;
-use super::reconcilers::network_policies::reconcile_network_policies;
+use super::reconcilers::network_policies::{
+    reconcile_network_policies, reject_ignored_network_settings,
+};
 use super::reconcilers::object_meta;
 use super::reconcilers::signing_key::reconcile_signing_key;
 
@@ -77,6 +79,10 @@ pub(super) struct Context {
     pub security_group_policy_installed: bool,
     // Whether the SecretProviderClass CRD is installed
     pub secret_provider_class_installed: bool,
+    // Whether we may touch NetworkPolicies at all; when false, the per-cluster settings are ignored
+    pub manage_network_policies: bool,
+    // Whether we may touch SecretProviderClasses at all, independently of whether the CRD is installed
+    pub manage_secret_provider_classes: bool,
     // Whether GCP Workload Identity management is enabled
     pub gcp_workload_identity: bool,
     /// The cluster DNS suffix (e.g. "cluster.local")
@@ -113,6 +119,8 @@ impl Context {
             operator_label_value: state.operator_label_value.clone(),
             security_group_policy_installed,
             secret_provider_class_installed,
+            manage_network_policies: state.manage_network_policies,
+            manage_secret_provider_classes: state.manage_secret_provider_classes,
             gcp_workload_identity: state.gcp_workload_identity,
             cluster_dns: state.cluster_dns.clone(),
             canary_image: state.canary_image.clone(),
@@ -253,6 +261,11 @@ impl RestateCluster {
             signing_key,
         )
         .await?;
+
+        // Last, so that a rejected cluster is still reconciled in full and only its Ready
+        // condition reports the settings that NetworkPolicy management being off leaves
+        // unapplied.
+        reject_ignored_network_settings(&ctx, self.spec.security.as_ref())?;
 
         Ok(())
     }
@@ -552,11 +565,6 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         .default_backoff()
         .predicate_filter(changed_predicate.combine(status_predicate_serde));
 
-    let np_watcher = metadata_watcher(np_api, cfg.clone())
-        .map(ensure_deletion_change)
-        .touched_objects()
-        .predicate_filter(changed_predicate);
-
     let ns_watcher = metadata_watcher(ns_api, cfg.clone())
         .map(ensure_deletion_change)
         .touched_objects()
@@ -591,7 +599,6 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         .owns_stream(ns_watcher)
         .owns_stream(svcacc_watcher)
         .owns_stream(pdb_watcher)
-        .owns_stream(np_watcher)
         .owns_stream(ss_reflector)
         .watches_stream(
             pvc_meta_reflector,
@@ -607,6 +614,16 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
                 Some(ObjectRef::new(instance))
             },
         );
+    let controller = if state.manage_network_policies {
+        let np_watcher = metadata_watcher(np_api, cfg.clone())
+            .map(ensure_deletion_change)
+            .touched_objects()
+            .predicate_filter(changed_predicate);
+
+        controller.owns_stream(np_watcher)
+    } else {
+        controller
+    };
     let controller = if pod_identity_association_installed {
         let pia_watcher = watcher(pia_api, cfg.clone())
             .map(ensure_deletion_change)
@@ -639,7 +656,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     } else {
         controller
     };
-    let controller = if secret_provider_class_installed {
+    let controller = if state.manage_secret_provider_classes && secret_provider_class_installed {
         let spc_watcher = metadata_watcher(spc_api, cfg.clone())
             .map(ensure_deletion_change)
             .touched_objects()

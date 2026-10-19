@@ -25,6 +25,29 @@ struct Arguments {
     )]
     gcp_workload_identity: bool,
 
+    /// Whether to manage NetworkPolicies for RestateClusters. When false, the operator never
+    /// reads, watches, creates, updates or deletes them, so it needs no RBAC for them at all.
+    #[arg(
+        long = "manage-network-policies",
+        env = "MANAGE_NETWORK_POLICIES",
+        value_name = "ENABLED",
+        action = clap::ArgAction::Set,
+        default_value = "true"
+    )]
+    manage_network_policies: bool,
+
+    /// Whether to manage SecretProviderClasses for request signing keys. When false, the
+    /// operator never reads, watches, creates, updates or deletes them, and rejects
+    /// RestateClusters that ask for a `secretProvider` signing key.
+    #[arg(
+        long = "manage-secret-provider-classes",
+        env = "MANAGE_SECRET_PROVIDER_CLASSES",
+        value_name = "ENABLED",
+        action = clap::ArgAction::Set,
+        default_value = "true"
+    )]
+    manage_secret_provider_classes: bool,
+
     #[arg(
         long = "operator-namespace",
         env = "OPERATOR_NAMESPACE",
@@ -149,6 +172,8 @@ async fn main() -> anyhow::Result<()> {
     let state = State::new(
         args.aws_pod_identity_association_cluster,
         args.gcp_workload_identity,
+        args.manage_network_policies,
+        args.manage_secret_provider_classes,
         args.operator_namespace,
         args.operator_label_name,
         args.operator_label_value,
