@@ -41,6 +41,40 @@ pub struct RestateClusterSpec {
     pub security: Option<RestateClusterSecurity>,
     /// TOML-encoded Restate config file
     pub config: Option<String>,
+    /// How a change to `config` reaches running pods. Defaults to `restart`.
+    /// - `restart`: the config lives in a ConfigMap named after its content hash, so every
+    ///   change rolls the StatefulSet and all settings take effect.
+    /// - `live`: the config lives in a ConfigMap with a fixed name and is updated in place;
+    ///   the kubelet refreshes the mounted file (typically within a minute) and Restate's
+    ///   config watcher reloads it without a restart. Only settings Restate reads at runtime
+    ///   take effect; settings read once at startup wait for the next restart.
+    // Added with v2.7.2
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "config_reload_schema")]
+    pub config_reload: Option<ConfigReload>,
+}
+
+/// How a change to `spec.config` reaches running Restate pods
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConfigReload {
+    /// Restart (default): the config is stored in a ConfigMap named after its content hash, so
+    /// every change rolls the StatefulSet and all settings take effect
+    #[default]
+    Restart,
+    /// Live: the config is stored in a ConfigMap with a fixed name and updated in place. The
+    /// kubelet refreshes the mounted file (typically within a minute) and Restate's config
+    /// watcher reloads it without a restart. Only settings Restate reads at runtime take
+    /// effect; settings read once at startup wait for the next restart
+    Live,
+}
+
+fn config_reload_schema(_g: &mut schemars::SchemaGenerator) -> Schema {
+    schemars::json_schema!({
+        "enum": ["restart", "live"],
+        "type": "string",
+        "nullable": true
+    })
 }
 
 /// Cluster-wide configuration options
