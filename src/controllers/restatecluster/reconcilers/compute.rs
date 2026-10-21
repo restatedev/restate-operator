@@ -969,10 +969,24 @@ pub async fn reconcile_compute(
             requeue_after: Some(Duration::from_secs(5)),
         });
     }
-    let remembered_strategy = cluster_annotations
-        .get(UPDATE_STRATEGY_ANNOTATION)
-        .map(|strategy| serde_json::from_str::<StatefulSetUpdateStrategy>(strategy))
-        .transpose()?;
+    let ss_cached = ctx
+        .ss_store
+        .get(&ObjectRef::new(RESTATE_STATEFULSET_NAME).within(name))
+        .is_some();
+    // the cached RestateCluster may not show the annotation yet when the delete that triggered
+    // this reconcile was observed first, so a recreate reads it from the API server
+    let remembered_strategy = if ss_cached {
+        cluster_annotations.get(UPDATE_STRATEGY_ANNOTATION).cloned()
+    } else {
+        rc_api
+            .get(name)
+            .await?
+            .annotations()
+            .get(UPDATE_STRATEGY_ANNOTATION)
+            .cloned()
+    }
+    .map(|strategy| serde_json::from_str::<StatefulSetUpdateStrategy>(&strategy))
+    .transpose()?;
 
     let stateful_set = restate_statefulset(
         base_metadata,
@@ -985,14 +999,10 @@ pub async fn reconcile_compute(
     validate_pod_volumes(&stateful_set)?;
     let ss = match remembered_strategy {
         Some(update_strategy) => {
-            let ss = if ctx
-                .ss_store
-                .get(&ObjectRef::new(RESTATE_STATEFULSET_NAME).within(name))
-                .is_none()
-            {
-                recreate_stateful_set(name, &ss_api, stateful_set, update_strategy).await?
-            } else {
+            let ss = if ss_cached {
                 apply_stateful_set(name, &ss_api, stateful_set).await?
+            } else {
+                recreate_stateful_set(name, &ss_api, stateful_set, update_strategy).await?
             };
             remember_update_strategy(&rc_api, name, None).await?;
             ss
