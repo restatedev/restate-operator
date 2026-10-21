@@ -3,7 +3,9 @@ use std::convert::Into;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetSpec, StatefulSetStatus};
+use k8s_openapi::api::apps::v1::{
+    StatefulSet, StatefulSetSpec, StatefulSetStatus, StatefulSetUpdateStrategy,
+};
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
     ConfigMap, ConfigMapVolumeSource, Container, ContainerPort, EmptyDirVolumeSource, EnvVar,
@@ -16,9 +18,10 @@ use k8s_openapi::api::policy::v1::{PodDisruptionBudget, PodDisruptionBudgetSpec}
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
-use kube::api::{DeleteParams, ListParams, Preconditions, PropagationPolicy};
+use kube::api::{DeleteParams, ListParams, PostParams, Preconditions, PropagationPolicy};
 use kube::core::PartialObjectMeta;
 use kube::runtime::reflector::{ObjectRef, Store};
+use kube::runtime::wait::{await_condition, conditions};
 use kube::{
     Api, ResourceExt,
     api::{Patch, PatchParams},
@@ -945,7 +948,7 @@ pub async fn reconcile_compute(
     apply_pod_disruption_budget(name, &pdb_api, restate_pod_disruption_budget(base_metadata))
         .await?;
 
-    change_statefulset_storage(
+    let recreate_with = change_statefulset_storage(
         name,
         base_metadata,
         &ss_api,
@@ -965,7 +968,12 @@ pub async fn reconcile_compute(
         &ctx.canary_image,
     );
     validate_pod_volumes(&stateful_set)?;
-    let ss = apply_stateful_set(name, &ss_api, stateful_set).await?;
+    let ss = match recreate_with {
+        Some(update_strategy) => {
+            create_stateful_set(name, &ss_api, stateful_set, update_strategy).await?
+        }
+        None => apply_stateful_set(name, &ss_api, stateful_set).await?,
+    };
 
     // Handle cluster provisioning if enabled
     // This must happen BEFORE validate_stateful_set_status because pods only become Ready
@@ -1494,7 +1502,7 @@ async fn change_statefulset_storage(
     pvc_api: &Api<PersistentVolumeClaim>,
     pvc_meta_store: &Store<PartialObjectMeta<PersistentVolumeClaim>>,
     storage: &RestateClusterStorage,
-) -> Result<(), Error> {
+) -> Result<Option<StatefulSetUpdateStrategy>, Error> {
     let params: PatchParams = PatchParams::apply("restate-operator").force();
     let resources = Some(restate_pvc_resources(storage));
 
@@ -1560,7 +1568,7 @@ async fn change_statefulset_storage(
         // 1. first run and it hasn't ever been created => do nothing
         // 3. we deleted it in a previous reconciliation, and the cache reflects this => do nothing
         // 2. it has just been created, but cache doesn't have it yet. we'll reconcile again when it enters cache => do nothing
-        None => return Ok(()),
+        None => return Ok(None),
     };
 
     let existing_storage_spec = existing
@@ -1584,7 +1592,7 @@ async fn change_statefulset_storage(
             if bytes == storage.storage_request_bytes
                 && existing_vac == storage.volume_attributes_class_name.as_deref() =>
         {
-            return Ok(());
+            return Ok(None);
         }
         _ => {}
     }
@@ -1598,7 +1606,8 @@ async fn change_statefulset_storage(
     // we have already updated the pvcs, we just need to delete and recreate the statefulset
     // we *must* delete with an orphan propagation policy; this means the deletion will *not* cascade down
     // to the pods that this statefulset owns.
-    // recreation will happen later in the reconcile loop
+    // the caller recreates it once the delete has completed
+    let uid = existing.uid().unwrap_or_default();
     ss_api
         .delete(
             RESTATE_STATEFULSET_NAME,
@@ -1607,7 +1616,7 @@ async fn change_statefulset_storage(
                 grace_period_seconds: Some(0),
                 preconditions: Some(Preconditions {
                     // ensure that the ss hasn't changed since we made the above checks
-                    uid: existing.uid(),
+                    uid: Some(uid.clone()),
                     resource_version: None,
                 }),
                 ..Default::default()
@@ -1615,7 +1624,67 @@ async fn change_statefulset_storage(
         )
         .await?;
 
-    Ok(())
+    // The orphan finalizer keeps the StatefulSet until its pods are released. Recreating it in
+    // this reconcile, rather than a later one that finds it gone from the cache, is what lets the
+    // new one keep the old update strategy.
+    let not_deleted = |message: String| Error::NotReady {
+        reason: "StatefulSetDeleting".into(),
+        message,
+        requeue_after: Some(Duration::from_secs(5)),
+    };
+    tokio::time::timeout(
+        STATEFULSET_DELETE_TIMEOUT,
+        await_condition(
+            ss_api.clone(),
+            RESTATE_STATEFULSET_NAME,
+            conditions::is_deleted(&uid),
+        ),
+    )
+    .await
+    .map_err(|_| {
+        not_deleted(format!(
+            "StatefulSet {RESTATE_STATEFULSET_NAME} is still being deleted"
+        ))
+    })?
+    .map_err(|err| {
+        not_deleted(format!(
+            "waiting for StatefulSet {RESTATE_STATEFULSET_NAME} to be deleted: {err}"
+        ))
+    })?;
+
+    Ok(Some(
+        existing
+            .spec
+            .as_ref()
+            .and_then(|spec| spec.update_strategy.clone())
+            .unwrap_or_default(),
+    ))
+}
+
+const STATEFULSET_DELETE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Recreates the StatefulSet deleted for a storage change, with the old one's update strategy.
+/// Created rather than applied, so the strategy is not part of the operator's applied
+/// configuration: later applies, which omit it, leave it in place, and an OnDelete set for a
+/// graceful roll survives instead of becoming the default RollingUpdate.
+async fn create_stateful_set(
+    namespace: &str,
+    ss_api: &Api<StatefulSet>,
+    mut ss: StatefulSet,
+    update_strategy: StatefulSetUpdateStrategy,
+) -> Result<StatefulSet, Error> {
+    if let Some(spec) = ss.spec.as_mut() {
+        spec.update_strategy = Some(update_strategy);
+    }
+    let params = PostParams {
+        field_manager: Some("restate-operator".into()),
+        ..Default::default()
+    };
+    debug!(
+        "Recreating Stateful Set {} in namespace {}",
+        RESTATE_STATEFULSET_NAME, namespace
+    );
+    Ok(ss_api.create(&params, &ss).await?)
 }
 
 async fn apply_stateful_set(
