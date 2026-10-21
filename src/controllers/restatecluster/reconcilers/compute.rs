@@ -21,7 +21,6 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::{DeleteParams, ListParams, Preconditions, PropagationPolicy};
 use kube::core::PartialObjectMeta;
 use kube::runtime::reflector::{ObjectRef, Store};
-use kube::runtime::wait::{await_condition, conditions};
 use kube::{
     Api, ResourceExt,
     api::{Patch, PatchParams},
@@ -38,7 +37,7 @@ use crate::resources::podidentityassociations::{
     PodIdentityAssociation, PodIdentityAssociationSpec,
 };
 use crate::resources::restateclusters::{
-    RestateClusterSpec, RestateClusterStatus, RestateClusterStorage, TrustedCACert,
+    RestateCluster, RestateClusterSpec, RestateClusterStatus, RestateClusterStorage, TrustedCACert,
 };
 use crate::resources::securitygrouppolicies::{
     SecurityGroupPolicy, SecurityGroupPolicySecurityGroups, SecurityGroupPolicySpec,
@@ -716,6 +715,7 @@ pub async fn reconcile_compute(
     // name of the RestateCluster is also the namespace
     name: &str,
     base_metadata: &ObjectMeta,
+    cluster_annotations: &BTreeMap<String, String>,
     spec: &RestateClusterSpec,
     status: Option<&RestateClusterStatus>,
     signing_key: Option<(Volume, PathBuf)>,
@@ -948,16 +948,31 @@ pub async fn reconcile_compute(
     apply_pod_disruption_budget(name, &pdb_api, restate_pod_disruption_budget(base_metadata))
         .await?;
 
-    let recreate_with = change_statefulset_storage(
+    let rc_api: Api<RestateCluster> = Api::all(ctx.client.clone());
+    let recreating = change_statefulset_storage(
         name,
         base_metadata,
         &ss_api,
+        &rc_api,
         &ctx.ss_store,
         &pvc_api,
         &ctx.pvc_meta_store,
         &spec.storage,
     )
     .await?;
+    if recreating {
+        return Err(Error::NotReady {
+            reason: "StatefulSetRecreating".into(),
+            message: format!(
+                "Waiting for StatefulSet {RESTATE_STATEFULSET_NAME} to be deleted before recreating it with the new storage"
+            ),
+            requeue_after: Some(Duration::from_secs(5)),
+        });
+    }
+    let remembered_strategy = cluster_annotations
+        .get(UPDATE_STRATEGY_ANNOTATION)
+        .map(|strategy| serde_json::from_str::<StatefulSetUpdateStrategy>(strategy))
+        .transpose()?;
 
     let stateful_set = restate_statefulset(
         base_metadata,
@@ -968,9 +983,19 @@ pub async fn reconcile_compute(
         &ctx.canary_image,
     );
     validate_pod_volumes(&stateful_set)?;
-    let ss = match recreate_with {
+    let ss = match remembered_strategy {
         Some(update_strategy) => {
-            recreate_stateful_set(name, &ss_api, stateful_set, update_strategy).await?
+            let ss = if ctx
+                .ss_store
+                .get(&ObjectRef::new(RESTATE_STATEFULSET_NAME).within(name))
+                .is_none()
+            {
+                recreate_stateful_set(name, &ss_api, stateful_set, update_strategy).await?
+            } else {
+                apply_stateful_set(name, &ss_api, stateful_set).await?
+            };
+            remember_update_strategy(&rc_api, name, None).await?;
+            ss
         }
         None => apply_stateful_set(name, &ss_api, stateful_set).await?,
     };
@@ -1494,15 +1519,17 @@ async fn check_workload_identity(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn change_statefulset_storage(
     namespace: &str,
     base_metadata: &ObjectMeta,
     ss_api: &Api<StatefulSet>,
+    rc_api: &Api<RestateCluster>,
     ss_store: &Store<StatefulSet>,
     pvc_api: &Api<PersistentVolumeClaim>,
     pvc_meta_store: &Store<PartialObjectMeta<PersistentVolumeClaim>>,
     storage: &RestateClusterStorage,
-) -> Result<Option<StatefulSetUpdateStrategy>, Error> {
+) -> Result<bool, Error> {
     let params: PatchParams = PatchParams::apply("restate-operator").force();
     let resources = Some(restate_pvc_resources(storage));
 
@@ -1568,8 +1595,13 @@ async fn change_statefulset_storage(
         // 1. first run and it hasn't ever been created => do nothing
         // 3. we deleted it in a previous reconciliation, and the cache reflects this => do nothing
         // 2. it has just been created, but cache doesn't have it yet. we'll reconcile again when it enters cache => do nothing
-        None => return Ok(None),
+        None => return Ok(false),
     };
+
+    // still held by the orphan finalizer from an earlier delete
+    if existing.metadata.deletion_timestamp.is_some() {
+        return Ok(true);
+    }
 
     let existing_storage_spec = existing
         .spec
@@ -1592,7 +1624,7 @@ async fn change_statefulset_storage(
             if bytes == storage.storage_request_bytes
                 && existing_vac == storage.volume_attributes_class_name.as_deref() =>
         {
-            return Ok(None);
+            return Ok(false);
         }
         _ => {}
     }
@@ -1606,8 +1638,20 @@ async fn change_statefulset_storage(
     // we have already updated the pvcs, we just need to delete and recreate the statefulset
     // we *must* delete with an orphan propagation policy; this means the deletion will *not* cascade down
     // to the pods that this statefulset owns.
-    // the caller recreates it once the delete has completed
-    let uid = existing.uid().unwrap_or_default();
+    // a later reconcile recreates it once the delete has completed, with the update strategy
+    // remembered here
+    remember_update_strategy(
+        rc_api,
+        namespace,
+        Some(
+            &existing
+                .spec
+                .as_ref()
+                .and_then(|spec| spec.update_strategy.clone())
+                .unwrap_or_default(),
+        ),
+    )
+    .await?;
     ss_api
         .delete(
             RESTATE_STATEFULSET_NAME,
@@ -1616,7 +1660,7 @@ async fn change_statefulset_storage(
                 grace_period_seconds: Some(0),
                 preconditions: Some(Preconditions {
                     // ensure that the ss hasn't changed since we made the above checks
-                    uid: Some(uid.clone()),
+                    uid: existing.uid(),
                     resource_version: None,
                 }),
                 ..Default::default()
@@ -1624,44 +1668,30 @@ async fn change_statefulset_storage(
         )
         .await?;
 
-    // The orphan finalizer keeps the StatefulSet until its pods are released. Recreating it in
-    // this reconcile, rather than a later one that finds it gone from the cache, is what lets the
-    // new one keep the old update strategy.
-    let not_deleted = |message: String| Error::NotReady {
-        reason: "StatefulSetDeleting".into(),
-        message,
-        requeue_after: Some(Duration::from_secs(5)),
-    };
-    tokio::time::timeout(
-        STATEFULSET_DELETE_TIMEOUT,
-        await_condition(
-            ss_api.clone(),
-            RESTATE_STATEFULSET_NAME,
-            conditions::is_deleted(&uid),
-        ),
-    )
-    .await
-    .map_err(|_| {
-        not_deleted(format!(
-            "StatefulSet {RESTATE_STATEFULSET_NAME} is still being deleted"
-        ))
-    })?
-    .map_err(|err| {
-        not_deleted(format!(
-            "waiting for StatefulSet {RESTATE_STATEFULSET_NAME} to be deleted: {err}"
-        ))
-    })?;
-
-    Ok(Some(
-        existing
-            .spec
-            .as_ref()
-            .and_then(|spec| spec.update_strategy.clone())
-            .unwrap_or_default(),
-    ))
+    Ok(true)
 }
 
-const STATEFULSET_DELETE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Remembers a StatefulSet's update strategy on the RestateCluster while the StatefulSet is
+/// deleted and recreated for a storage change, which spans reconciles and operator restarts.
+const UPDATE_STRATEGY_ANNOTATION: &str = "restate.dev/recreate-update-strategy";
+
+async fn remember_update_strategy(
+    rc_api: &Api<RestateCluster>,
+    name: &str,
+    update_strategy: Option<&StatefulSetUpdateStrategy>,
+) -> Result<(), Error> {
+    let value = update_strategy.map(serde_json::to_string).transpose()?;
+    rc_api
+        .patch(
+            name,
+            &PatchParams::default(),
+            &Patch::Merge(serde_json::json!({
+                "metadata": { "annotations": { (UPDATE_STRATEGY_ANNOTATION): value } }
+            })),
+        )
+        .await?;
+    Ok(())
+}
 
 /// Recreates the StatefulSet deleted for a storage change, with the old one's update strategy,
 /// so an OnDelete set for a graceful roll does not become the default RollingUpdate. A second
