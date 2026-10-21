@@ -248,6 +248,7 @@ impl RestateCluster {
             &ctx,
             name,
             &base_metadata,
+            self.annotations(),
             &self.spec,
             self.status.as_ref(),
             signing_key,
