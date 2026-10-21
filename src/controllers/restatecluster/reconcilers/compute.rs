@@ -18,7 +18,7 @@ use k8s_openapi::api::policy::v1::{PodDisruptionBudget, PodDisruptionBudgetSpec}
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
-use kube::api::{DeleteParams, ListParams, PostParams, Preconditions, PropagationPolicy};
+use kube::api::{DeleteParams, ListParams, Preconditions, PropagationPolicy};
 use kube::core::PartialObjectMeta;
 use kube::runtime::reflector::{ObjectRef, Store};
 use kube::runtime::wait::{await_condition, conditions};
@@ -970,7 +970,7 @@ pub async fn reconcile_compute(
     validate_pod_volumes(&stateful_set)?;
     let ss = match recreate_with {
         Some(update_strategy) => {
-            create_stateful_set(name, &ss_api, stateful_set, update_strategy).await?
+            recreate_stateful_set(name, &ss_api, stateful_set, update_strategy).await?
         }
         None => apply_stateful_set(name, &ss_api, stateful_set).await?,
     };
@@ -1663,28 +1663,37 @@ async fn change_statefulset_storage(
 
 const STATEFULSET_DELETE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Recreates the StatefulSet deleted for a storage change, with the old one's update strategy.
-/// Created rather than applied, so the strategy is not part of the operator's applied
-/// configuration: later applies, which omit it, leave it in place, and an OnDelete set for a
-/// graceful roll survives instead of becoming the default RollingUpdate.
-async fn create_stateful_set(
+/// Recreates the StatefulSet deleted for a storage change, with the old one's update strategy,
+/// so an OnDelete set for a graceful roll does not become the default RollingUpdate. A second
+/// field manager owns just the strategy: the operator's later applies omit it, and would
+/// otherwise remove it.
+async fn recreate_stateful_set(
     namespace: &str,
     ss_api: &Api<StatefulSet>,
     mut ss: StatefulSet,
     update_strategy: StatefulSetUpdateStrategy,
 ) -> Result<StatefulSet, Error> {
     if let Some(spec) = ss.spec.as_mut() {
-        spec.update_strategy = Some(update_strategy);
+        spec.update_strategy = Some(update_strategy.clone());
     }
-    let params = PostParams {
-        field_manager: Some("restate-operator".into()),
-        ..Default::default()
-    };
     debug!(
         "Recreating Stateful Set {} in namespace {}",
         RESTATE_STATEFULSET_NAME, namespace
     );
-    Ok(ss_api.create(&params, &ss).await?)
+    let ss = apply_stateful_set(namespace, ss_api, ss).await?;
+    ss_api
+        .patch(
+            RESTATE_STATEFULSET_NAME,
+            &PatchParams::apply("restate-operator-update-strategy"),
+            &Patch::Apply(serde_json::json!({
+                "apiVersion": "apps/v1",
+                "kind": "StatefulSet",
+                "metadata": { "name": RESTATE_STATEFULSET_NAME },
+                "spec": { "updateStrategy": update_strategy },
+            })),
+        )
+        .await?;
+    Ok(ss)
 }
 
 async fn apply_stateful_set(
