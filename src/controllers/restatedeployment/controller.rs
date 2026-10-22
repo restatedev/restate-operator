@@ -32,7 +32,7 @@ use tracing::*;
 use crate::controllers::owned_objects::OwnedObjects;
 use crate::controllers::{
     CrdWait, Diagnostics, RECONCILING_CONDITION, ReadinessGate, ResyncInterval, State,
-    log_suspended, prewarmed_reflector, reconciliation_suspended, state_after_reconcile,
+    log_suspended, prewarmed_reflector, reconciliation_suspended, reflected, state_after_reconcile,
     status_unchanged, suspended_message, wait_for_crd,
 };
 use crate::metrics::Metrics;
@@ -315,20 +315,7 @@ impl RestateDeployment {
         let versioned_name = existing_replicaset.name_any();
         let namespace = existing_replicaset.namespace().unwrap_or_default();
 
-        let controller = existing_replicaset
-            .metadata
-            .owner_references
-            .as_ref()
-            .and_then(|r| r.first());
-
-        let existing_pod_template_annotation = existing_replicaset
-            .annotations()
-            .get(RESTATE_POD_TEMPLATE_ANNOTATION)
-            .map(String::as_str);
-
-        if controller.map(|c| c.uid.as_str()) != Some(my_uid)
-            || existing_pod_template_annotation != Some(pod_template_annotation)
-        {
+        if !is_version_of(&existing_replicaset, my_uid, pod_template_annotation) {
             debug!(
                 "Found a hash collision ({versioned_name}) for deployment {} in namespace {namespace}, incrementing collision count",
                 self.name_any(),
@@ -458,10 +445,13 @@ impl RestateDeployment {
 
         let my_uid = self.uid().expect("RestateDeployment to have a uid");
 
-        // The store is prewarmed, so a miss almost always means this version is new.
+        // The store is prewarmed, so a miss almost always means this version is new. A cached
+        // ReplicaSet of someone else's may already be gone from the apiserver, so only the
+        // apiserver's answer to the create below can establish a hash collision.
         let cached = ctx
             .replicasets_store
-            .get(&ObjectRef::new(&versioned_name).within(namespace));
+            .get(&ObjectRef::new(&versioned_name).within(namespace))
+            .filter(|rs| is_version_of(rs, &my_uid, &pod_template_annotation));
         let replicaset = match cached {
             Some(cached) => {
                 self.update_existing_replicaset(
@@ -1664,6 +1654,22 @@ impl RestateDeployment {
     }
 }
 
+/// Whether `rs` is the ReplicaSet of the RestateDeployment with `rsd_uid` for the pod template
+/// `pod_template_annotation`, rather than one that merely shares its hashed name.
+fn is_version_of(rs: &ReplicaSet, rsd_uid: &str, pod_template_annotation: &str) -> bool {
+    let controller = rs
+        .metadata
+        .owner_references
+        .as_ref()
+        .and_then(|r| r.first());
+    controller.map(|c| c.uid.as_str()) == Some(rsd_uid)
+        && rs
+            .annotations()
+            .get(RESTATE_POD_TEMPLATE_ANNOTATION)
+            .map(String::as_str)
+            == Some(pod_template_annotation)
+}
+
 const PROPAGATE_ANNOTATIONS_MANAGER: &str = "restate-operator/propagate-annotations";
 
 /// Whether applying exactly `annotations` to `object` as `manager` would change nothing: each
@@ -1925,13 +1931,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
 
     // The per-version Services are owned by their ReplicaSets, so map them to the
     // RestateDeployment by label; that way out-of-band edits are reverted promptly.
-    let (service_store, service_writer) = kube::runtime::reflector::store();
-    let service_reflector = kube::runtime::reflector(
-        service_writer,
-        kube::runtime::watcher(services, cfg.clone()),
-    )
-    .touched_objects()
-    .default_backoff();
+    let (service_store, service_reflector) = reflected(services, cfg.clone());
 
     let (rce_store, rce_writer) = kube::runtime::reflector::store();
     let rce_reflector = kube::runtime::reflector(

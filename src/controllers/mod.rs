@@ -11,6 +11,7 @@ use kube::runtime::events::{Event, EventType, Recorder};
 use kube::runtime::reflector::ObjectRef;
 use kube::runtime::{reflector, watcher};
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
@@ -331,6 +332,48 @@ impl ResyncInterval {
     pub fn next(&self) -> Duration {
         self.0.mul_f64(rand::random_range(0.9..1.1))
     }
+}
+
+/// A watch of `api` that keeps the returned store current, as a stream of the objects it saw
+/// change, for triggering reconciles. Deletions bump the generation, so a predicate on it
+/// still lets them through.
+pub fn reflected<K>(
+    api: kube::Api<K>,
+    cfg: watcher::Config,
+) -> (
+    reflector::Store<K>,
+    impl futures::Stream<Item = Result<K, watcher::Error>> + Send + 'static,
+)
+where
+    K: Resource<DynamicType = ()>
+        + Clone
+        + std::fmt::Debug
+        + DeserializeOwned
+        + Send
+        + Sync
+        + 'static,
+{
+    let (store, writer) = reflector::store();
+    let stream = reflector(writer, watcher(api, cfg))
+        .map(ensure_deletion_change)
+        .touched_objects()
+        .default_backoff();
+    (store, stream)
+}
+
+// deletion apparently doesn't lead to any change in metadata otherwise, which means the changed_predicate
+// would drop them.
+fn ensure_deletion_change<K: Resource, E>(
+    mut event: Result<kube::runtime::watcher::Event<K>, E>,
+) -> Result<kube::runtime::watcher::Event<K>, E> {
+    if let Ok(kube::runtime::watcher::Event::Delete(ref mut object)) = event {
+        let meta = object.meta_mut();
+        meta.generation = match meta.generation {
+            Some(val) => Some(val + 1),
+            None => Some(0),
+        }
+    }
+    event
 }
 
 /// The owners of `object` of the cluster-scoped kind `Owner`, for `watches_stream`.

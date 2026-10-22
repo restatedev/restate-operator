@@ -16,7 +16,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::{APIGroup, ObjectMeta};
 use kube::core::object::HasStatus;
 use kube::runtime::events::Recorder;
 use kube::runtime::reflector::{ObjectRef, Store};
-use kube::runtime::{Predicate, WatchStreamExt, reflector, watcher};
+use kube::runtime::{Predicate, WatchStreamExt};
 use kube::{
     Resource,
     api::{Api, Patch, PatchParams, ResourceExt},
@@ -29,7 +29,6 @@ use kube::{
     },
 };
 use serde::Serialize;
-use serde::de::DeserializeOwned;
 use serde_json::json;
 use tokio::{sync::RwLock, time::Duration};
 use tracing::*;
@@ -37,8 +36,8 @@ use tracing::*;
 use crate::controllers::owned_objects::OwnedObjects;
 use crate::controllers::{
     CrdWait, Diagnostics, RECONCILING_CONDITION, ReadinessGate, ResyncInterval, State,
-    cluster_scoped_owners, log_suspended, reconciliation_suspended, state_after_reconcile,
-    status_unchanged, suspended_message, wait_for_api_groups, wait_for_crd,
+    cluster_scoped_owners, log_suspended, reconciliation_suspended, reflected,
+    state_after_reconcile, status_unchanged, suspended_message, wait_for_api_groups, wait_for_crd,
 };
 use crate::resources::ReconciliationState;
 use crate::resources::iampolicymembers::IAMPolicyMember;
@@ -642,47 +641,6 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         .filter_map(|x| async move { Result::ok(x) })
         .for_each(|_| futures::future::ready(()))
         .await;
-}
-
-/// A watch of `api` that keeps the returned store current, as a stream of the objects it saw
-/// change, for triggering reconciles.
-fn reflected<K>(
-    api: Api<K>,
-    cfg: Config,
-) -> (
-    Store<K>,
-    impl futures::Stream<Item = Result<K, watcher::Error>> + Send + 'static,
-)
-where
-    K: Resource<DynamicType = ()>
-        + Clone
-        + std::fmt::Debug
-        + DeserializeOwned
-        + Send
-        + Sync
-        + 'static,
-{
-    let (store, writer) = reflector::store();
-    let stream = reflector(writer, watcher(api, cfg))
-        .map(ensure_deletion_change)
-        .touched_objects()
-        .default_backoff();
-    (store, stream)
-}
-
-// deletion apparently doesn't lead to any change in metadata otherwise, which means the changed_predicate
-// would drop them.
-fn ensure_deletion_change<K: Resource, E>(
-    mut event: Result<kube::runtime::watcher::Event<K>, E>,
-) -> Result<kube::runtime::watcher::Event<K>, E> {
-    if let Ok(kube::runtime::watcher::Event::Delete(ref mut object)) = event {
-        let meta = object.meta_mut();
-        meta.generation = match meta.generation {
-            Some(val) => Some(val + 1),
-            None => Some(0),
-        }
-    }
-    event
 }
 
 fn changed_predicate<K: Resource>(obj: &K) -> Option<u64> {

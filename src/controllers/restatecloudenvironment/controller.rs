@@ -14,7 +14,7 @@ use kube::runtime::controller::Action;
 use kube::runtime::events::{Event, EventType, Recorder};
 use kube::runtime::finalizer::{Event as Finalizer, finalizer};
 use kube::runtime::watcher::Config;
-use kube::runtime::{Predicate, WatchStreamExt, predicates, reflector, watcher};
+use kube::runtime::{Predicate, WatchStreamExt, predicates};
 
 use kube::{Resource, ResourceExt};
 use serde_json::json;
@@ -24,8 +24,8 @@ use tracing::*;
 use crate::controllers::owned_objects::OwnedObjects;
 use crate::controllers::{
     CrdWait, Diagnostics, RECONCILING_CONDITION, ReadinessGate, ResyncInterval, State,
-    cluster_scoped_owners, log_suspended, reconciliation_suspended, state_after_reconcile,
-    status_unchanged, suspended_message, wait_for_crd,
+    cluster_scoped_owners, log_suspended, reconciliation_suspended, reflected,
+    state_after_reconcile, status_unchanged, suspended_message, wait_for_crd,
 };
 use crate::metrics::Metrics;
 use crate::resources::ReconciliationState;
@@ -349,16 +349,11 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     // but RestateCloudEnvironment doesn\t
     let not_created_cfg = Config::default();
 
-    let (deployment_store, deployment_writer) = reflector::store();
-    let deployment_reflector = reflector(deployment_writer, watcher(deployments, cfg.clone()))
-        .touched_objects()
-        .default_backoff()
-        // ignore the Deployment controller's status updates
-        .predicate_filter(predicates::generation.combine(predicates::labels));
-    let (service_store, service_writer) = reflector::store();
-    let service_reflector = reflector(service_writer, watcher(services, cfg.clone()))
-        .touched_objects()
-        .default_backoff();
+    let (deployment_store, deployment_reflector) = reflected(deployments, cfg.clone());
+    // ignore the Deployment controller's status updates
+    let deployment_reflector =
+        deployment_reflector.predicate_filter(predicates::generation.combine(predicates::labels));
+    let (service_store, service_reflector) = reflected(services, cfg.clone());
 
     // Create a controller for RestateCloudEnvironment
     controller::Controller::new(rce, not_created_cfg)
