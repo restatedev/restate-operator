@@ -3,9 +3,9 @@ use std::{collections::BTreeMap, path::PathBuf};
 use k8s_openapi::api::core::v1::{CSIVolumeSource, KeyToPath, SecretVolumeSource, Volume};
 use kube::{
     Api,
-    api::{DeleteParams, ObjectMeta, Patch, PatchParams},
+    api::{DeleteParams, ObjectMeta},
 };
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::{
     Error,
@@ -44,7 +44,7 @@ pub async fn reconcile_signing_key(
         private_key
     } else {
         // No private key configuration, clean up
-        remove_secret_provider_class(ctx, namespace, &spc_api).await?;
+        remove_secret_provider_class(ctx, &spc_api).await?;
         return Ok(None);
     };
 
@@ -58,7 +58,7 @@ pub async fn reconcile_signing_key(
         private_key.secret_provider.as_ref(),
     ) {
         (Some(secret), None) => {
-            remove_secret_provider_class(ctx, namespace, &spc_api).await?;
+            remove_secret_provider_class(ctx, &spc_api).await?;
 
             Ok(Some(reconcile_signing_key_secret(secret)))
         }
@@ -66,7 +66,7 @@ pub async fn reconcile_signing_key(
             if ctx.secret_provider_class_installed {
                 Ok(Some(
                     reconcile_signing_key_secret_provider(
-                        namespace,
+                        ctx,
                         base_metadata,
                         secret_provider,
                         &spc_api,
@@ -83,7 +83,7 @@ pub async fn reconcile_signing_key(
         (Some(_), Some(_)) => Err(InvalidSigningKeyError::MultipleSourcesProvided.into()),
         (None, None) => {
             // No private key configuration, clean up
-            remove_secret_provider_class(ctx, namespace, &spc_api).await?;
+            remove_secret_provider_class(ctx, &spc_api).await?;
             Ok(None)
         }
     }
@@ -110,7 +110,7 @@ pub fn reconcile_signing_key_secret(secret: &SecretSigningKeySource) -> (Volume,
 }
 
 pub async fn reconcile_signing_key_secret_provider(
-    namespace: &str,
+    ctx: &Context,
     base_metadata: &ObjectMeta,
     secret_provider: &SecretProviderSigningKeySource,
     spc_api: &Api<SecretProviderClass>,
@@ -124,14 +124,7 @@ pub async fn reconcile_signing_key_secret_provider(
         },
     };
 
-    let params: PatchParams = PatchParams::apply("restate-operator").force();
-    debug!(
-        "Applying SecretProviderClass {} in namespace {}",
-        SECRET_PROVIDER_CLASS_NAME, namespace
-    );
-    spc_api
-        .patch(SECRET_PROVIDER_CLASS_NAME, &params, &Patch::Apply(&spc))
-        .await?;
+    ctx.secret_provider_classes.apply(spc_api, &spc).await?;
 
     Ok((
         Volume {
@@ -153,22 +146,17 @@ pub async fn reconcile_signing_key_secret_provider(
 
 pub async fn remove_secret_provider_class(
     ctx: &Context,
-    namespace: &str,
     spc_api: &Api<SecretProviderClass>,
 ) -> Result<(), Error> {
     if !ctx.secret_provider_class_installed {
         return Ok(());
     }
-    debug!(
-        "Ensuring SecretProviderClass {} in namespace {} does not exist",
-        SECRET_PROVIDER_CLASS_NAME, namespace
-    );
-    match spc_api
-        .delete(SECRET_PROVIDER_CLASS_NAME, &DeleteParams::default())
-        .await
-    {
-        Err(kube::Error::Api(kube::error::ErrorResponse { code: 404, .. })) => Ok(()),
-        Err(err) => Err(err.into()),
-        Ok(_) => Ok(()),
-    }
+    ctx.secret_provider_classes
+        .delete(
+            spc_api,
+            SECRET_PROVIDER_CLASS_NAME,
+            &DeleteParams::default(),
+        )
+        .await?;
+    Ok(())
 }

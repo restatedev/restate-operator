@@ -18,6 +18,7 @@ use url::Url;
 use crate::Metrics;
 use crate::resources::ReconciliationState;
 
+pub mod owned_objects;
 pub mod restatecloudenvironment;
 pub mod restatecluster;
 pub mod restatedeployment;
@@ -251,6 +252,9 @@ pub struct State {
     /// the operator itself rather than about a resource it manages. `None` when the pod name
     /// was not supplied, eg when running outside the cluster.
     operator_object_ref: Option<ObjectReference>,
+
+    /// When a resource that reconciled cleanly is next reconciled unprompted
+    pub resync: ResyncInterval,
 }
 
 /// State wrapper around the controller outputs for the web server
@@ -267,6 +271,7 @@ impl State {
         canary_image: String,
         operator_pod_name: Option<String>,
         operator_pod_uid: Option<String>,
+        resync: ResyncInterval,
     ) -> Self {
         let operator_object_ref = operator_pod_name.map(|name| ObjectReference {
             api_version: Some("v1".into()),
@@ -290,6 +295,7 @@ impl State {
             cluster_dns,
             canary_image,
             operator_object_ref,
+            resync,
         }
     }
 
@@ -302,6 +308,37 @@ impl State {
     pub async fn diagnostics(&self) -> Diagnostics {
         self.diagnostics.read().await.clone()
     }
+}
+
+/// How long a resource that reconciled cleanly waits before it is reconciled again with no
+/// event to prompt it.
+///
+/// The controllers watch every object they write, so drift is repaired as soon as the watch
+/// reports it. This is the backstop for what the watches cannot see, such as a deployment
+/// removed from Restate behind the operator's back, or a missed watch event.
+#[derive(Clone, Copy, Debug)]
+pub struct ResyncInterval(Duration);
+
+impl ResyncInterval {
+    pub fn new(interval: Duration) -> Self {
+        Self(interval)
+    }
+
+    /// The delay until the next resync: the interval, give or take 10%. Without the jitter,
+    /// resources reconciled together (all of them, after an operator restart) would resync
+    /// in lockstep forever.
+    pub fn next(&self) -> Duration {
+        self.0.mul_f64(rand::random_range(0.9..1.1))
+    }
+}
+
+/// Whether applying `desired` as the status would leave `current` as it is, so the write can
+/// be skipped.
+pub fn status_unchanged<S: Serialize>(current: Option<&S>, desired: &S) -> bool {
+    current.is_some_and(|current| {
+        serde_json::to_value(current).expect("status to serialize")
+            == serde_json::to_value(desired).expect("status to serialize")
+    })
 }
 
 pub fn service_url(

@@ -86,6 +86,10 @@ spec:
             - name: CLUSTER_DNS
               value: {{ .Values.clusterDns }}
           {{- end }}
+          {{- if .Values.resyncIntervalSeconds }}
+            - name: RESYNC_INTERVAL_SECONDS
+              value: {{ .Values.resyncIntervalSeconds | quote }}
+          {{- end }}
           {{- with .Values.env }}
             {{- toYaml . | nindent 12 }}
           {{- end }}

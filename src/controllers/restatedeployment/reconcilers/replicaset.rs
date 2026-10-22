@@ -953,6 +953,7 @@ mod tests {
                 revision_store,
                 configuration_store,
                 hpa_store,
+                crate::controllers::owned_objects::OwnedObjects::default(),
                 Metrics::default(),
                 State::new(
                     None,
@@ -965,6 +966,7 @@ mod tests {
                     "alpine:3.21".into(),
                     None,
                     None,
+                    crate::controllers::ResyncInterval::new(std::time::Duration::from_secs(1800)),
                 ),
             );
 
