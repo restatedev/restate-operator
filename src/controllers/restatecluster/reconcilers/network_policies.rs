@@ -9,12 +9,9 @@ use k8s_openapi::api::networking::v1::{
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
+use kube::Api;
 use kube::api::DeleteParams;
-use kube::{
-    Api,
-    api::{Patch, PatchParams},
-};
-use tracing::{debug, trace};
+use tracing::trace;
 
 use crate::Error;
 use crate::controllers::restatecluster::controller::Context;
@@ -293,40 +290,40 @@ pub async fn reconcile_network_policies(
     let np_api: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), namespace);
 
     if disable_network_policies {
-        delete_network_policy(namespace, &np_api, DENY_ALL_POLICY_NAME).await?;
-        delete_network_policy(namespace, &np_api, ALLOW_DNS_POLICY_NAME).await?;
-        delete_network_policy(namespace, &np_api, ALLOW_DNS_POLICY_NAME_OLD).await?;
-        delete_network_policy(namespace, &np_api, ALLOW_PUBLIC_POLICY_NAME).await?;
-        delete_network_policy(namespace, &np_api, AWS_POD_IDENTITY_POLICY_NAME).await?;
-        delete_network_policy(namespace, &np_api, ALLOW_EGRESS_POLICY_NAME).await?;
-        delete_network_policy(namespace, &np_api, ALLOW_INGRESS_POLICY_NAME).await?;
-        delete_network_policy(namespace, &np_api, ALLOW_ADMIN_POLICY_NAME).await?;
-        delete_network_policy(namespace, &np_api, ALLOW_NODE_POLICY_NAME).await?;
+        delete_network_policy(ctx, &np_api, DENY_ALL_POLICY_NAME).await?;
+        delete_network_policy(ctx, &np_api, ALLOW_DNS_POLICY_NAME).await?;
+        delete_network_policy(ctx, &np_api, ALLOW_DNS_POLICY_NAME_OLD).await?;
+        delete_network_policy(ctx, &np_api, ALLOW_PUBLIC_POLICY_NAME).await?;
+        delete_network_policy(ctx, &np_api, AWS_POD_IDENTITY_POLICY_NAME).await?;
+        delete_network_policy(ctx, &np_api, ALLOW_EGRESS_POLICY_NAME).await?;
+        delete_network_policy(ctx, &np_api, ALLOW_INGRESS_POLICY_NAME).await?;
+        delete_network_policy(ctx, &np_api, ALLOW_ADMIN_POLICY_NAME).await?;
+        delete_network_policy(ctx, &np_api, ALLOW_NODE_POLICY_NAME).await?;
 
         return Ok(());
     }
 
-    apply_network_policy(namespace, &np_api, deny_all(base_metadata)).await?;
-    apply_network_policy(namespace, &np_api, allow_dns(base_metadata)).await?;
+    apply_network_policy(ctx, &np_api, deny_all(base_metadata)).await?;
+    apply_network_policy(ctx, &np_api, allow_dns(base_metadata)).await?;
     // Clean up old DNS policy name (renamed from allow-egress-to-kube-dns to allow-egress-to-dns)
-    delete_network_policy(namespace, &np_api, ALLOW_DNS_POLICY_NAME_OLD).await?;
-    apply_network_policy(namespace, &np_api, allow_public(base_metadata)).await?;
+    delete_network_policy(ctx, &np_api, ALLOW_DNS_POLICY_NAME_OLD).await?;
+    apply_network_policy(ctx, &np_api, allow_public(base_metadata)).await?;
 
     if aws_pod_identity_enabled {
-        apply_network_policy(namespace, &np_api, allow_aws_pod_identity(base_metadata)).await?
+        apply_network_policy(ctx, &np_api, allow_aws_pod_identity(base_metadata)).await?
     } else {
-        delete_network_policy(namespace, &np_api, AWS_POD_IDENTITY_POLICY_NAME).await?
+        delete_network_policy(ctx, &np_api, AWS_POD_IDENTITY_POLICY_NAME).await?
     }
 
     apply_network_policy(
-        namespace,
+        ctx,
         &np_api,
         allow_egress(namespace, base_metadata, network_egress_rules),
     )
     .await?;
 
     apply_network_policy(
-        namespace,
+        ctx,
         &np_api,
         allow_access(
             "ingress",
@@ -372,7 +369,7 @@ pub async fn reconcile_network_policies(
         };
 
     apply_network_policy(
-        namespace,
+        ctx,
         &np_api,
         allow_access("admin", 9070, base_metadata, admin_peers),
     )
@@ -413,7 +410,7 @@ pub async fn reconcile_network_policies(
 
     // Note: policy name is "metrics" for backwards compatibility, but it controls the node port (5122)
     apply_network_policy(
-        namespace,
+        ctx,
         &np_api,
         allow_access("metrics", 5122, base_metadata, Some(node_peers)),
     )
@@ -443,32 +440,21 @@ fn add_peer(peers: Option<&[NetworkPolicyPeer]>, add: NetworkPolicyPeer) -> Vec<
 }
 
 async fn apply_network_policy(
-    namespace: &str,
+    ctx: &Context,
     np_api: &Api<NetworkPolicy>,
     np: NetworkPolicy,
 ) -> Result<(), Error> {
-    let name = np.metadata.name.as_ref().unwrap();
-    let params: PatchParams = PatchParams::apply("restate-operator").force();
-    debug!(
-        "Applying Network Policy {} in namespace {}",
-        name, namespace
-    );
-    np_api.patch(name, &params, &Patch::Apply(&np)).await?;
+    ctx.network_policies.apply(np_api, &np).await?;
     Ok(())
 }
 
 async fn delete_network_policy(
-    namespace: &str,
+    ctx: &Context,
     np_api: &Api<NetworkPolicy>,
     name: &str,
 ) -> Result<(), Error> {
-    debug!(
-        "Ensuring NetworkPolicy {} in namespace {} does not exist",
-        name, namespace
-    );
-    match np_api.delete(name, &DeleteParams::default()).await {
-        Err(kube::Error::Api(kube::error::ErrorResponse { code: 404, .. })) => Ok(()),
-        Err(err) => Err(err.into()),
-        Ok(_) => Ok(()),
-    }
+    ctx.network_policies
+        .delete(np_api, name, &DeleteParams::default())
+        .await?;
+    Ok(())
 }

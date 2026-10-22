@@ -5,6 +5,7 @@ use chrono::Utc;
 use futures::StreamExt;
 
 use k8s_openapi::api::apps::v1::Deployment;
+use k8s_openapi::api::core::v1::Service;
 
 use kube::api::{Api, ObjectMeta, Patch, PatchParams};
 use kube::client::Client;
@@ -13,15 +14,18 @@ use kube::runtime::controller::Action;
 use kube::runtime::events::{Event, EventType, Recorder};
 use kube::runtime::finalizer::{Event as Finalizer, finalizer};
 use kube::runtime::watcher::Config;
+use kube::runtime::{Predicate, WatchStreamExt, predicates};
 
 use kube::{Resource, ResourceExt};
 use serde_json::json;
 use tokio::sync::RwLock;
 use tracing::*;
 
+use crate::controllers::owned_objects::OwnedObjects;
 use crate::controllers::{
-    CrdWait, Diagnostics, RECONCILING_CONDITION, ReadinessGate, State, log_suspended,
-    reconciliation_suspended, state_after_reconcile, suspended_message, wait_for_crd,
+    CrdWait, Diagnostics, RECONCILING_CONDITION, ReadinessGate, ResyncInterval, State,
+    cluster_scoped_owners, log_suspended, reconciliation_suspended, reflected,
+    state_after_reconcile, status_unchanged, suspended_message, wait_for_crd,
 };
 use crate::metrics::Metrics;
 use crate::resources::ReconciliationState;
@@ -44,6 +48,12 @@ pub(super) struct Context {
     pub operator_namespace: String,
     /// The default image to use for tunnel client pods
     pub tunnel_client_default_image: String,
+    /// The tunnel client Deployments
+    pub deployments: OwnedObjects<Deployment>,
+    /// The tunnel Services
+    pub services: OwnedObjects<Service>,
+    /// When an environment that reconciled cleanly is next reconciled unprompted
+    pub resync: ResyncInterval,
     /// Diagnostics read by the web server
     pub diagnostics: Arc<RwLock<Diagnostics>>,
     /// Prometheus metrics
@@ -51,12 +61,21 @@ pub(super) struct Context {
 }
 
 impl Context {
-    pub fn new(client: Client, metrics: Metrics, state: State) -> Arc<Context> {
+    pub fn new(
+        client: Client,
+        metrics: Metrics,
+        state: State,
+        deployments: OwnedObjects<Deployment>,
+        services: OwnedObjects<Service>,
+    ) -> Arc<Context> {
         Arc::new(Context {
             client: client.clone(),
             recorder: Recorder::new(client, "restate-operator".into()),
             operator_namespace: state.operator_namespace,
             tunnel_client_default_image: state.tunnel_client_default_image,
+            deployments,
+            services,
+            resync: state.resync,
             metrics,
             diagnostics: state.diagnostics.clone(),
         })
@@ -225,21 +244,24 @@ impl RestateCloudEnvironment {
         }
 
         let ready_status = ready.status.clone();
-        let new_status = Patch::Apply(json!({
-            "apiVersion": RestateCloudEnvironment::api_version(&()),
-            "kind": RestateCloudEnvironment::kind(&()),
-            "status": RestateCloudEnvironmentStatus {
-                // Replacing the whole list is what clears the `Reconciling` condition after
-                // a suspension.
-                conditions: Some(vec![ready]),
-                reconciliation: Some(state_after_reconcile(
-                    self.status.as_ref().and_then(|s| s.reconciliation),
-                    &ready_status,
-                )),
-            }
-        }));
-        let ps = PatchParams::apply("restate-operator").force();
-        rces.patch_status(&name, &ps, &new_status).await?;
+        let new_status = RestateCloudEnvironmentStatus {
+            // Replacing the whole list is what clears the `Reconciling` condition after
+            // a suspension.
+            conditions: Some(vec![ready]),
+            reconciliation: Some(state_after_reconcile(
+                self.status.as_ref().and_then(|s| s.reconciliation),
+                &ready_status,
+            )),
+        };
+        if !status_unchanged(self.status.as_ref(), &new_status) {
+            let new_status = Patch::Apply(json!({
+                "apiVersion": RestateCloudEnvironment::api_version(&()),
+                "kind": RestateCloudEnvironment::kind(&()),
+                "status": new_status,
+            }));
+            let ps = PatchParams::apply("restate-operator").force();
+            rces.patch_status(&name, &ps, &new_status).await?;
+        }
 
         result
     }
@@ -276,7 +298,7 @@ impl RestateCloudEnvironment {
         )
         .await?;
 
-        Ok(Action::requeue(Duration::from_secs(5 * 60)))
+        Ok(Action::requeue(ctx.resync.next()))
     }
 
     // Finalizer cleanup (the object was deleted, ensure nothing is orphaned)
@@ -302,6 +324,7 @@ impl RestateCloudEnvironment {
 pub async fn run(client: Client, metrics: Metrics, state: State) {
     let rce: Api<RestateCloudEnvironment> = Api::all(client.clone());
     let deployments: Api<Deployment> = Api::namespaced(client.clone(), &state.operator_namespace);
+    let services: Api<Service> = Api::namespaced(client.clone(), &state.operator_namespace);
 
     match wait_for_crd::<RestateCloudEnvironment>(
         ReadinessGate::RestateCloudEnvironment,
@@ -322,18 +345,31 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     }
 
     // all resources we create have this label
-    let cfg = Config::default().labels("app.kubernetes.io/managed-by=restate-operator");
+    let cfg = Config::default().labels("app.kubernetes.io/name=restate-cloud-tunnel-client");
     // but RestateCloudEnvironment doesn\t
     let not_created_cfg = Config::default();
+
+    let (deployment_store, deployment_reflector) = reflected(deployments, cfg.clone());
+    // ignore the Deployment controller's status updates
+    let deployment_reflector =
+        deployment_reflector.predicate_filter(predicates::generation.combine(predicates::labels));
+    let (service_store, service_reflector) = reflected(services, cfg.clone());
 
     // Create a controller for RestateCloudEnvironment
     controller::Controller::new(rce, not_created_cfg)
         .shutdown_on_signal()
-        .owns(deployments, cfg.clone())
+        .watches_stream(deployment_reflector, cluster_scoped_owners)
+        .watches_stream(service_reflector, cluster_scoped_owners)
         .run(
             reconcile,
             error_policy,
-            Context::new(client, metrics, state),
+            Context::new(
+                client,
+                metrics,
+                state,
+                OwnedObjects::watched(deployment_store),
+                OwnedObjects::watched(service_store),
+            ),
         )
         .filter_map(|x| async move { Result::ok(x) })
         .for_each(|_| futures::future::ready(()))

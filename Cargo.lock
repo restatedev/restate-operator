@@ -2924,6 +2924,7 @@ dependencies = [
  "opentelemetry_sdk",
  "prometheus",
  "prost",
+ "rand 0.9.4",
  "regex",
  "reqwest",
  "restate-sdk",

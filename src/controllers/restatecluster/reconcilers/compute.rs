@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::convert::Into;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetSpec, StatefulSetStatus};
@@ -17,16 +18,12 @@ use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::{DeleteParams, ListParams, Preconditions, PropagationPolicy};
-use kube::core::PartialObjectMeta;
-use kube::runtime::reflector::{ObjectRef, Store};
-use kube::{
-    Api, ResourceExt,
-    api::{Patch, PatchParams},
-};
+use kube::{Api, ResourceExt};
 use sha2::Digest;
 use tracing::{debug, error, trace, warn};
 
 use crate::Error;
+use crate::controllers::owned_objects::OwnedObjects;
 use crate::controllers::restatecluster::controller::Context;
 use crate::resources::iampolicymembers::{
     IAMPolicyMember, IAMPolicyMemberResourceRef, IAMPolicyMemberSpec,
@@ -729,21 +726,21 @@ pub async fn reconcile_compute(
     let ipm_api: Api<IAMPolicyMember> = Api::namespaced(ctx.client.clone(), name);
     let pdb_api: Api<PodDisruptionBudget> = Api::namespaced(ctx.client.clone(), name);
 
-    apply_service_account(
-        name,
-        &svcacc_api,
-        restate_service_account(
-            base_metadata,
-            spec.security
-                .as_ref()
-                .and_then(|s| s.service_account_annotations.as_ref()),
-        ),
-    )
-    .await?;
+    ctx.service_accounts
+        .apply(
+            &svcacc_api,
+            &restate_service_account(
+                base_metadata,
+                spec.security
+                    .as_ref()
+                    .and_then(|s| s.service_account_annotations.as_ref()),
+            ),
+        )
+        .await?;
 
     let cm = restate_configmap(base_metadata, spec.config.as_deref());
     let cm_name: String = cm.metadata.name.as_ref().unwrap().into();
-    apply_configmap(name, &cm_api, cm).await?;
+    ctx.config_maps.apply(&cm_api, &cm).await?;
 
     let mut pod_annotations: Option<BTreeMap<String, String>> = None;
 
@@ -757,19 +754,20 @@ pub async fn reconcile_compute(
             Some(aws_pod_identity_association_cluster),
             Some(aws_pod_identity_association_role_arn),
         ) => {
-            let pia = apply_pod_identity_association(
-                name,
-                &pia_api,
-                restate_pod_identity_association(
-                    name,
-                    base_metadata,
-                    aws_pod_identity_association_cluster,
-                    aws_pod_identity_association_role_arn,
-                ),
-            )
-            .await?;
+            let pia = ctx
+                .pod_identity_associations
+                .apply(
+                    &pia_api,
+                    &restate_pod_identity_association(
+                        name,
+                        base_metadata,
+                        aws_pod_identity_association_cluster,
+                        aws_pod_identity_association_role_arn,
+                    ),
+                )
+                .await?;
 
-            if !is_pod_identity_association_synced(pia) {
+            if !is_pod_identity_association_synced(&pia) {
                 return Err(Error::NotReady { reason: "PodIdentityAssociationNotSynced".into(), message: "Waiting for the AWS ACK controller to provision the Pod Identity Association with IAM".into(), requeue_after: None });
             }
 
@@ -777,6 +775,7 @@ pub async fn reconcile_compute(
                 name,
                 base_metadata,
                 spec.compute.tolerations.as_ref(),
+                &ctx.jobs,
                 &job_api,
                 &pod_api,
                 &ctx.canary_image,
@@ -795,8 +794,10 @@ pub async fn reconcile_compute(
             );
         }
         (Some(_), None) => {
-            delete_pod_identity_association(name, &pia_api, "restate").await?;
-            delete_job(name, &job_api, "restate-pia-canary").await?;
+            ctx.pod_identity_associations
+                .delete(&pia_api, "restate", &DeleteParams::default())
+                .await?;
+            delete_job(&ctx.jobs, &job_api, "restate-pia-canary").await?;
         }
         (None, Some(aws_pod_identity_association_role_arn)) => {
             warn!(
@@ -814,12 +815,12 @@ pub async fn reconcile_compute(
         Some(aws_pod_security_groups)
             if ctx.security_group_policy_installed && !aws_pod_security_groups.is_empty() =>
         {
-            apply_security_group_policy(
-                name,
-                &sgp_api,
-                restate_security_group_policy(base_metadata, aws_pod_security_groups),
-            )
-            .await?;
+            ctx.security_group_policies
+                .apply(
+                    &sgp_api,
+                    &restate_security_group_policy(base_metadata, aws_pod_security_groups),
+                )
+                .await?;
 
             let pod_annotations = pod_annotations.get_or_insert_with(Default::default);
             // Pods MUST roll when these change, so we will apply the groups as annotations to the pod meta
@@ -829,7 +830,9 @@ pub async fn reconcile_compute(
             );
         }
         None | Some(_) if ctx.security_group_policy_installed => {
-            delete_security_group_policy(name, &sgp_api, "restate").await?;
+            ctx.security_group_policies
+                .delete(&sgp_api, "restate", &DeleteParams::default())
+                .await?;
         }
         Some(aws_pod_security_groups) if !aws_pod_security_groups.is_empty() => {
             warn!(
@@ -858,18 +861,16 @@ pub async fn reconcile_compute(
                 }
             };
 
-            let ipm = match apply_iam_policy_member(
-                name,
-                &ipm_api,
-                restate_iam_policy_member(name, base_metadata, gcp_project, gcp_sa_email),
-            )
-            .await
+            let ipm = match ctx
+                .iam_policy_members
+                .apply(
+                    &ipm_api,
+                    &restate_iam_policy_member(name, base_metadata, gcp_project, gcp_sa_email),
+                )
+                .await
             {
                 Ok(ipm) => ipm,
-                Err(Error::KubeError(kube::Error::Api(kube::error::ErrorResponse {
-                    code: 404,
-                    ..
-                }))) => {
+                Err(kube::Error::Api(kube::error::ErrorResponse { code: 404, .. })) => {
                     return Err(Error::NotReady {
                         reason: "IAMPolicyMemberCRDNotFound".into(),
                         message: "IAMPolicyMember CRD not found - is Config Connector installed?"
@@ -877,7 +878,7 @@ pub async fn reconcile_compute(
                         requeue_after: Some(Duration::from_secs(60)),
                     });
                 }
-                Err(err) => return Err(err),
+                Err(err) => return Err(err.into()),
             };
 
             if !is_iam_policy_member_ready(&ipm) {
@@ -894,6 +895,7 @@ pub async fn reconcile_compute(
                 name,
                 base_metadata,
                 spec.compute.tolerations.as_ref(),
+                &ctx.jobs,
                 &job_api,
                 &ctx.canary_image,
             )
@@ -906,8 +908,14 @@ pub async fn reconcile_compute(
             );
         }
         (true, None) => {
-            delete_iam_policy_member(name, &ipm_api, "restate-workload-identity").await?;
-            delete_job(name, &job_api, "restate-wi-canary").await?;
+            ctx.iam_policy_members
+                .delete(
+                    &ipm_api,
+                    "restate-workload-identity",
+                    &DeleteParams::default(),
+                )
+                .await?;
+            delete_job(&ctx.jobs, &job_api, "restate-wi-canary").await?;
         }
         (false, Some(gcp_sa_email)) => {
             warn!(
@@ -937,24 +945,16 @@ pub async fn reconcile_compute(
             .as_ref()
             .and_then(|s| s.service_annotations.as_ref()),
     );
-    apply_service(name, &svc_api, restate_service).await?;
-
-    let restate_cluster_service = restate_cluster_service(base_metadata);
-    apply_service(name, &svc_api, restate_cluster_service).await?;
-
-    apply_pod_disruption_budget(name, &pdb_api, restate_pod_disruption_budget(base_metadata))
+    ctx.services.apply(&svc_api, &restate_service).await?;
+    ctx.services
+        .apply(&svc_api, &restate_cluster_service(base_metadata))
         .await?;
 
-    change_statefulset_storage(
-        name,
-        base_metadata,
-        &ss_api,
-        &ctx.ss_store,
-        &pvc_api,
-        &ctx.pvc_meta_store,
-        &spec.storage,
-    )
-    .await?;
+    ctx.pod_disruption_budgets
+        .apply(&pdb_api, &restate_pod_disruption_budget(base_metadata))
+        .await?;
+
+    change_statefulset_storage(ctx, name, base_metadata, &ss_api, &pvc_api, &spec.storage).await?;
 
     let stateful_set = restate_statefulset(
         base_metadata,
@@ -965,7 +965,7 @@ pub async fn reconcile_compute(
         &ctx.canary_image,
     );
     validate_pod_volumes(&stateful_set)?;
-    let ss = apply_stateful_set(name, &ss_api, stateful_set).await?;
+    let ss = ctx.stateful_sets.apply(&ss_api, &stateful_set).await?;
 
     // Handle cluster provisioning if enabled
     // This must happen BEFORE validate_stateful_set_status because pods only become Ready
@@ -1007,60 +1007,9 @@ pub async fn reconcile_compute(
         }
     }
 
-    validate_stateful_set_status(ss.status, spec.compute.replicas.unwrap_or(1))?;
+    validate_stateful_set_status(ss.status.clone(), spec.compute.replicas.unwrap_or(1))?;
 
     Ok(())
-}
-
-async fn apply_service(namespace: &str, ss_api: &Api<Service>, ss: Service) -> Result<(), Error> {
-    let name = ss.metadata.name.as_ref().unwrap();
-    let params: PatchParams = PatchParams::apply("restate-operator").force();
-    debug!("Applying Service {} in namespace {}", name, namespace);
-    ss_api.patch(name, &params, &Patch::Apply(&ss)).await?;
-    Ok(())
-}
-
-async fn apply_service_account(
-    namespace: &str,
-    svcacc_api: &Api<ServiceAccount>,
-    svcacc: ServiceAccount,
-) -> Result<(), Error> {
-    let name = svcacc.metadata.name.as_ref().unwrap();
-    let params: PatchParams = PatchParams::apply("restate-operator").force();
-    debug!(
-        "Applying ServiceAccount {} in namespace {}",
-        name, namespace
-    );
-    svcacc_api
-        .patch(name, &params, &Patch::Apply(&svcacc))
-        .await?;
-    Ok(())
-}
-
-async fn apply_configmap(
-    namespace: &str,
-    cm_api: &Api<ConfigMap>,
-    cm: ConfigMap,
-) -> Result<(), Error> {
-    let name = cm.metadata.name.as_ref().unwrap();
-    let params: PatchParams = PatchParams::apply("restate-operator").force();
-    debug!("Applying ConfigMap {} in namespace {}", name, namespace);
-    cm_api.patch(name, &params, &Patch::Apply(&cm)).await?;
-    Ok(())
-}
-
-async fn apply_pod_identity_association(
-    namespace: &str,
-    pia_api: &Api<PodIdentityAssociation>,
-    pia: PodIdentityAssociation,
-) -> Result<PodIdentityAssociation, Error> {
-    let name = pia.metadata.name.as_ref().unwrap();
-    let params: PatchParams = PatchParams::apply("restate-operator").force();
-    debug!(
-        "Applying PodIdentityAssociation {} in namespace {}",
-        name, namespace
-    );
-    Ok(pia_api.patch(name, &params, &Patch::Apply(&pia)).await?)
 }
 
 /// Configuration for a canary job that validates cloud credential injection
@@ -1156,16 +1105,15 @@ async fn run_canary_job(
     namespace: &str,
     base_metadata: &ObjectMeta,
     tolerations: Option<&Vec<Toleration>>,
+    jobs: &OwnedObjects<Job>,
     job_api: &Api<Job>,
     config: &CanaryConfig,
-) -> Result<(CanaryResult, Job), Error> {
+) -> Result<(CanaryResult, Arc<Job>), Error> {
     let name = config.name;
-    let params: PatchParams = PatchParams::apply("restate-operator").force();
     let job = canary_job_spec(base_metadata, tolerations, config);
 
-    debug!("Applying canary Job {name} in namespace {namespace}");
-
-    let created = match job_api.patch(name, &params, &Patch::Apply(&job)).await {
+    // Once the Job has run for this spec, the cached Job is returned without a request.
+    let created = match jobs.apply(job_api, &job).await {
         Ok(created) => created,
         Err(kube::Error::Api(kube::error::ErrorResponse {
             code: 422,
@@ -1173,7 +1121,7 @@ async fn run_canary_job(
             message,
             ..
         })) if reason == "Invalid" && message.contains("field is immutable") => {
-            delete_job(namespace, job_api, name).await?;
+            delete_job(jobs, job_api, name).await?;
 
             return Err(Error::NotReady {
                 reason: format!("{}CanaryPending", config.reason_prefix),
@@ -1192,7 +1140,7 @@ async fn run_canary_job(
         }
         CanaryResult::Failed => {
             error!("Canary {name} failed in namespace {namespace}, deleting Job");
-            delete_job(namespace, job_api, name).await?;
+            delete_job(jobs, job_api, name).await?;
 
             return Err(Error::NotReady {
                 reason: format!("{}CanaryFailed", config.reason_prefix),
@@ -1211,6 +1159,7 @@ async fn check_pia(
     namespace: &str,
     base_metadata: &ObjectMeta,
     tolerations: Option<&Vec<Toleration>>,
+    jobs: &OwnedObjects<Job>,
     job_api: &Api<Job>,
     pod_api: &Api<Pod>,
     canary_image: &str,
@@ -1229,8 +1178,15 @@ async fn check_pia(
         pending_message: "Canary Job has not yet succeeded; PIA webhook may need to catch up",
     };
 
-    let (result, job) =
-        run_canary_job(namespace, base_metadata, tolerations, job_api, &config).await?;
+    let (result, job) = run_canary_job(
+        namespace,
+        base_metadata,
+        tolerations,
+        jobs,
+        job_api,
+        &config,
+    )
+    .await?;
     match result {
         CanaryResult::Complete => return Ok(()),
         CanaryResult::Failed => unreachable!("run_canary_job returns Err for Failed"),
@@ -1291,9 +1247,9 @@ fn pia_canary_pods_verdict(pods: &[Pod]) -> Option<bool> {
     }))
 }
 
-fn is_pod_identity_association_synced(pia: PodIdentityAssociation) -> bool {
-    if let Some(status) = pia.status
-        && let Some(conditions) = status.conditions
+fn is_pod_identity_association_synced(pia: &PodIdentityAssociation) -> bool {
+    if let Some(status) = &pia.status
+        && let Some(conditions) = &status.conditions
         && let Some(synced) = conditions
             .iter()
             .find(|cond| cond.r#type == "ACK.ResourceSynced")
@@ -1305,65 +1261,12 @@ fn is_pod_identity_association_synced(pia: PodIdentityAssociation) -> bool {
     }
 }
 
-async fn delete_pod_identity_association(
-    namespace: &str,
-    pia_api: &Api<PodIdentityAssociation>,
-    name: &str,
-) -> Result<(), Error> {
-    debug!(
-        "Ensuring PodIdentityAssociation {} in namespace {} does not exist",
-        name, namespace
-    );
-    match pia_api.delete(name, &DeleteParams::default()).await {
-        Err(kube::Error::Api(kube::error::ErrorResponse { code: 404, .. })) => Ok(()),
-        Err(err) => Err(err.into()),
-        Ok(_) => Ok(()),
-    }
-}
-
-async fn delete_job(namespace: &str, job_api: &Api<Job>, name: &str) -> Result<(), Error> {
-    debug!(
-        "Ensuring Job {} in namespace {} does not exist",
-        name, namespace
-    );
+async fn delete_job(jobs: &OwnedObjects<Job>, job_api: &Api<Job>, name: &str) -> Result<(), Error> {
     // batch/v1 Jobs default to orphan propagation when deleted through the API, which would leave
     // every canary pod behind as an owner-less object. Cascade so the pods go with the Job.
-    match job_api.delete(name, &DeleteParams::background()).await {
-        Err(kube::Error::Api(kube::error::ErrorResponse { code: 404, .. })) => Ok(()),
-        Err(err) => Err(err.into()),
-        Ok(_) => Ok(()),
-    }
-}
-
-async fn apply_security_group_policy(
-    namespace: &str,
-    pia_api: &Api<SecurityGroupPolicy>,
-    pia: SecurityGroupPolicy,
-) -> Result<(), Error> {
-    let name = pia.metadata.name.as_ref().unwrap();
-    let params: PatchParams = PatchParams::apply("restate-operator").force();
-    debug!(
-        "Applying SecurityGroupPolicy {} in namespace {}",
-        name, namespace
-    );
-    pia_api.patch(name, &params, &Patch::Apply(&pia)).await?;
+    jobs.delete(job_api, name, &DeleteParams::background())
+        .await?;
     Ok(())
-}
-
-async fn delete_security_group_policy(
-    namespace: &str,
-    sgp_api: &Api<SecurityGroupPolicy>,
-    name: &str,
-) -> Result<(), Error> {
-    debug!(
-        "Ensuring SecurityGroupPolicy {} in namespace {} does not exist",
-        name, namespace
-    );
-    match sgp_api.delete(name, &DeleteParams::default()).await {
-        Err(kube::Error::Api(kube::error::ErrorResponse { code: 404, .. })) => Ok(()),
-        Err(err) => Err(err.into()),
-        Ok(_) => Ok(()),
-    }
 }
 
 /// Parse the GCP project ID from a service account email.
@@ -1419,40 +1322,11 @@ fn is_iam_policy_member_ready(ipm: &IAMPolicyMember) -> bool {
         .is_some_and(|c| c.status == "True")
 }
 
-async fn apply_iam_policy_member(
-    namespace: &str,
-    ipm_api: &Api<IAMPolicyMember>,
-    ipm: IAMPolicyMember,
-) -> Result<IAMPolicyMember, Error> {
-    let name = ipm.metadata.name.as_ref().unwrap();
-    let params: PatchParams = PatchParams::apply("restate-operator").force();
-    debug!(
-        "Applying IAMPolicyMember {} in namespace {}",
-        name, namespace
-    );
-    Ok(ipm_api.patch(name, &params, &Patch::Apply(&ipm)).await?)
-}
-
-async fn delete_iam_policy_member(
-    namespace: &str,
-    ipm_api: &Api<IAMPolicyMember>,
-    name: &str,
-) -> Result<(), Error> {
-    debug!(
-        "Ensuring IAMPolicyMember {} in namespace {} does not exist",
-        name, namespace
-    );
-    match ipm_api.delete(name, &DeleteParams::default()).await {
-        Err(kube::Error::Api(kube::error::ErrorResponse { code: 404, .. })) => Ok(()),
-        Err(err) => Err(err.into()),
-        Ok(_) => Ok(()),
-    }
-}
-
 async fn check_workload_identity(
     namespace: &str,
     base_metadata: &ObjectMeta,
     tolerations: Option<&Vec<Toleration>>,
+    jobs: &OwnedObjects<Job>,
     job_api: &Api<Job>,
     canary_image: &str,
 ) -> Result<(), Error> {
@@ -1473,8 +1347,15 @@ async fn check_workload_identity(
         pending_message: "Canary Job has not yet succeeded; Workload Identity may need to propagate",
     };
 
-    let (result, _) =
-        run_canary_job(namespace, base_metadata, tolerations, job_api, &config).await?;
+    let (result, _) = run_canary_job(
+        namespace,
+        base_metadata,
+        tolerations,
+        jobs,
+        job_api,
+        &config,
+    )
+    .await?;
     match result {
         CanaryResult::Complete => Ok(()),
         CanaryResult::Failed => unreachable!("run_canary_job returns Err for Failed"),
@@ -1487,23 +1368,21 @@ async fn check_workload_identity(
 }
 
 async fn change_statefulset_storage(
+    ctx: &Context,
     namespace: &str,
     base_metadata: &ObjectMeta,
     ss_api: &Api<StatefulSet>,
-    ss_store: &Store<StatefulSet>,
     pvc_api: &Api<PersistentVolumeClaim>,
-    pvc_meta_store: &Store<PartialObjectMeta<PersistentVolumeClaim>>,
     storage: &RestateClusterStorage,
 ) -> Result<(), Error> {
-    let params: PatchParams = PatchParams::apply("restate-operator").force();
     let resources = Some(restate_pvc_resources(storage));
 
     // ensure all existing pvcs have the right size and VAC set
-    // first, filter the pvc meta store for our label selector
+    // first, filter the pvc store for our label selector
     let labels = mandatory_labels(base_metadata);
-    let pvcs = pvc_meta_store.state().into_iter().filter(|pvc_meta| {
+    let pvcs = ctx.pvc_store.state().into_iter().filter(|pvc| {
         for (k, v) in &labels {
-            if pvc_meta.labels().get(k) != Some(v) {
+            if pvc.labels().get(k) != Some(v) {
                 return false;
             }
         }
@@ -1512,10 +1391,6 @@ async fn change_statefulset_storage(
 
     for pvc in pvcs {
         let name = pvc.name_any();
-        debug!(
-            "Applying PersistentVolumeClaim {} in namespace {}",
-            name, namespace
-        );
 
         let mut patched_spec = PersistentVolumeClaimSpec {
             resources: resources.clone(),
@@ -1527,22 +1402,22 @@ async fn change_statefulset_storage(
             patched_spec.volume_attributes_class_name = Some(volume_attributes_class_name.clone());
         }
 
-        let pvc = pvc_api
-            .patch(
-                &name,
-                &params,
-                &Patch::Apply(PersistentVolumeClaim {
+        let pvc = ctx
+            .persistent_volume_claims
+            .apply(
+                pvc_api,
+                &PersistentVolumeClaim {
                     metadata: ObjectMeta {
                         name: Some(name.clone()),
                         ..Default::default()
                     },
                     spec: Some(patched_spec),
                     status: None,
-                }),
+                },
             )
             .await?;
 
-        if pvc.status.and_then(|s| s.phase).as_deref() != Some("Bound") {
+        if pvc.status.as_ref().and_then(|s| s.phase.as_deref()) != Some("Bound") {
             return Err(Error::NotReady {
                 reason: "PersistentVolumeClaimNotBound".into(),
                 message: format!(
@@ -1554,7 +1429,7 @@ async fn change_statefulset_storage(
         }
     }
 
-    let existing = match ss_store.get(&ObjectRef::new(RESTATE_STATEFULSET_NAME).within(namespace)) {
+    let existing = match ctx.stateful_sets.cached(ss_api, RESTATE_STATEFULSET_NAME) {
         Some(existing) => existing,
         // no statefulset in cache; possibilities:
         // 1. first run and it hasn't ever been created => do nothing
@@ -1618,17 +1493,6 @@ async fn change_statefulset_storage(
     Ok(())
 }
 
-async fn apply_stateful_set(
-    namespace: &str,
-    ss_api: &Api<StatefulSet>,
-    ss: StatefulSet,
-) -> Result<StatefulSet, Error> {
-    let name = ss.metadata.name.as_ref().unwrap();
-    let params: PatchParams = PatchParams::apply("restate-operator").force();
-    debug!("Applying Stateful Set {} in namespace {}", name, namespace);
-    Ok(ss_api.patch(name, &params, &Patch::Apply(&ss)).await?)
-}
-
 fn validate_stateful_set_status(
     status: Option<StatefulSetStatus>,
     expected_replicas: i32,
@@ -1671,20 +1535,6 @@ fn validate_stateful_set_status(
     }
 
     Ok(())
-}
-
-async fn apply_pod_disruption_budget(
-    namespace: &str,
-    pdb_api: &Api<PodDisruptionBudget>,
-    pdb: PodDisruptionBudget,
-) -> Result<PodDisruptionBudget, Error> {
-    let name = pdb.metadata.name.as_ref().unwrap();
-    let params: PatchParams = PatchParams::apply("restate-operator").force();
-    debug!(
-        "Applying Pod Disruption Budget {} in namespace {}",
-        name, namespace
-    );
-    Ok(pdb_api.patch(name, &params, &Patch::Apply(&pdb)).await?)
 }
 
 #[cfg(test)]
@@ -2363,6 +2213,7 @@ mod tests {
                 "default",
                 &test_base_metadata(),
                 None,
+                &OwnedObjects::default(),
                 &Api::namespaced(client.clone(), "default"),
                 &Api::namespaced(client, "default"),
                 "alpine:3.21",

@@ -65,6 +65,7 @@ opentelemetry_sdk = "0.32.1"
 opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["tokio", "grpc-tonic", "trace"], optional = true }
 prometheus = "0.14.0"
 prost = "0.14.1"
+rand = "0.9"
 regex = "1.12.2"
 reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls", ] }
 schemars = { version = "1.2.0", features = ["chrono04"] }

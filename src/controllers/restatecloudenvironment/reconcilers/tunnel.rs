@@ -12,11 +12,7 @@ use k8s_openapi::{
     },
     apimachinery::pkg::{api::resource::Quantity, util::intstr::IntOrString},
 };
-use kube::{
-    Api,
-    api::{ObjectMeta, Patch, PatchParams},
-};
-use tracing::debug;
+use kube::{Api, api::ObjectMeta};
 
 use crate::{
     Error,
@@ -259,26 +255,6 @@ fn tunnel_service(base_metadata: &ObjectMeta, remote_proxy: bool) -> Service {
     }
 }
 
-async fn apply_deployment(
-    namespace: &str,
-    dp_api: &Api<Deployment>,
-    dp: Deployment,
-) -> Result<(), Error> {
-    let name = dp.metadata.name.as_ref().unwrap();
-    let params: PatchParams = PatchParams::apply("restate-operator").force();
-    debug!("Applying Deployment {} in namespace {}", name, namespace);
-    dp_api.patch(name, &params, &Patch::Apply(&dp)).await?;
-    Ok(())
-}
-
-async fn apply_service(namespace: &str, svc_api: &Api<Service>, svc: Service) -> Result<(), Error> {
-    let name = svc.metadata.name.as_ref().unwrap();
-    let params: PatchParams = PatchParams::apply("restate-operator").force();
-    debug!("Applying Service {} in namespace {}", name, namespace);
-    svc_api.patch(name, &params, &Patch::Apply(&svc)).await?;
-    Ok(())
-}
-
 pub async fn reconcile_tunnel(
     ctx: &Context,
     namespace: &str,
@@ -289,30 +265,30 @@ pub async fn reconcile_tunnel(
     let dp_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), namespace);
     let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), namespace);
 
-    apply_deployment(
-        namespace,
-        &dp_api,
-        tunnel_deployment(
-            base_metadata,
-            tunnel_name,
-            spec,
-            &ctx.tunnel_client_default_image,
-        ),
-    )
-    .await?;
+    ctx.deployments
+        .apply(
+            &dp_api,
+            &tunnel_deployment(
+                base_metadata,
+                tunnel_name,
+                spec,
+                &ctx.tunnel_client_default_image,
+            ),
+        )
+        .await?;
 
-    apply_service(
-        namespace,
-        &svc_api,
-        tunnel_service(
-            base_metadata,
-            spec.tunnel
-                .as_ref()
-                .and_then(|t| t.remote_proxy)
-                .unwrap_or_default(),
-        ),
-    )
-    .await?;
+    ctx.services
+        .apply(
+            &svc_api,
+            &tunnel_service(
+                base_metadata,
+                spec.tunnel
+                    .as_ref()
+                    .and_then(|t| t.remote_proxy)
+                    .unwrap_or_default(),
+            ),
+        )
+        .await?;
 
     Ok(())
 }
