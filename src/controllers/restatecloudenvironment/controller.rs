@@ -24,8 +24,8 @@ use tracing::*;
 use crate::controllers::owned_objects::OwnedObjects;
 use crate::controllers::{
     CrdWait, Diagnostics, RECONCILING_CONDITION, ReadinessGate, ResyncInterval, State,
-    log_suspended, reconciliation_suspended, state_after_reconcile, status_unchanged,
-    suspended_message, wait_for_crd,
+    cluster_scoped_owners, log_suspended, reconciliation_suspended, state_after_reconcile,
+    status_unchanged, suspended_message, wait_for_crd,
 };
 use crate::metrics::Metrics;
 use crate::resources::ReconciliationState;
@@ -363,8 +363,8 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     // Create a controller for RestateCloudEnvironment
     controller::Controller::new(rce, not_created_cfg)
         .shutdown_on_signal()
-        .owns_stream(deployment_reflector)
-        .owns_stream(service_reflector)
+        .watches_stream(deployment_reflector, cluster_scoped_owners)
+        .watches_stream(service_reflector, cluster_scoped_owners)
         .run(
             reconcile,
             error_policy,

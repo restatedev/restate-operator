@@ -8,6 +8,7 @@ use kube::Resource;
 use kube::client::Client;
 use kube::runtime::WatchStreamExt;
 use kube::runtime::events::{Event, EventType, Recorder};
+use kube::runtime::reflector::ObjectRef;
 use kube::runtime::{reflector, watcher};
 use serde::Serialize;
 use tokio::sync::RwLock;
@@ -330,6 +331,28 @@ impl ResyncInterval {
     pub fn next(&self) -> Duration {
         self.0.mul_f64(rand::random_range(0.9..1.1))
     }
+}
+
+/// The owners of `object` of the cluster-scoped kind `Owner`, for `watches_stream`.
+///
+/// Use this instead of `owns_stream` for namespaced children of a cluster-scoped owner:
+/// `owns_stream` keys the owner by the child's namespace, so the same owner would be queued
+/// under a second, namespaced key that reconciles (and requeues) alongside the real one.
+pub fn cluster_scoped_owners<Owner, K>(object: K) -> impl Iterator<Item = ObjectRef<Owner>>
+where
+    Owner: Resource<DynamicType = ()>,
+    K: Resource,
+{
+    object
+        .meta()
+        .owner_references
+        .clone()
+        .into_iter()
+        .flatten()
+        .filter(|owner| {
+            owner.api_version == Owner::api_version(&()) && owner.kind == Owner::kind(&())
+        })
+        .map(|owner| ObjectRef::new(&owner.name))
 }
 
 /// Whether applying `desired` as the status would leave `current` as it is, so the write can

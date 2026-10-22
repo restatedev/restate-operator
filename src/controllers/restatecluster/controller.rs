@@ -37,8 +37,8 @@ use tracing::*;
 use crate::controllers::owned_objects::OwnedObjects;
 use crate::controllers::{
     CrdWait, Diagnostics, RECONCILING_CONDITION, ReadinessGate, ResyncInterval, State,
-    log_suspended, reconciliation_suspended, state_after_reconcile, status_unchanged,
-    suspended_message, wait_for_api_groups, wait_for_crd,
+    cluster_scoped_owners, log_suspended, reconciliation_suspended, state_after_reconcile,
+    status_unchanged, suspended_message, wait_for_api_groups, wait_for_crd,
 };
 use crate::resources::ReconciliationState;
 use crate::resources::iampolicymembers::IAMPolicyMember;
@@ -522,13 +522,13 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
 
     let controller = Controller::new(rc_api, rc_cfg.clone())
         .shutdown_on_signal()
-        .owns_stream(svc_watcher)
-        .owns_stream(cm_watcher)
-        .owns_stream(ns_watcher)
-        .owns_stream(svcacc_watcher)
-        .owns_stream(pdb_watcher)
-        .owns_stream(np_watcher)
-        .owns_stream(ss_reflector)
+        .watches_stream(svc_watcher, cluster_scoped_owners)
+        .watches_stream(cm_watcher, cluster_scoped_owners)
+        .watches_stream(ns_watcher, cluster_scoped_owners)
+        .watches_stream(svcacc_watcher, cluster_scoped_owners)
+        .watches_stream(pdb_watcher, cluster_scoped_owners)
+        .watches_stream(np_watcher, cluster_scoped_owners)
+        .watches_stream(ss_reflector, cluster_scoped_owners)
         .watches_stream(pvc_reflector, |pvc| -> Option<ObjectRef<RestateCluster>> {
             let name = pvc.labels().get("app.kubernetes.io/name")?.as_str();
             if name != "restate" {
@@ -546,8 +546,10 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         let (pia_store, pia_watcher) = reflected(pia_api, cfg.clone());
         pod_identity_associations = OwnedObjects::watched(pia_store);
         // avoid apply loops that seem to happen with crds
-        controller
-            .owns_stream(pia_watcher.predicate_filter(changed_predicate.combine(status_predicate)))
+        controller.watches_stream(
+            pia_watcher.predicate_filter(changed_predicate.combine(status_predicate)),
+            cluster_scoped_owners,
+        )
     } else {
         controller
     };
@@ -561,7 +563,10 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
                 .labels("app.kubernetes.io/name in (restate-pia-canary,restate-wi-canary)"),
         );
         jobs = OwnedObjects::watched(job_store);
-        controller.owns_stream(job_watcher.predicate_filter(changed_predicate))
+        controller.watches_stream(
+            job_watcher.predicate_filter(changed_predicate),
+            cluster_scoped_owners,
+        )
     } else {
         controller
     };
@@ -570,7 +575,10 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         let (sgp_store, sgp_watcher) = reflected(sgp_api, cfg.clone());
         security_group_policies = OwnedObjects::watched(sgp_store);
         // avoid apply loops that seem to happen with crds
-        controller.owns_stream(sgp_watcher.predicate_filter(changed_predicate))
+        controller.watches_stream(
+            sgp_watcher.predicate_filter(changed_predicate),
+            cluster_scoped_owners,
+        )
     } else {
         controller
     };
@@ -579,7 +587,10 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         let (spc_store, spc_watcher) = reflected(spc_api, cfg.clone());
         secret_provider_classes = OwnedObjects::watched(spc_store);
         // avoid apply loops that seem to happen with crds
-        controller.owns_stream(spc_watcher.predicate_filter(changed_predicate))
+        controller.watches_stream(
+            spc_watcher.predicate_filter(changed_predicate),
+            cluster_scoped_owners,
+        )
     } else {
         controller
     };
@@ -587,8 +598,10 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     let controller = if watch_iam_policy_members {
         let (ipm_store, ipm_watcher) = reflected(ipm_api, cfg.clone());
         iam_policy_members = OwnedObjects::watched(ipm_store);
-        controller
-            .owns_stream(ipm_watcher.predicate_filter(changed_predicate.combine(status_predicate)))
+        controller.watches_stream(
+            ipm_watcher.predicate_filter(changed_predicate.combine(status_predicate)),
+            cluster_scoped_owners,
+        )
     } else {
         controller
     };
