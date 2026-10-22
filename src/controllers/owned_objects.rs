@@ -1,10 +1,9 @@
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
-use futures::FutureExt;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::Resource;
 use kube::api::{Api, DeleteParams, Patch, PatchParams};
@@ -25,7 +24,10 @@ use tracing::{debug, trace};
 /// busy status doesn't trigger re-applies. Nothing is persisted, so the first apply of each
 /// object after a restart always goes to the apiserver.
 ///
-/// A delete is skipped when the cache is synced and holds no such object.
+/// A delete is skipped when this process has already seen the object gone, and has neither
+/// applied it since nor seen it reappear in the cache. Checking with the apiserver once matters
+/// because the cache only holds objects matching its watch's label selector: an object of ours
+/// that lost its labels is invisible to it.
 ///
 /// Without a store, because the kind isn't watched, every write goes to the apiserver.
 pub struct OwnedObjects<K: Resource<DynamicType = ()> + 'static> {
@@ -33,6 +35,8 @@ pub struct OwnedObjects<K: Resource<DynamicType = ()> + 'static> {
     /// What this process last applied to each object, and what it looked like afterwards.
     /// Entries for objects deleted by someone else linger until reused; they are tiny.
     applied: Mutex<HashMap<ObjectRef<K>, Applied>>,
+    /// Objects this process has deleted, or found already gone, and not applied since.
+    deleted: Mutex<HashSet<ObjectRef<K>>>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -46,6 +50,7 @@ impl<K: Resource<DynamicType = ()> + 'static> Default for OwnedObjects<K> {
         Self {
             store: None,
             applied: Mutex::default(),
+            deleted: Mutex::default(),
         }
     }
 }
@@ -59,6 +64,7 @@ where
         Self {
             store: Some(store),
             applied: Mutex::default(),
+            deleted: Mutex::default(),
         }
     }
 
@@ -92,6 +98,7 @@ where
         debug!("Applying {key}");
         let params = PatchParams::apply("restate-operator").force();
         let applied = api.patch(name, &params, &Patch::Apply(desired)).await?;
+        self.deleted.lock().unwrap().remove(&key);
         self.applied.lock().unwrap().insert(
             key,
             Applied {
@@ -113,18 +120,20 @@ where
         self.applied.lock().unwrap().remove(&key);
 
         if let Some(store) = &self.store
-            && is_synced(store)
             && store.get(&key).is_none()
+            && self.deleted.lock().unwrap().contains(&key)
         {
-            trace!("{key} is not in the cache; skipping delete");
+            trace!("{key} is already gone; skipping delete");
             return Ok(());
         }
 
         debug!("Ensuring {key} does not exist");
         match api.delete(name, params).await {
-            Err(kube::Error::Api(kube::error::ErrorResponse { code: 404, .. })) => Ok(()),
+            Err(kube::Error::Api(kube::error::ErrorResponse { code: 404, .. })) | Ok(_) => {
+                self.deleted.lock().unwrap().insert(key);
+                Ok(())
+            }
             Err(err) => Err(err),
-            Ok(_) => Ok(()),
         }
     }
 }
@@ -134,18 +143,6 @@ fn object_ref<K: Resource<DynamicType = ()>>(api: &Api<K>, name: &str) -> Object
         Some(namespace) => ObjectRef::new(name).within(namespace),
         None => ObjectRef::new(name),
     }
-}
-
-/// Before its initial list completes, a store's misses say nothing about the apiserver.
-fn is_synced<K>(store: &Store<K>) -> bool
-where
-    K: Resource + Clone + 'static,
-    K::DynamicType: Eq + Hash + Clone,
-{
-    store
-        .wait_until_ready()
-        .now_or_never()
-        .is_some_and(|ready| ready.is_ok())
 }
 
 /// Changes whenever someone else writes what an apply would overwrite.
@@ -241,10 +238,13 @@ mod tests {
         // what we want changes
         objects.apply(&api, &configmap("new", None)).await.unwrap();
 
-        objects
-            .delete(&api, "absent", &DeleteParams::default())
-            .await
-            .unwrap();
+        // once the apiserver has said it is gone, it is not asked again
+        for _ in 0..2 {
+            objects
+                .delete(&api, "absent", &DeleteParams::default())
+                .await
+                .unwrap();
+        }
         objects
             .delete(&api, "config", &DeleteParams::default())
             .await
@@ -252,7 +252,7 @@ mod tests {
 
         assert_eq!(
             *methods.lock().unwrap(),
-            ["PATCH", "PATCH", "PATCH", "DELETE"]
+            ["PATCH", "PATCH", "PATCH", "DELETE", "DELETE"]
         );
     }
 }
