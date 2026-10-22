@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::Resource;
@@ -11,6 +12,10 @@ use kube::runtime::reflector::{ObjectRef, Store};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tracing::{debug, trace};
+
+/// How long a delete that found the object gone is trusted before it is checked again. Matches
+/// the default resync interval.
+const ABSENCE_RECHECK: Duration = Duration::from_secs(30 * 60);
 
 /// Server-side applies and deletes of one kind of object, skipping the ones the watch cache of
 /// that kind shows would change nothing.
@@ -24,10 +29,10 @@ use tracing::{debug, trace};
 /// busy status doesn't trigger re-applies. Nothing is persisted, so the first apply of each
 /// object after a restart always goes to the apiserver.
 ///
-/// A delete is skipped when this process has already seen the object gone, and has neither
-/// applied it since nor seen it reappear in the cache. Checking with the apiserver once matters
-/// because the cache only holds objects matching its watch's label selector: an object of ours
-/// that lost its labels is invisible to it.
+/// A delete is skipped when this process saw the object gone within the last 30 minutes, and
+/// has neither applied it since nor seen it reappear in the cache. The cache alone can't prove
+/// absence: it only holds objects matching its watch's label selector, so one recreated without
+/// our labels is invisible to it, and is caught by the recheck instead.
 ///
 /// Without a store, because the kind isn't watched, every write goes to the apiserver.
 pub struct OwnedObjects<K: Resource<DynamicType = ()> + 'static> {
@@ -35,8 +40,9 @@ pub struct OwnedObjects<K: Resource<DynamicType = ()> + 'static> {
     /// What this process last applied to each object, and what it looked like afterwards.
     /// Entries for objects deleted by someone else linger until reused; they are tiny.
     applied: Mutex<HashMap<ObjectRef<K>, Applied>>,
-    /// Objects this process has deleted, or found already gone, and not applied since.
-    deleted: Mutex<HashSet<ObjectRef<K>>>,
+    /// Objects this process has deleted, or found already gone, and not applied since, with
+    /// when it last checked.
+    deleted: Mutex<HashMap<ObjectRef<K>, Instant>>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -121,7 +127,12 @@ where
 
         if let Some(store) = &self.store
             && store.get(&key).is_none()
-            && self.deleted.lock().unwrap().contains(&key)
+            && self
+                .deleted
+                .lock()
+                .unwrap()
+                .get(&key)
+                .is_some_and(|checked| checked.elapsed() < ABSENCE_RECHECK)
         {
             trace!("{key} is already gone; skipping delete");
             return Ok(());
@@ -130,7 +141,7 @@ where
         debug!("Ensuring {key} does not exist");
         match api.delete(name, params).await {
             Err(kube::Error::Api(kube::error::ErrorResponse { code: 404, .. })) | Ok(_) => {
-                self.deleted.lock().unwrap().insert(key);
+                self.deleted.lock().unwrap().insert(key, Instant::now());
                 Ok(())
             }
             Err(err) => Err(err),
