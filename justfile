@@ -67,6 +67,7 @@ generate:
   cargo run --bin cluster_crdgen | grep -vF 'categories: []' > crd/restateclusters.yaml
   cargo run --bin deployment_crdgen | grep -vF 'categories: []' > crd/restatedeployments.yaml
   cargo run --bin cloud_crdgen | grep -vF 'categories: []' > crd/restatecloudenvironments.yaml
+  cargo run --bin endpoint_crdgen | grep -vF 'categories: []' > crd/restatedeploymentendpoints.yaml
 
 # Regenerate the Pkl bindings (a convenience for Pkl users) from the CRD YAML. Requires `pkl`;
 # run `just generate` first so the YAML is current. The generator package is pinned by version and

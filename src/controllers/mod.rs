@@ -21,6 +21,7 @@ use crate::resources::ReconciliationState;
 pub mod restatecloudenvironment;
 pub mod restatecluster;
 pub mod restatedeployment;
+pub mod restatedeploymentendpoint;
 
 /// How often each controller re-checks for its missing CRD, and how often the aggregate
 /// `WaitingForCRD` event is re-published while any are missing.
@@ -107,15 +108,17 @@ pub enum ReadinessGate {
     RestateCluster,
     RestateCloudEnvironment,
     RestateDeployment,
+    RestateDeploymentEndpoint,
 }
 
 impl ReadinessGate {
     /// Every gate. The order is the order flags are stored in [`Readiness`], so a gate's
     /// position here must match its discriminant; there is a test for that.
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 4] = [
         Self::RestateCluster,
         Self::RestateCloudEnvironment,
         Self::RestateDeployment,
+        Self::RestateDeploymentEndpoint,
     ];
 
     fn name(self) -> &'static str {
@@ -123,6 +126,7 @@ impl ReadinessGate {
             Self::RestateCluster => "RestateCluster",
             Self::RestateCloudEnvironment => "RestateCloudEnvironment",
             Self::RestateDeployment => "RestateDeployment",
+            Self::RestateDeploymentEndpoint => "RestateDeploymentEndpoint",
         }
     }
 }
@@ -251,6 +255,10 @@ pub struct State {
     /// the operator itself rather than about a resource it manages. `None` when the pod name
     /// was not supplied, eg when running outside the cluster.
     operator_object_ref: Option<ObjectReference>,
+
+    /// The workflow registry's index (`workflowRegistry.mode: operator`), served by
+    /// `crate::registry::server`.
+    workflow_registry: crate::registry::Registry,
 }
 
 /// State wrapper around the controller outputs for the web server
@@ -290,7 +298,14 @@ impl State {
             cluster_dns,
             canary_image,
             operator_object_ref,
+            workflow_registry: crate::registry::Registry::new(),
         }
+    }
+
+    /// The workflow registry's index: fed by the RestateDeploymentEndpoint watch, read by the
+    /// lookup server and the controllers.
+    pub fn workflow_registry(&self) -> &crate::registry::Registry {
+        &self.workflow_registry
     }
 
     /// Metrics getter
@@ -382,7 +397,7 @@ where
 /// The handlers are registered once, when this is constructed, rather than around each
 /// individual wait: recreating the signal streams would leave a brief window with no
 /// handler installed, during which a signal would terminate the process outright.
-struct ShutdownSignals {
+pub(crate) struct ShutdownSignals {
     #[cfg(unix)]
     sigterm: tokio::signal::unix::Signal,
     #[cfg(unix)]
@@ -390,7 +405,7 @@ struct ShutdownSignals {
 }
 
 impl ShutdownSignals {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         #[cfg(unix)]
         {
             use tokio::signal::unix::{SignalKind, signal};
@@ -405,7 +420,7 @@ impl ShutdownSignals {
     }
 
     /// Resolves once a termination signal has been received.
-    async fn recv(&mut self) {
+    pub(crate) async fn recv(&mut self) {
         #[cfg(unix)]
         {
             let Self { sigterm, sigint } = self;
@@ -797,7 +812,8 @@ mod tests {
             vec![
                 "RestateCluster",
                 "RestateCloudEnvironment",
-                "RestateDeployment"
+                "RestateDeployment",
+                "RestateDeploymentEndpoint"
             ]
         );
 
@@ -805,6 +821,9 @@ mod tests {
         // marking twice must not affect the other gates
         readiness.mark_ready(ReadinessGate::RestateCluster).await;
         readiness.mark_ready(ReadinessGate::RestateDeployment).await;
+        readiness
+            .mark_ready(ReadinessGate::RestateDeploymentEndpoint)
+            .await;
 
         let report = readiness.report().await;
         assert!(!report.ready);

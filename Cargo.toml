@@ -35,6 +35,11 @@ path = "src/bin/deployment_schemagen.rs"
 
 [[bin]]
 doc = false
+name = "endpoint_crdgen"
+path = "src/bin/endpoint_crdgen.rs"
+
+[[bin]]
+doc = false
 name = "cloud_crdgen"
 path = "src/bin/cloud_crdgen.rs"
 
@@ -58,15 +63,20 @@ chrono = { version = "0.4.42", features = ["serde"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 fnv = "1.0.7"
 futures = "0.3.31"
+# The registry (`src/registry`): the lookup API's address normalization and header checks.
+http = "1"
+# The registry's duration and timestamp formats (the runtime's `FriendlyDuration`).
+jiff = { version = "0.2.35", default-features = false, features = ["std"] }
 k8s-openapi = { version = "0.26.1", features = ["latest", "schemars"] }
 kube = { version = "2.0.1", features = ["runtime", "client", "derive", "unstable-runtime", ] }
 opentelemetry = { version = "0.32.0", features = ["trace"] }
 opentelemetry_sdk = "0.32.1"
 opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["tokio", "grpc-tonic", "trace"], optional = true }
+parking_lot = "0.12"
 prometheus = "0.14.0"
 prost = "0.14.1"
 regex = "1.12.2"
-reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls", ] }
+reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls", "http2"] }
 schemars = { version = "1.2.0", features = ["chrono04"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde-hashkey = "0.4.5"
@@ -87,6 +97,8 @@ url = { version = "2.5.7", features = ["serde"] }
 tonic-prost-build = "0.14.2"
 
 [dev-dependencies]
+# The registry's tests name actix's request type (`src/registry/tests.rs`).
+actix-http = "3"
 http = "1"
 # Drives real service registration and invocation lifecycle in the Docker-backed
 # RestateDeployment introspection e2e tests.

@@ -1,0 +1,127 @@
+# cluster-setup/k8s/relay.toml with its ${...} rendered: NAMESPACE = CLUSTER_NAMESPACE =
+# restate-demo (the package runs the relay in the cluster's namespace), RELAY_TUNNEL_IP =
+# 34.1.2.3, RELAY_SEEDS for 3 relays, and config.env's RELAY_LATEST_TTL_SECS (60) and
+# RELAY_CACHE_MAX_ENTRIES (2000000). The unit test in relay.rs renders the same config.
+# Regenerate by re-running that substitution on the cluster-setup file; never edit the values.
+
+# The relay's config. setup.sh renders the ${...} values (envsubst) and loads the
+# result into the `relay-config` ConfigMap (key relay.toml). __NODE_ID__ and
+# __POD_IP__ are per-pod: each pod sed-substitutes them at start (the relay config
+# has no env interpolation). Read the live one with:
+#   kubectl -n restate-demo get configmap relay-config -o jsonpath='{.data.relay\.toml}'
+#
+# Mode: preflight ([preflight]). Restate sends every unregistered service to
+# :9080/_/preflight/ through the in-cluster `relay` Service; the relay looks the
+# deployment up in the schema registry and opens it:
+#   - an address under external_proxy_url (/<env>/<tunnel>/<proto>/<host>/<port>/)
+#     goes down a tunnel: tunnel clients (anywhere, e.g. your laptop) dial IN on
+#     :19080 through the public relay-tunnel LoadBalancer. A request landing on a
+#     pod that doesn't hold the tunnel is forwarded to the pod that does
+#     ([cluster]);
+#   - anything else (the cron, in-cluster) is dialed directly over h2.
+
+# Restate's invokers + admins, via the ClusterIP `relay` Service. Not exposed
+# outside the cluster; no sender auth (demo, no NetworkPolicies).
+sender_listen = "0.0.0.0:9080"
+allow_unauthenticated_sender = true
+# Tunnel clients dial in here, through the public relay-tunnel LB.
+receiver_listen = "0.0.0.0:19080"
+
+# The Restate Cloud tunnel-server handshake (GET /_/start-tunnel), so the
+# unmodified Node SDK connectTunnel (../example, `npm run tunnel`) works. In
+# this mode every request down a tunnel must carry `x-restate-cluster-name:
+# env_<env>`: the registry's checkout deployment has it as an additional header
+# (registry/checkout.json).
+receiver_protocol = "start_tunnel"
+# Advertised back to tunnel clients in the handshake trailers; the same on every
+# pod (they name the LB / Service, not the pod). Both need an explicit port.
+# external_proxy_url is also how preflight tells a tunnel address from a direct
+# one.
+external_tunnel_url = "http://34.1.2.3:19080"
+external_proxy_url  = "http://relay.restate-demo.svc.cluster.local:9080"
+
+# The tunnel token -> the (env, tunnel) it may register. Mounted from the
+# `relay-auth` Secret (setup.sh creates it from secrets/tunnel-token).
+[auth.static]
+keys_path = "/etc/relay-auth/auth-keys.toml"
+
+[metrics]
+listen = "0.0.0.0:9000"   # /metrics, /healthz, /readyz
+
+# Staged SIGTERM drain: /readyz -> 503 at once, keep serving for the
+# deregistration hold, then the /_/drain-tunnel sweep (clients re-establish on
+# another pod) and the straggler window, then GOAWAY + drain in-flight streams.
+# Shorter than the relay's defaults (60/15/240/320, sized for AWS NLB target
+# deregistration): on GKE a terminating pod leaves the Service endpoints within
+# seconds. termination_grace_period_secs MUST equal the pod's
+# terminationGracePeriodSeconds (k8s/40-relay.yaml).
+[limits.drain]
+deregistration_delay_secs     = 15
+straggler_window_secs         = 5
+drain_timeout_secs            = 60
+termination_grace_period_secs = 70
+
+# Preflight: the schema registry (k8s/15-schema-registry.yaml) decides which
+# deployment runs each attempt and what each call targets. A scoped invocation's
+# calls are pinned to its scope (another scope fails the invocation); unscoped
+# ones (the cron) keep the scope their SDK chose. See the relay's
+# docs/preflight.md.
+[preflight]
+registry_url        = "http://schema-registry.restate-demo.svc.cluster.local:8090"
+registry_timeout_ms = 1000
+
+[preflight.cache]
+deployment_ttl_secs = 3600   # deployments by id (pinned attempts)
+latest_ttl_secs     = 60     # the latest deployment: a new one is used after up to this long (config.env)
+target_ttl_secs     = 30     # callee target type + retentions
+max_entries         = 2000000   # per cache; full ⇒ new answers aren't cached (config.env)
+
+# Retries of attempts the relay fails (registry down, tunnel not connected,
+# deployment unreachable): the relay sets the delay, Restate follows it.
+[preflight.retry]
+initial_interval_ms   = 100
+exponentiation_factor = 2.0
+max_interval_ms       = 10000
+max_attempts          = 70
+on_max_attempts       = "pause"
+
+# Multi-pod: chitchat gossip for membership (which pod holds which tunnel) +
+# cross-node forwarding. Gossip is unauthenticated UDP: pod network only.
+[cluster]
+node_id                      = "__NODE_ID__"   # the pod name, relay-N
+cluster_id                   = "restate-demo-relay"
+insecure_gossip_acknowledged = true
+gossip_listen                = "0.0.0.0:6000"  # UDP
+cluster_rpc_listen           = "0.0.0.0:6001"
+cluster_forward_listen       = "0.0.0.0:6002"
+advertise_addr               = "__POD_IP__"    # what peers dial (the bind is 0.0.0.0)
+# Durable per-pod incarnation (the per-pod PVC): a restarted relay-N can never
+# re-publish an equal or older gossip generation. Required with [cluster].
+generation_state_path        = "/var/lib/relay/generation.state"
+# Every pod, via the headless Service's stable per-pod DNS.
+seeds                        = ["relay-0.relay-headless.restate-demo.svc.cluster.local:6000", "relay-1.relay-headless.restate-demo.svc.cluster.local:6000", "relay-2.relay-headless.restate-demo.svc.cluster.local:6000"]
+
+# Plain routes (not preflight) run the same rewriting as preflight streams:
+# call stamping from the registry and the scope rule, with the scope from the
+# stream's StartMessage (v7). That's the cron's path (docs D18): it's in
+# Restate's own registry at /platform/cron/…, so Restate calls it directly
+# through the relay, no preflight.
+[service_protocol]
+policy = "preflight"
+
+# platform/cron straight to the cron's Service (h2c). Every other (env, tunnel)
+# pair keeps its tunnel (demo/sample: the laptop tunnel client). Preflight
+# streams pick their own route from the registry address, not from here.
+[[routing.static.routes]]
+env    = "platform"
+tunnel = "cron"
+direct = "http://cron.restate-demo.svc.cluster.local:9080"
+
+# The ingress mux: the only public way into Restate's ingress. No auth for now
+# (docs D17): every request names its tenant in the x-restate-tenant header,
+# and everything it does is in that tenant's scope. Uses [preflight]'s registry
+# client and target cache.
+[ingress_mux]
+listen   = "0.0.0.0:8080"
+upstream = "http://restate.restate-demo.svc.cluster.local:8080"
+admin    = "http://restate.restate-demo.svc.cluster.local:9070"   # ownership checks

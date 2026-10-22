@@ -202,7 +202,54 @@ fn restate_pod_disruption_budget(base_metadata: &ObjectMeta) -> PodDisruptionBud
     }
 }
 
-fn env(cluster_name: &str, custom: Option<&[EnvVar]>) -> Vec<EnvVar> {
+/// The Restate config the nodes run: the user's `spec.config`, plus what the operator's own
+/// features need when the user's config doesn't say otherwise (the user's keys win):
+///
+/// - with `cluster.autoProvision`, `auto-provision = false`, so that the nodes wait for the
+///   operator's provisioning instead of provisioning themselves;
+/// - with `cluster.autoProvision` or `multitenancy`, `[metadata-client] addresses` = the
+///   headless cluster Service. A node auto-includes only its own address, so without it the
+///   nodes other than the provisioned one never find the metadata cluster to join.
+///
+/// Otherwise the user's config is passed through untouched.
+pub fn effective_restate_config(spec: &RestateClusterSpec) -> Result<Option<String>, Error> {
+    let auto_provision = spec.cluster.as_ref().is_some_and(|c| c.auto_provision);
+    if !auto_provision && spec.multitenancy.is_none() {
+        return Ok(spec.config.clone());
+    }
+
+    let mut config: toml::Table = match spec.config.as_deref() {
+        Some(config) => toml::from_str(config).map_err(|e| {
+            Error::InvalidRestateConfig(format!("Failed to parse config TOML: {e}"))
+        })?,
+        None => toml::Table::new(),
+    };
+
+    if auto_provision && !config.contains_key("auto-provision") {
+        config.insert("auto-provision".into(), toml::Value::Boolean(false));
+    }
+
+    let metadata_client = config
+        .entry("metadata-client")
+        .or_insert_with(|| toml::Value::Table(Default::default()));
+    if let toml::Value::Table(metadata_client) = metadata_client
+        && !metadata_client.contains_key("addresses")
+    {
+        metadata_client.insert(
+            "addresses".into(),
+            toml::Value::Array(vec!["http://restate-cluster:5122/".into()]),
+        );
+    }
+
+    toml::to_string(&config)
+        .map(Some)
+        .map_err(|e| Error::InvalidRestateConfig(format!("Failed to render config TOML: {e}")))
+}
+
+/// The Restate container's env: the operator's defaults, then `operator_env` (what operator
+/// features such as multitenancy set), then the user's `custom` env, which wins by name over
+/// both.
+fn env(cluster_name: &str, operator_env: &[EnvVar], custom: Option<&[EnvVar]>) -> Vec<EnvVar> {
     let defaults = [
         ("RESTATE_LOG_FORMAT", "json"),
         ("RESTATE_CLUSTER_NAME", cluster_name),
@@ -234,7 +281,13 @@ fn env(cluster_name: &str, custom: Option<&[EnvVar]>) -> Vec<EnvVar> {
             name: k.into(),
             value: Some(v.into()),
             value_from: None,
-        });
+        })
+        .chain(
+            operator_env
+                .iter()
+                .filter(|e| !custom_names.contains(e.name.as_str()))
+                .cloned(),
+        );
 
     let downward_api_vars = [
         EnvVar {
@@ -380,6 +433,7 @@ fn hash_trusted_ca_cert_refs(certs: &[TrustedCACert]) -> String {
 
 const RESTATE_STATEFULSET_NAME: &str = "restate";
 
+#[allow(clippy::too_many_arguments)]
 fn restate_statefulset(
     base_metadata: &ObjectMeta,
     spec: &RestateClusterSpec,
@@ -387,6 +441,7 @@ fn restate_statefulset(
     signing_key: Option<(Volume, PathBuf)>,
     cm_name: String,
     canary_image: &str,
+    operator_env: &[EnvVar],
 ) -> StatefulSet {
     let metadata = object_meta(base_metadata, RESTATE_STATEFULSET_NAME);
 
@@ -457,6 +512,7 @@ fn restate_statefulset(
             .as_ref()
             .or(base_metadata.name.as_ref())
             .unwrap(),
+        operator_env,
         spec.compute.env.as_deref(),
     );
 
@@ -716,6 +772,8 @@ pub async fn reconcile_compute(
     spec: &RestateClusterSpec,
     status: Option<&RestateClusterStatus>,
     signing_key: Option<(Volume, PathBuf)>,
+    // env the multitenancy package sets on the nodes (preflight mode, advertised addresses)
+    operator_env: &[EnvVar],
 ) -> Result<(), Error> {
     let ss_api: Api<StatefulSet> = Api::namespaced(ctx.client.clone(), name);
     let cm_api: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), name);
@@ -741,7 +799,8 @@ pub async fn reconcile_compute(
     )
     .await?;
 
-    let cm = restate_configmap(base_metadata, spec.config.as_deref());
+    let config = effective_restate_config(spec)?;
+    let cm = restate_configmap(base_metadata, config.as_deref());
     let cm_name: String = cm.metadata.name.as_ref().unwrap().into();
     apply_configmap(name, &cm_api, cm).await?;
 
@@ -963,6 +1022,7 @@ pub async fn reconcile_compute(
         signing_key,
         cm_name,
         &ctx.canary_image,
+        operator_env,
     );
     validate_pod_volumes(&stateful_set)?;
     let ss = apply_stateful_set(name, &ss_api, stateful_set).await?;
@@ -983,23 +1043,33 @@ pub async fn reconcile_compute(
         if already_provisioned {
             trace!("Cluster already provisioned, skipping provisioning");
         } else {
-            // Validate that config or env var has auto-provision = false
+            // Validate that config or env var has auto-provision = false (the effective config
+            // defaults it, but the user may have set it, or RESTATE_AUTO_PROVISION, to true)
             provisioning::validate_config_for_provisioning(
-                spec.config.as_deref(),
+                config.as_deref(),
                 spec.compute.env.as_deref(),
             )?;
+            let request = provisioning::provision_request(config.as_deref())?;
 
-            // Check if restate-0 pod is Running (not Ready - it becomes Ready after provisioning)
-            if !provisioning::is_pod_running(&pod_api, "restate-0").await? {
+            // Wait for every node to be Running (not Ready - they become Ready after
+            // provisioning), like cluster-setup does before `restatectl provision`: the
+            // metadata cluster is formed by the nodes that are up to join it.
+            let not_running =
+                provisioning::pods_not_running(&pod_api, spec.compute.replicas.unwrap_or(1))
+                    .await?;
+            if !not_running.is_empty() {
                 return Err(Error::NotReady {
                     reason: "ProvisioningPodNotRunning".into(),
-                    message: "Waiting for restate-0 pod to be Running before provisioning".into(),
+                    message: format!(
+                        "Waiting for pods {} to be Running before provisioning",
+                        not_running.join(", ")
+                    ),
                     requeue_after: Some(Duration::from_secs(5)),
                 });
             }
 
             // Run gRPC provisioning - returns Ok for both new provisioning AND AlreadyExists
-            provisioning::run_provisioning(name, &ctx.cluster_dns).await?;
+            provisioning::run_provisioning(name, &ctx.cluster_dns, request).await?;
 
             // Return Provisioned error to signal that status.provisioned should be set to true
             // and reconciliation should be requeued immediately
@@ -1712,6 +1782,7 @@ mod tests {
             None,
             "test-config".into(),
             "alpine:3.21",
+            &[],
         )
     }
 
@@ -1925,6 +1996,7 @@ mod tests {
             Some(signing_key),
             "test-config".into(),
             "alpine:3.21",
+            &[],
         );
         let pod = pod_spec(&ss);
         let env = pod.containers[0].env.as_ref().expect("env present");
@@ -1938,6 +2010,104 @@ mod tests {
             !env.iter()
                 .any(|e| e.name == "RESTATE_REQUEST_IDENTITY_PRIVATE_KEY_PEM_FILE"),
             "deprecated flat signing-key env var must not be emitted"
+        );
+    }
+
+    #[test]
+    fn operator_env_is_set_and_user_env_wins_by_name() {
+        let operator_env = [
+            EnvVar {
+                name: "RESTATE_WORKER__INVOKER__SINGLE_ENDPOINT_MODE".into(),
+                value: Some("preflight".into()),
+                value_from: None,
+            },
+            EnvVar {
+                name: "RESTATE_INGRESS__EXPERIMENTAL_GENERIC_INVOKE".into(),
+                value: Some("true".into()),
+                value_from: None,
+            },
+        ];
+        let custom = [EnvVar {
+            name: "RESTATE_INGRESS__EXPERIMENTAL_GENERIC_INVOKE".into(),
+            value: Some("false".into()),
+            value_from: None,
+        }];
+        let env = env("test", &operator_env, Some(&custom));
+
+        let values = |name: &str| -> Vec<Option<&str>> {
+            env.iter()
+                .filter(|e| e.name == name)
+                .map(|e| e.value.as_deref())
+                .collect()
+        };
+        assert_eq!(
+            values("RESTATE_WORKER__INVOKER__SINGLE_ENDPOINT_MODE"),
+            vec![Some("preflight")]
+        );
+        assert_eq!(
+            values("RESTATE_INGRESS__EXPERIMENTAL_GENERIC_INVOKE"),
+            vec![Some("false")]
+        );
+        // the operator's own defaults are still there
+        assert_eq!(values("RESTATE_CLUSTER_NAME"), vec![Some("test")]);
+    }
+
+    fn effective_config(config: Option<&str>, auto_provision: bool) -> Option<toml::Table> {
+        let spec = RestateClusterSpec {
+            config: config.map(Into::into),
+            cluster: Some(crate::resources::restateclusters::Cluster { auto_provision }),
+            ..Default::default()
+        };
+        effective_restate_config(&spec)
+            .unwrap()
+            .map(|c| toml::from_str(&c).unwrap())
+    }
+
+    #[test]
+    fn effective_config_is_untouched_without_auto_provision_or_multitenancy() {
+        let spec = RestateClusterSpec {
+            config: Some("# comments survive\nroles = [\"worker\"]\n".into()),
+            ..Default::default()
+        };
+        assert_eq!(effective_restate_config(&spec).unwrap(), spec.config);
+    }
+
+    #[test]
+    fn effective_config_defaults_for_auto_provision() {
+        let config = effective_config(Some("default-num-partitions = 128"), true).unwrap();
+        assert_eq!(config["auto-provision"].as_bool(), Some(false));
+        assert_eq!(config["default-num-partitions"].as_integer(), Some(128));
+        assert_eq!(
+            config["metadata-client"]["addresses"],
+            toml::Value::Array(vec!["http://restate-cluster:5122/".into()])
+        );
+        // and that passes the provisioning check
+        let rendered = toml::to_string(&config).unwrap();
+        assert!(provisioning::validate_config_for_provisioning(Some(&rendered), None).is_ok());
+    }
+
+    #[test]
+    fn effective_config_user_keys_win() {
+        let config = effective_config(
+            Some(
+                r#"
+                auto-provision = true
+                [metadata-client]
+                addresses = ["http://elsewhere:5122/"]
+                type = "replicated"
+                "#,
+            ),
+            true,
+        )
+        .unwrap();
+        assert_eq!(config["auto-provision"].as_bool(), Some(true));
+        assert_eq!(
+            config["metadata-client"]["addresses"],
+            toml::Value::Array(vec!["http://elsewhere:5122/".into()])
+        );
+        assert_eq!(
+            config["metadata-client"]["type"].as_str(),
+            Some("replicated")
         );
     }
 
@@ -2561,6 +2731,7 @@ mod tests {
             None,
             "config-abc".into(),
             "busybox:uclibc",
+            &[],
         );
         let pod_annotations = ss
             .spec
@@ -2600,6 +2771,7 @@ mod tests {
             None,
             "config-abc".into(),
             "busybox:uclibc",
+            &[],
         );
         let pod_labels = ss.spec.unwrap().template.metadata.unwrap().labels.unwrap();
 
@@ -2620,6 +2792,7 @@ mod tests {
             None,
             "config-abc".into(),
             "busybox:uclibc",
+            &[],
         );
         let tmpl = ss.spec.unwrap().template.metadata.unwrap();
 

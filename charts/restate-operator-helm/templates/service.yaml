@@ -23,3 +23,27 @@ spec:
       name: http
   selector:
     app: {{ include "controller.fullname" . }}
+---
+# The workflow registry the operator serves for clusters in workflowRegistry.mode: operator:
+# the registry lookups the relay and the ingress mux call (8090, under /clusters/<cluster>),
+# and the web UI's per-scope read API (8091). Only ready pods: a pod is ready once its index
+# has synced, so a fresh one never answers "not found" for something that exists.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "controller.fullname" . }}-registry
+  labels:
+    {{- include "controller.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8090
+      targetPort: registry
+      protocol: TCP
+      name: registry
+    - port: 8091
+      targetPort: registry-read
+      protocol: TCP
+      name: registry-read
+  selector:
+    app: {{ include "controller.fullname" . }}

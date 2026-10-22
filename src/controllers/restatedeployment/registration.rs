@@ -193,7 +193,7 @@ where
 
 /// A deployment as Restate returned it from registration.
 #[derive(Debug, Clone)]
-pub(super) struct RegisteredDeployment {
+pub(crate) struct RegisteredDeployment {
     pub id: String,
     /// The services Restate discovered at this endpoint — what [`confirm_latest`] checks.
     pub services: Vec<String>,
@@ -251,9 +251,31 @@ pub(super) async fn register_deployment(
         payload["use_http_11"] = serde_json::Value::Bool(use_http11);
     }
 
-    let resp = ctx
-        .request(Method::POST, endpoint, "/deployments")?
-        .json(&payload)
+    let registered = post_deployment(
+        ctx.request(Method::POST, endpoint, "/deployments")?,
+        &payload,
+    )
+    .await?;
+
+    tracing::info!(
+        deployment_id = %registered.id,
+        url = %service_endpoint,
+        force = overwrite.force(),
+        "Successfully registered Restate deployment"
+    );
+
+    Ok(registered)
+}
+
+/// Send a `POST /deployments` built by the caller (admin URL, auth) with this body, and read
+/// back what Restate registered. Shared with the RestateCluster's cron registration, which
+/// talks to the cluster's own admin API rather than to a `spec.restate.register` endpoint.
+pub(crate) async fn post_deployment(
+    request: reqwest::RequestBuilder,
+    payload: &serde_json::Value,
+) -> Result<RegisteredDeployment> {
+    let resp = request
+        .json(payload)
         .send()
         .await
         .map_err(Error::AdminCallFailed)?;
@@ -262,13 +284,6 @@ pub(super) async fn register_deployment(
         .json()
         .await
         .map_err(Error::AdminCallFailed)?;
-
-    tracing::info!(
-        deployment_id = %resp.id,
-        url = %service_endpoint,
-        force = overwrite.force(),
-        "Successfully registered Restate deployment"
-    );
 
     Ok(RegisteredDeployment {
         id: resp.id,

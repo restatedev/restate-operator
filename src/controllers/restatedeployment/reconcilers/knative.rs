@@ -47,6 +47,8 @@ pub async fn reconcile_knative(
         "Reconciling Knative deployment"
     );
 
+    crate::controllers::restatedeployment::operator_registry::reject_knative(ctx, rsd)?;
+
     // Determine new tag for this deployment and hence the Configuration and Route names
     let tag = determine_tag(rsd)?;
     trace!(tag = %tag, "Determined deployment tag");

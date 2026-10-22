@@ -21,6 +21,7 @@ use crate::controllers::restatedeployment::cleanup::{
 use crate::controllers::restatedeployment::controller::{
     APP_MANAGED_BY_LABEL, Context, OWNED_BY_LABEL, RESTATE_DEPLOYMENT_ID_ANNOTATION,
 };
+use crate::controllers::restatedeployment::operator_registry;
 use crate::resources::restatecloudenvironments::InProcessTunnelParams;
 use crate::resources::restatedeployments::RestateDeployment;
 use crate::{Error, Result};
@@ -332,6 +333,8 @@ pub async fn cleanup_old_replicasets(
     // Keep track of how many zero-scaled rs there are (for revision history limit)
     let mut historic_count = 0;
     let mut next_removal = None;
+    // In operator mode a version is an endpoint object, not a registration in Restate.
+    let operator_mode = operator_registry::operator_cluster(ctx, rsd).is_some();
 
     let now = chrono::Utc::now();
 
@@ -493,6 +496,13 @@ pub async fn cleanup_old_replicasets(
                         .await?;
                 }
 
+                // In operator mode a drained version leaves the registry now, even if its
+                // ReplicaSet stays around for a rollback: its endpoint object is what costs
+                // etcd and operator memory, and a rollback rediscovers it.
+                if operator_mode && deployment_exists {
+                    operator_registry::remove_endpoint(ctx, namespace, &rs_name).await?;
+                }
+
                 // If we are here, there is a 0 sized replicaset which should be subject to the history limit
                 if retain_for_rollback(mode, historic_count, rsd.spec.revision_history_limit) {
                     historic_count += 1;
@@ -508,7 +518,7 @@ pub async fn cleanup_old_replicasets(
                     });
                 }
 
-                if deployment_exists {
+                if deployment_exists && !operator_mode {
                     let rs_deployment_id = rs_deployment_id.unwrap();
 
                     debug!(
@@ -944,6 +954,7 @@ mod tests {
             let (secret_store, secret_writer) = store_of(vec![]);
             let (revision_store, revision_writer) = store_of(vec![]);
             let (configuration_store, configuration_writer) = store_of(vec![]);
+            let (clusters_store, clusters_writer) = store_of(vec![]);
 
             let ctx = Context::new(
                 client.clone(),
@@ -953,6 +964,7 @@ mod tests {
                 revision_store,
                 configuration_store,
                 hpa_store,
+                clusters_store,
                 Metrics::default(),
                 State::new(
                     None,
@@ -979,6 +991,7 @@ mod tests {
                     secret_writer,
                     revision_writer,
                     configuration_writer,
+                    clusters_writer,
                 ],
             }
         }

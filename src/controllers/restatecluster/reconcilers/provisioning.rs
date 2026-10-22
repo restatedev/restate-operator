@@ -12,6 +12,8 @@ pub mod node_ctl_svc {
     tonic::include_proto!("restate.node_ctl_svc");
 }
 
+use node_ctl_svc::{ProvisionClusterRequest, ReplicationProperty};
+
 /// Validates that Restate's auto-provision is disabled when using operator-managed provisioning.
 ///
 /// The RESTATE_AUTO_PROVISION environment variable takes precedence over the config file setting.
@@ -86,6 +88,93 @@ pub fn validate_config_for_provisioning(
     }
 }
 
+/// The provisioning request for a cluster with this (effective) Restate config: what
+/// `restatectl provision --num-partitions <n> --replication <r> --log-provider replicated`
+/// sends, with `n` and `r` from the config's `default-num-partitions` / `default-replication`
+/// (left to the node's own defaults when the config doesn't set them), and the replicated log
+/// provider unless `[bifrost] default-provider` names another one.
+///
+/// `--replication` sets both the partition and the log replication, so this does too.
+pub fn provision_request(config: Option<&str>) -> Result<ProvisionClusterRequest, Error> {
+    let parsed: toml::Table = match config {
+        Some(config) => toml::from_str(config).map_err(|e| {
+            Error::InvalidRestateConfig(format!("Failed to parse config TOML: {e}"))
+        })?,
+        None => toml::Table::new(),
+    };
+
+    let num_partitions = match parsed.get("default-num-partitions") {
+        None => None,
+        Some(toml::Value::Integer(n)) if (1..=i64::from(u16::MAX)).contains(n) => Some(*n as u32),
+        Some(other) => {
+            return Err(Error::InvalidRestateConfig(format!(
+                "default-num-partitions must be an integer in 1..=65535, got {other}"
+            )));
+        }
+    };
+
+    let replication = parsed
+        .get("default-replication")
+        .map(replication_property)
+        .transpose()?
+        .map(|replication_property| ReplicationProperty {
+            replication_property,
+        });
+
+    let log_provider = parsed
+        .get("bifrost")
+        .and_then(|b| b.get("default-provider"))
+        .and_then(|p| p.as_str())
+        .unwrap_or("replicated")
+        .to_owned();
+
+    Ok(ProvisionClusterRequest {
+        dry_run: false,
+        num_partitions,
+        partition_replication: replication.clone(),
+        log_provider: Some(log_provider),
+        log_replication: replication,
+        target_nodeset_size: None,
+    })
+}
+
+/// A config's replication property (`2`, `"{zone: 2}"` or `{ zone = 2 }`) in the string form
+/// the gRPC API parses (`{node: 2}`, `{zone: 2}`), the same as restatectl's.
+fn replication_property(value: &toml::Value) -> Result<String, Error> {
+    let invalid = || {
+        Error::InvalidRestateConfig(format!(
+            "default-replication must be a positive integer, a string such as \"{{zone: 2}}\" or a table of scope = factor, got {value}"
+        ))
+    };
+    match value {
+        toml::Value::Integer(n) if *n > 0 => Ok(format!("{{node: {n}}}")),
+        toml::Value::String(s) => Ok(s.clone()),
+        toml::Value::Table(scopes) if !scopes.is_empty() => {
+            let scopes = scopes
+                .iter()
+                .map(|(scope, factor)| match factor {
+                    toml::Value::Integer(n) if *n > 0 => Ok(format!("{scope}: {n}")),
+                    _ => Err(invalid()),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(format!("{{{}}}", scopes.join(", ")))
+        }
+        _ => Err(invalid()),
+    }
+}
+
+/// The pods of the first `replicas` StatefulSet ordinals that aren't Running yet.
+pub async fn pods_not_running(pod_api: &Api<Pod>, replicas: i32) -> Result<Vec<String>, Error> {
+    let mut not_running = Vec::new();
+    for i in 0..replicas {
+        let pod_name = format!("restate-{i}");
+        if !is_pod_running(pod_api, &pod_name).await? {
+            not_running.push(pod_name);
+        }
+    }
+    Ok(not_running)
+}
+
 /// Checks if the specified pod is in Running phase.
 /// Returns true if the pod exists and is Running, false otherwise.
 pub async fn is_pod_running(pod_api: &Api<Pod>, pod_name: &str) -> Result<bool, Error> {
@@ -110,8 +199,15 @@ pub async fn is_pod_running(pod_api: &Api<Pod>, pod_name: &str) -> Result<bool, 
 
 /// Runs the gRPC provisioning call against the restate-0 pod.
 /// Returns Ok(()) if provisioning succeeded or if the cluster was already provisioned.
-pub async fn run_provisioning(namespace: &str, cluster_dns: &str) -> Result<(), Error> {
-    use node_ctl_svc::ProvisionClusterRequest;
+///
+/// One node only, like restatectl (which, given several `--address`es, uses the first): the
+/// other nodes join the metadata cluster it creates through `[metadata-client] addresses`.
+/// Falling back to another node when restate-0 doesn't answer could provision two clusters.
+pub async fn run_provisioning(
+    namespace: &str,
+    cluster_dns: &str,
+    request: ProvisionClusterRequest,
+) -> Result<(), Error> {
     use node_ctl_svc::node_ctl_svc_client::NodeCtlSvcClient;
     use tonic::transport::Channel;
 
@@ -132,17 +228,7 @@ pub async fn run_provisioning(namespace: &str, cluster_dns: &str) -> Result<(), 
     // Create the client
     let mut client = NodeCtlSvcClient::new(channel);
 
-    // Create the provisioning request with default values
-    let request = ProvisionClusterRequest {
-        dry_run: false,
-        num_partitions: None,
-        partition_replication: None,
-        log_provider: None,
-        log_replication: None,
-        target_nodeset_size: None,
-    };
-
-    info!("Calling ProvisionCluster RPC");
+    info!(?request, "Calling ProvisionCluster RPC");
 
     match client.provision_cluster(request).await {
         Ok(response) => {
@@ -318,6 +404,77 @@ mod tests {
         "#;
         let env: Vec<EnvVar> = vec![];
         assert!(validate_config_for_provisioning(Some(config), Some(&env)).is_ok());
+    }
+
+    #[test]
+    fn provision_request_matches_restatectl_provision() {
+        // What cluster-setup's `restatectl provision --num-partitions 128 --replication 2
+        // --log-provider replicated` sends.
+        let config = r#"
+            roles = ["worker", "admin", "log-server", "http-ingress", "metadata-server"]
+            default-num-partitions = 128
+            default-replication = 2
+        "#;
+        let request = provision_request(Some(config)).unwrap();
+        let replication = Some(ReplicationProperty {
+            replication_property: "{node: 2}".into(),
+        });
+        assert_eq!(
+            request,
+            ProvisionClusterRequest {
+                dry_run: false,
+                num_partitions: Some(128),
+                partition_replication: replication.clone(),
+                log_provider: Some("replicated".into()),
+                log_replication: replication,
+                target_nodeset_size: None,
+            }
+        );
+    }
+
+    #[test]
+    fn provision_request_defaults_to_the_nodes_config() {
+        let request = provision_request(None).unwrap();
+        assert_eq!(request.num_partitions, None);
+        assert_eq!(request.partition_replication, None);
+        assert_eq!(request.log_replication, None);
+        assert_eq!(request.log_provider.as_deref(), Some("replicated"));
+    }
+
+    #[test]
+    fn provision_request_replication_forms() {
+        let replication = |config: &str| {
+            provision_request(Some(config))
+                .unwrap()
+                .partition_replication
+                .unwrap()
+                .replication_property
+        };
+        assert_eq!(
+            replication(r#"default-replication = "{zone: 2}""#),
+            "{zone: 2}"
+        );
+        assert_eq!(
+            replication("default-replication = { region = 1, zone = 2 }"),
+            "{region: 1, zone: 2}"
+        );
+        assert!(provision_request(Some("default-replication = 0")).is_err());
+        assert!(provision_request(Some("default-num-partitions = 0")).is_err());
+    }
+
+    #[test]
+    fn provision_request_log_provider_from_config() {
+        let config = r#"
+            [bifrost]
+            default-provider = "local"
+        "#;
+        assert_eq!(
+            provision_request(Some(config))
+                .unwrap()
+                .log_provider
+                .as_deref(),
+            Some("local")
+        );
     }
 
     #[test]

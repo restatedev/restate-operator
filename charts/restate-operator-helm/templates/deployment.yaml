@@ -47,6 +47,12 @@ spec:
             - name: http
               containerPort: 8080
               protocol: TCP
+            - name: registry
+              containerPort: 8090
+              protocol: TCP
+            - name: registry-read
+              containerPort: 8091
+              protocol: TCP
           env:
             - name: RUST_LOG
               value: {{ .Values.logging.env_filter }}

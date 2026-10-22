@@ -39,6 +39,21 @@ rules:
       - patch
     apiGroups:
       - restate.dev
+  # Operator mode (workflowRegistry.mode: operator): the operator creates a
+  # RestateDeploymentEndpoint per RestateDeployment version, discovers every endpoint
+  # (hand-made ones too), writes their status, and deletes drained ones.
+  - resources:
+      - restatedeploymentendpoints
+      - restatedeploymentendpoints/status
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - patch
+      - delete
+    apiGroups:
+      - restate.dev
   - resources:
       - events
     verbs:
@@ -61,6 +76,8 @@ rules:
       - secretproviderclasses
       - replicasets
       - replicasets/scale
+      # the multitenant package (spec.multitenancy): the cron's and the registry's workloads
+      - deployments
     verbs:
       - get
       - list
@@ -82,11 +99,18 @@ rules:
       - securitygrouppolicies
       - secretproviderclasses
       - replicasets
+      # the multitenant package replaces these when its spec changes
+      - deployments
+      - services
+      - configmaps
+      - poddisruptionbudgets
     verbs:
       - delete
     apiGroups:
+      - ''
       - batch
       - apps
+      - policy
       - networking.k8s.io
       - vpcresources.k8s.aws
       - secrets-store.csi.x-k8s.io
@@ -205,3 +229,28 @@ roleRef:
   kind: Role
   name: {{ include "controller.fullname" . }}
   apiGroup: rbac.authorization.k8s.io
+---
+# Who may create RestateDeploymentEndpoints (deployments that run outside the operator) and
+# RestateDeployments: aggregated into the built-in edit and admin roles, so anyone who can edit
+# a namespace can deploy to it. Nobody but the operator writes their status.
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: restate-deployment-endpoint-editor
+  labels:
+    rbac.authorization.k8s.io/aggregate-to-edit: "true"
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"
+rules:
+  - resources:
+      - restatedeploymentendpoints
+      - restatedeployments
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+    apiGroups:
+      - restate.dev

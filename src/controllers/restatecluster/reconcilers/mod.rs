@@ -3,9 +3,13 @@ use std::collections::BTreeMap;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
 
 pub mod compute;
+mod cron;
+pub mod multitenancy;
 pub mod network_policies;
 pub mod provisioning;
 mod quantity_parser;
+mod registry;
+mod relay;
 pub mod signing_key;
 
 // resource_labels returns labels to apply to all created resources on top of the RestateCluster labels

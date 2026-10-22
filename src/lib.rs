@@ -151,6 +151,9 @@ impl Error {
 
 pub mod controllers;
 
+/// The workflow registry in the operator (`workflowRegistry.mode: operator`)
+pub mod registry;
+
 /// Log and trace integrations
 pub mod telemetry;
 

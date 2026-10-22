@@ -1,0 +1,393 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: restatedeploymentendpoints.restate.dev
+spec:
+  group: restate.dev
+  names:
+    kind: RestateDeploymentEndpoint
+    plural: restatedeploymentendpoints
+    shortNames:
+    - rsde
+    singular: restatedeploymentendpoint
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.tenant
+      name: Tenant
+      type: string
+    - jsonPath: .status.summary
+      name: Services
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    - jsonPath: .status.deploymentId
+      name: Deployment ID
+      priority: 1
+      type: string
+    - jsonPath: .spec.address
+      name: Address
+      priority: 1
+      type: string
+    name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for RestateDeploymentEndpointSpec via `CustomResource`
+        properties:
+          spec:
+            description: |-
+              A Restate deployment served by the operator's workflow registry. The spec is immutable: a new
+              address (or anything else) is a new deployment, so a new object.
+            properties:
+              additionalHeaders:
+                additionalProperties:
+                  type: string
+                description: Headers sent on discovery and, by the relay, on every request to the deployment.
+                type: object
+              address:
+                description: |-
+                  The deployment's base URL (http or https). The operator discovers it at
+                  `<address>discover`, the relay invokes `<address>invoke/{service}/{handler}`.
+                type: string
+              cluster:
+                description: |-
+                  The name of the RestateCluster whose workflow registry serves this deployment. Its
+                  `spec.multitenancy.workflowRegistry.mode` must be `operator`.
+                type: string
+              useHttp11:
+                description: Use HTTP/1.1 instead of HTTP/2. Not supported by the relay yet.
+                nullable: true
+                type: boolean
+            required:
+            - address
+            - cluster
+            type: object
+            x-kubernetes-validations:
+            - message: 'the spec of a RestateDeploymentEndpoint is immutable: create a new one for a new deployment'
+              rule: self == oldSelf
+          status:
+            description: Status of the RestateDeploymentEndpoint. Written by the operator only.
+            nullable: true
+            properties:
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: message is a human readable message indicating details about the transition. This may be an empty string.
+                      type: string
+                    observedGeneration:
+                      description: observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
+                      format: int64
+                      type: integer
+                    reason:
+                      description: reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              deploymentId:
+                description: The Restate deployment id (`dp_...`), derived from the object's uid.
+                nullable: true
+                type: string
+              discovered:
+                description: |-
+                  What discovery found, reduced to what the registry lookups need. Set once, when the
+                  endpoint becomes Ready; only the revisions change after that (a rollback).
+                nullable: true
+                properties:
+                  discoveredAt:
+                    description: When discovery succeeded.
+                    format: date-time
+                    type: string
+                  httpVersion:
+                    enum:
+                    - HTTP/1.1
+                    - HTTP/2
+                    type: string
+                  maxProtocolVersion:
+                    format: int32
+                    type: integer
+                  minProtocolVersion:
+                    format: int32
+                    type: integer
+                  protocolType:
+                    enum:
+                    - BidiStream
+                    - RequestResponse
+                    type: string
+                  sdkVersion:
+                    description: The `x-restate-server` header of the discovery response.
+                    nullable: true
+                    type: string
+                  services:
+                    items:
+                      description: 'A service of the deployment: what the lookups need, and its revision in the tenant.'
+                      properties:
+                        handlers:
+                          items:
+                            properties:
+                              input:
+                                description: What the ingress accepts as input (the registry's `InputPayload`).
+                                nullable: true
+                                properties:
+                                  contentType:
+                                    nullable: true
+                                    type: string
+                                  json:
+                                    type: boolean
+                                  required:
+                                    type: boolean
+                                required:
+                                - json
+                                - required
+                                type: object
+                              name:
+                                type: string
+                              options:
+                                description: |-
+                                  The settings of a service or a handler. Durations are in milliseconds; unset means not
+                                  configured (the server's defaults apply).
+                                properties:
+                                  abortTimeout:
+                                    format: uint64
+                                    minimum: 0.0
+                                    nullable: true
+                                    type: integer
+                                  idempotencyRetention:
+                                    format: uint64
+                                    minimum: 0.0
+                                    nullable: true
+                                    type: integer
+                                  inactivityTimeout:
+                                    format: uint64
+                                    minimum: 0.0
+                                    nullable: true
+                                    type: integer
+                                  journalRetention:
+                                    format: uint64
+                                    minimum: 0.0
+                                    nullable: true
+                                    type: integer
+                                  retryExponentiationFactor:
+                                    format: double
+                                    nullable: true
+                                    type: number
+                                  retryInitialInterval:
+                                    format: uint64
+                                    minimum: 0.0
+                                    nullable: true
+                                    type: integer
+                                  retryMaxAttempts:
+                                    format: uint64
+                                    minimum: 0.0
+                                    nullable: true
+                                    type: integer
+                                  retryMaxInterval:
+                                    format: uint64
+                                    minimum: 0.0
+                                    nullable: true
+                                    type: integer
+                                  retryOnMaxAttempts:
+                                    description: '`Pause` or `Kill`.'
+                                    nullable: true
+                                    type: string
+                                  statePreload:
+                                    description: 'Which state is preloaded: all of it (lazy state off), or only some keys (lazy state on).'
+                                    nullable: true
+                                    properties:
+                                      keys:
+                                        description: The keys preloaded when `lazy`.
+                                        items:
+                                          type: string
+                                        type: array
+                                      lazy:
+                                        description: 'Lazy state: only `keys` are preloaded. Not set: every key is.'
+                                        type: boolean
+                                    type: object
+                                type: object
+                              output:
+                                description: How the ingress returns the output (the registry's `OutputPayload`).
+                                nullable: true
+                                properties:
+                                  contentType:
+                                    nullable: true
+                                    type: string
+                                  setContentTypeIfEmpty:
+                                    type: boolean
+                                required:
+                                - setContentTypeIfEmpty
+                                type: object
+                              public:
+                                description: When not set, the service's.
+                                nullable: true
+                                type: boolean
+                              targetTy:
+                                enum:
+                                - Service
+                                - VirtualObjectExclusive
+                                - VirtualObjectShared
+                                - Workflow
+                                - WorkflowShared
+                                type: string
+                              workflowCompletionRetention:
+                                description: Milliseconds.
+                                format: uint64
+                                minimum: 0.0
+                                nullable: true
+                                type: integer
+                            required:
+                            - name
+                            - targetTy
+                            type: object
+                          type: array
+                        name:
+                          type: string
+                        options:
+                          description: |-
+                            The settings of a service or a handler. Durations are in milliseconds; unset means not
+                            configured (the server's defaults apply).
+                          properties:
+                            abortTimeout:
+                              format: uint64
+                              minimum: 0.0
+                              nullable: true
+                              type: integer
+                            idempotencyRetention:
+                              format: uint64
+                              minimum: 0.0
+                              nullable: true
+                              type: integer
+                            inactivityTimeout:
+                              format: uint64
+                              minimum: 0.0
+                              nullable: true
+                              type: integer
+                            journalRetention:
+                              format: uint64
+                              minimum: 0.0
+                              nullable: true
+                              type: integer
+                            retryExponentiationFactor:
+                              format: double
+                              nullable: true
+                              type: number
+                            retryInitialInterval:
+                              format: uint64
+                              minimum: 0.0
+                              nullable: true
+                              type: integer
+                            retryMaxAttempts:
+                              format: uint64
+                              minimum: 0.0
+                              nullable: true
+                              type: integer
+                            retryMaxInterval:
+                              format: uint64
+                              minimum: 0.0
+                              nullable: true
+                              type: integer
+                            retryOnMaxAttempts:
+                              description: '`Pause` or `Kill`.'
+                              nullable: true
+                              type: string
+                            statePreload:
+                              description: 'Which state is preloaded: all of it (lazy state off), or only some keys (lazy state on).'
+                              nullable: true
+                              properties:
+                                keys:
+                                  description: The keys preloaded when `lazy`.
+                                  items:
+                                    type: string
+                                  type: array
+                                lazy:
+                                  description: 'Lazy state: only `keys` are preloaded. Not set: every key is.'
+                                  type: boolean
+                              type: object
+                          type: object
+                        public:
+                          description: Reachable from the ingress (the manifest's `ingressPrivate`, inverted).
+                          type: boolean
+                        revision:
+                          description: |-
+                            The revision of this service in the tenant, assigned once at discovery (re-assigned on a
+                            rollback). The highest revision among the Ready endpoints is the latest.
+                          format: uint32
+                          minimum: 0.0
+                          type: integer
+                        ty:
+                          enum:
+                          - Service
+                          - VirtualObject
+                          - Workflow
+                          type: string
+                      required:
+                      - handlers
+                      - name
+                      - public
+                      - revision
+                      - ty
+                      type: object
+                    type: array
+                required:
+                - discoveredAt
+                - httpVersion
+                - maxProtocolVersion
+                - minProtocolVersion
+                - protocolType
+                - services
+                type: object
+              observedGeneration:
+                description: The generation observed by the operator.
+                format: int64
+                nullable: true
+                type: integer
+              phase:
+                description: |-
+                  Where the endpoint is in its life: Pending (not discovered yet), Ready (served), Failed
+                  (discovery or validation failed; see the conditions).
+                enum:
+                - Pending
+                - Ready
+                - Failed
+                nullable: true
+                type: string
+              summary:
+                description: The services and their revisions, e.g. `checkout@3`. For display.
+                nullable: true
+                type: string
+              tenant:
+                description: |-
+                  The tenant (scope) this deployment belongs to, from its namespace's `restate.dev/tenant`
+                  label. The registry trusts this field, not the endpoint's own labels.
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: RestateDeploymentEndpoint
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

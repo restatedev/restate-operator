@@ -53,6 +53,7 @@ use crate::controllers::restatedeployment::cleanup::{
     deployment_usage_query, describe_abandoned_versions, describe_blocking_versions,
     drain_deadline, unschedule_version_removal,
 };
+use crate::controllers::restatedeployment::operator_registry;
 use crate::controllers::restatedeployment::reconcilers;
 use crate::controllers::restatedeployment::registration::{self, RegistrationAction};
 
@@ -92,6 +93,10 @@ pub(super) struct Context {
     pub configuration_store: Store<Configuration>,
     /// Store for operator-managed per-version HorizontalPodAutoscalers
     pub hpa_store: Store<HorizontalPodAutoscaler>,
+    /// Store for RestateClusters: which workflow registry a deployment registers with
+    pub clusters_store: Store<RestateCluster>,
+    /// The operator's in-memory workflow registry (clusters in `workflowRegistry.mode: operator`)
+    pub registry: crate::registry::Registry,
     /// The namespace in which this operator runs
     pub operator_namespace: String,
     /// The cluster DNS suffix (e.g. "cluster.local")
@@ -114,6 +119,7 @@ impl Context {
         revision_store: Store<Revision>,
         configuration_store: Store<Configuration>,
         hpa_store: Store<HorizontalPodAutoscaler>,
+        clusters_store: Store<RestateCluster>,
         metrics: Metrics,
         state: State,
     ) -> Arc<Context> {
@@ -126,6 +132,8 @@ impl Context {
             revision_store,
             configuration_store,
             hpa_store,
+            clusters_store,
+            registry: state.workflow_registry().clone(),
             operator_namespace: state.operator_namespace,
             cluster_dns: state.cluster_dns,
             metrics,
@@ -500,6 +508,10 @@ impl RestateDeployment {
             )?,
         };
 
+        // In operator mode the version is an endpoint the operator discovers, not a
+        // registration in Restate (operator_registry.rs).
+        let operator_cluster = operator_registry::operator_cluster(&ctx, self);
+
         // this path only runs for a live RestateDeployment; deletion goes to `cleanup`.
         let existing_deployment_id = replicaset
             .annotations()
@@ -515,9 +527,13 @@ impl RestateDeployment {
             &versioned_name,
         ) && let Some(recorded_id) = existing_deployment_id.as_deref()
         {
-            let latest_ids =
-                registration::latest_deployment_ids(&ctx, &self.spec.restate.register).await?;
-            if latest_ids.contains(recorded_id) {
+            let latest = match &operator_cluster {
+                Some(cluster) => operator_registry::is_latest(&ctx, cluster, recorded_id),
+                None => registration::latest_deployment_ids(&ctx, &self.spec.restate.register)
+                    .await?
+                    .contains(recorded_id),
+            };
+            if latest {
                 return Ok((replicaset, None));
             }
         }
@@ -595,14 +611,31 @@ impl RestateDeployment {
             // A promotion re-registers the same endpoint with overwrite, so Restate bumps
             // its service revisions past the current latest without minting a new
             // deployment id — leaving invocations already pinned to it undisturbed.
-            let registered = registration::register_deployment(
-                &ctx,
-                self,
-                &service_endpoint,
-                self.spec.restate.use_http11.as_ref().cloned(),
-                action.overwrite(),
-            )
-            .await?;
+            let registered = match &operator_cluster {
+                Some(cluster) => {
+                    operator_registry::register(
+                        &ctx,
+                        self,
+                        cluster,
+                        &versioned_name,
+                        &service_endpoint,
+                        self.spec.restate.use_http11,
+                        action.overwrite(),
+                        replicaset.status.as_ref(),
+                    )
+                    .await?
+                }
+                None => {
+                    registration::register_deployment(
+                        &ctx,
+                        self,
+                        &service_endpoint,
+                        self.spec.restate.use_http11.as_ref().cloned(),
+                        action.overwrite(),
+                    )
+                    .await?
+                }
+            };
 
             // Recorded before the routing is confirmed, because the id is true either way:
             // it is what Restate holds for this endpoint. Deferring the annotation until
@@ -647,7 +680,13 @@ impl RestateDeployment {
             // existed, nothing changed" — both are a 200 carrying this deployment id. Ask
             // Restate what it actually routes before treating this as done, or `Ready=True`
             // would go on meaning "the pods are up" rather than "new work lands here".
-            registration::confirm_latest(&ctx, &self.spec.restate.register, &registered).await?;
+            match &operator_cluster {
+                Some(cluster) => operator_registry::confirm_latest(&ctx, cluster, &registered)?,
+                None => {
+                    registration::confirm_latest(&ctx, &self.spec.restate.register, &registered)
+                        .await?
+                }
+            }
 
             if let RegistrationAction::Promote { superseded_by } = &action {
                 ctx.recorder
@@ -1172,6 +1211,10 @@ impl RestateDeployment {
         ctx: &Context,
         mode: CleanupMode,
     ) -> Result<DeploymentUsageMap> {
+        if let Some(cluster) = operator_registry::operator_cluster(ctx, self) {
+            return operator_registry::list_deployments(ctx, self, &cluster, mode).await;
+        }
+
         let sql_query = deployment_usage_query(mode);
 
         let resp = ctx
@@ -1835,6 +1878,19 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     .touched_objects()
     .default_backoff();
 
+    // Which clusters serve their workflow registry from the operator. Prewarmed: an unsynced
+    // store would send an operator-mode deployment to Restate's admin API.
+    let (clusters_store, clusters_writer) = kube::runtime::reflector::store();
+    let clusters_reflector = prewarmed_reflector(
+        clusters_store.clone(),
+        clusters_writer,
+        kube::runtime::watcher(
+            Api::<RestateCluster>::all(client.clone()),
+            not_created_cfg.clone(),
+        ),
+    )
+    .await;
+
     let (secret_store, secret_writer) = kube::runtime::reflector::store();
     let secret_reflector = kube::runtime::reflector(
         secret_writer,
@@ -1929,6 +1985,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         // just so that these get polled; we have no way to figure out which rsd may use the updated rce or secret
         .watches_stream(rce_reflector, |_| std::iter::empty())
         .watches_stream(secret_reflector, |_| std::iter::empty())
+        .watches_stream(clusters_reflector, |_| std::iter::empty())
         .owns(services, cfg.clone())
         .owns_stream(hpa_reflector)
         .run(
@@ -1942,6 +1999,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
                 revision_store,
                 configuration_store,
                 hpa_store,
+                clusters_store,
                 metrics,
                 state,
             ),

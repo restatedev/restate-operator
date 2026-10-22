@@ -4,10 +4,11 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use futures::StreamExt;
-use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetStatus};
+use k8s_openapi::api::apps::v1::{Deployment, DeploymentStatus, StatefulSet, StatefulSetStatus};
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{
     ConfigMap, Namespace, PersistentVolumeClaim, Service, ServiceAccount, ServiceSpec,
+    ServiceStatus,
 };
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::api::policy::v1::PodDisruptionBudget;
@@ -50,6 +51,10 @@ use crate::resources::securitygrouppolicies::SecurityGroupPolicy;
 use crate::{Error, Metrics, Result, telemetry};
 
 use super::reconcilers::compute::reconcile_compute;
+use super::reconcilers::multitenancy::{
+    MULTITENANCY_CONDITIONS, MultitenancyReport, cleanup_multitenancy, reconcile_multitenancy,
+    reconcile_multitenancy_after_compute, validate_multitenancy,
+};
 use super::reconcilers::network_policies::reconcile_network_policies;
 use super::reconcilers::object_meta;
 use super::reconcilers::signing_key::reconcile_signing_key;
@@ -87,6 +92,8 @@ pub(super) struct Context {
     pub diagnostics: Arc<RwLock<Diagnostics>>,
     /// Prometheus metrics
     pub metrics: Metrics,
+    /// Client for the clusters' admin APIs (the multitenancy package's cron registration)
+    pub http_client: reqwest::Client,
 }
 
 impl Context {
@@ -118,6 +125,7 @@ impl Context {
             canary_image: state.canary_image.clone(),
             diagnostics: state.diagnostics.clone(),
             metrics,
+            http_client: reqwest::Client::new(),
         })
     }
 }
@@ -176,7 +184,15 @@ fn error_policy<K, C>(_rc: Arc<K>, _error: &Error, _ctx: C) -> Action {
 
 impl RestateCluster {
     // Reconcile (for non-finalizer related changes)
-    async fn reconcile(&self, ctx: Arc<Context>, name: &str) -> Result<()> {
+    //
+    // `multitenancy` is set to what the multitenancy package's reconcile found, as soon as it
+    // has run, so that its status is written even when a later step isn't ready.
+    async fn reconcile(
+        &self,
+        ctx: Arc<Context>,
+        name: &str,
+        multitenancy: &mut Option<MultitenancyReport>,
+    ) -> Result<()> {
         let client = ctx.client.clone();
         let nss: Api<Namespace> = Api::all(client.clone());
 
@@ -224,6 +240,9 @@ impl RestateCluster {
             .await?;
         }
 
+        // Before anything else is created for a package that can't work as specified
+        validate_multitenancy(self)?;
+
         reconcile_network_policies(
             &ctx,
             name,
@@ -244,6 +263,19 @@ impl RestateCluster {
         )
         .await?;
 
+        let restate_env = match self.spec.multitenancy.as_ref() {
+            Some(mt) => {
+                let (report, env) =
+                    reconcile_multitenancy(&ctx, name, &base_metadata, self, mt).await?;
+                *multitenancy = Some(report);
+                env
+            }
+            None => {
+                cleanup_multitenancy(&ctx, name).await?;
+                Vec::new()
+            }
+        };
+
         reconcile_compute(
             &ctx,
             name,
@@ -251,8 +283,13 @@ impl RestateCluster {
             &self.spec,
             self.status.as_ref(),
             signing_key,
+            &restate_env,
         )
         .await?;
+
+        if let (Some(mt), Some(report)) = (self.spec.multitenancy.as_ref(), multitenancy.as_mut()) {
+            reconcile_multitenancy_after_compute(&ctx, name, mt, report).await?;
+        }
 
         Ok(())
     }
@@ -311,6 +348,7 @@ impl RestateCluster {
                 conditions: Some(conditions),
                 reconciliation: Some(ReconciliationState::Disabled),
                 provisioned: self.status.as_ref().and_then(|s| s.provisioned),
+                multitenancy: self.status.as_ref().and_then(|s| s.multitenancy.clone()),
             }
         }));
         let ps = PatchParams::apply("restate-operator").force();
@@ -327,7 +365,9 @@ impl RestateCluster {
         // Track whether we should set provisioned = true in status
         let mut set_provisioned = false;
 
-        let (result, message, reason, status) = match self.reconcile(ctx, &name).await {
+        let mut multitenancy = None;
+        let reconciled = self.reconcile(ctx, &name, &mut multitenancy).await;
+        let (result, message, reason, status) = match reconciled {
             Ok(()) => {
                 // If no events were received, check back every 5 minutes
                 let action = Action::requeue(Duration::from_secs(5 * 60));
@@ -413,10 +453,47 @@ impl RestateCluster {
 
         if existing_ready.map(|r| &r.status) != Some(&ready.status) {
             // update transition time if the status has at all changed
-            ready.last_transition_time = Some(now)
+            ready.last_transition_time = Some(now.clone())
         }
 
         let ready_status = ready.status.clone();
+
+        // The package's status and conditions: as this reconcile found them, or as the last
+        // one left them if this one stopped before getting there.
+        let (multitenancy_status, multitenancy_conditions) =
+            match (self.spec.multitenancy.as_ref(), multitenancy) {
+                (None, _) => (None, Vec::new()),
+                (Some(_), Some(report)) => {
+                    let conditions = report
+                        .conditions()
+                        .into_iter()
+                        .map(|(r#type, state)| {
+                            condition(
+                                self.status.as_ref(),
+                                r#type,
+                                if state.ready { "True" } else { "False" },
+                                &state.reason,
+                                &state.message,
+                                &now,
+                            )
+                        })
+                        .collect();
+                    (Some(report.status), conditions)
+                }
+                (Some(_), None) => (
+                    self.status.as_ref().and_then(|s| s.multitenancy.clone()),
+                    self.status
+                        .as_ref()
+                        .and_then(|s| s.conditions.as_ref())
+                        .into_iter()
+                        .flatten()
+                        .filter(|c| MULTITENANCY_CONDITIONS.contains(&c.r#type.as_str()))
+                        .cloned()
+                        .collect(),
+                ),
+            };
+        let mut conditions = vec![ready];
+        conditions.extend(multitenancy_conditions);
 
         // Preserve the provisioned status from the existing status, or set it if we just provisioned
         let provisioned = if set_provisioned {
@@ -430,12 +507,13 @@ impl RestateCluster {
             "status": RestateClusterStatus {
                 // Replacing the whole list is what clears the `Reconciling` condition after
                 // a suspension.
-                conditions: Some(vec![ready]),
+                conditions: Some(conditions),
                 reconciliation: Some(state_after_reconcile(
                     self.status.as_ref().and_then(|s| s.reconciliation),
                     &ready_status,
                 )),
                 provisioned,
+                multitenancy: multitenancy_status,
             }
         }));
         let ps = PatchParams::apply("restate-operator").force();
@@ -460,6 +538,35 @@ impl RestateCluster {
             )
             .await?;
         Ok(Action::await_change())
+    }
+}
+
+/// A condition of type `r#type`, keeping the existing one's transition time unless the status
+/// changes.
+fn condition(
+    status: Option<&RestateClusterStatus>,
+    r#type: &str,
+    condition_status: &str,
+    reason: &str,
+    message: &str,
+    now: &k8s_openapi::apimachinery::pkg::apis::meta::v1::Time,
+) -> RestateClusterCondition {
+    let existing = status
+        .and_then(|s| s.conditions.as_ref())
+        .and_then(|c| c.iter().find(|cond| cond.r#type == r#type));
+    let last_transition_time = match existing {
+        Some(existing) if existing.status == condition_status => existing
+            .last_transition_time
+            .clone()
+            .unwrap_or_else(|| now.clone()),
+        _ => now.clone(),
+    };
+    RestateClusterCondition {
+        last_transition_time: Some(last_transition_time),
+        message: Some(message.into()),
+        reason: Some(reason.into()),
+        status: condition_status.into(),
+        r#type: r#type.into(),
     }
 }
 
@@ -511,6 +618,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     let svcacc_api = Api::<ServiceAccount>::all(client.clone());
     let pdb_api = Api::<PodDisruptionBudget>::all(client.clone());
     let cm_api = Api::<ConfigMap>::all(client.clone());
+    let deployment_api = Api::<Deployment>::all(client.clone());
     let np_api = Api::<NetworkPolicy>::all(client.clone());
     let pia_api = Api::<PodIdentityAssociation>::all(client.clone());
     let ipm_api = Api::<IAMPolicyMember>::all(client.clone());
@@ -575,8 +683,19 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     let svc_watcher = watcher(svc_api, cfg.clone())
         .map(ensure_deletion_change)
         .touched_objects()
-        // svc has no generation so we hash the spec to check for changes
-        .predicate_filter(changed_predicate.combine(spec_predicate_serde));
+        // svc has no generation so we hash the spec to check for changes; and the status, for
+        // the load balancer addresses the multitenancy package advertises
+        .predicate_filter(
+            changed_predicate
+                .combine(spec_predicate_serde)
+                .combine(status_predicate_serde),
+        );
+
+    // the multitenancy package's cron; its status says when it's rolled out
+    let deployment_watcher = watcher(deployment_api, cfg.clone())
+        .map(ensure_deletion_change)
+        .touched_objects()
+        .predicate_filter(changed_predicate.combine(status_predicate_serde));
 
     let cm_watcher = watcher(cm_api, cfg.clone())
         .map(ensure_deletion_change)
@@ -587,6 +706,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     let controller = Controller::new(rc_api, rc_cfg.clone())
         .shutdown_on_signal()
         .owns_stream(svc_watcher)
+        .owns_stream(deployment_watcher)
         .owns_stream(cm_watcher)
         .owns_stream(ns_watcher)
         .owns_stream(svcacc_watcher)
@@ -736,6 +856,22 @@ trait MyHasStatus {
 
 impl MyHasStatus for StatefulSet {
     type Status = StatefulSetStatus;
+
+    fn status(&self) -> Option<&Self::Status> {
+        self.status.as_ref()
+    }
+}
+
+impl MyHasStatus for Service {
+    type Status = ServiceStatus;
+
+    fn status(&self) -> Option<&Self::Status> {
+        self.status.as_ref()
+    }
+}
+
+impl MyHasStatus for Deployment {
+    type Status = DeploymentStatus;
 
     fn status(&self) -> Option<&Self::Status> {
         self.status.as_ref()

@@ -47,13 +47,16 @@ service:
   type: ClusterIP
   port: 80
 
+# Sized for the operator's workflow registry (workflowRegistry.mode: operator) too: its
+# in-memory index and the lookups the relay sends it. ~a few KB per endpoint, see the
+# schemaless docs 58-operator-scale.md.
 resources:
   limits:
+    cpu: "1"
+    memory: 1Gi
+  requests:
     cpu: 200m
     memory: 256Mi
-  requests:
-    cpu: 50m
-    memory: 100Mi
 
 serviceMonitor:
   enabled: false

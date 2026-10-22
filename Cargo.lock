@@ -2877,6 +2877,7 @@ dependencies = [
  "base64",
  "bytes",
  "futures-core",
+ "h2 0.4.20",
  "http 1.4.0",
  "http-body",
  "http-body-util",
@@ -2910,6 +2911,7 @@ dependencies = [
 name = "restate-operator"
 version = "3.1.0"
 dependencies = [
+ "actix-http",
  "actix-web",
  "anyhow",
  "chrono",
@@ -2917,11 +2919,13 @@ dependencies = [
  "fnv",
  "futures",
  "http 1.4.0",
+ "jiff",
  "k8s-openapi",
  "kube",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "parking_lot",
  "prometheus",
  "prost",
  "regex",

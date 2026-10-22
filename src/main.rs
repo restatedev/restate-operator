@@ -87,6 +87,33 @@ struct Arguments {
         value_name = "POD_UID"
     )]
     operator_pod_uid: Option<String>,
+
+    /// Where the workflow registry serves its lookups (relay, ingress mux).
+    #[arg(
+        long = "registry-lookup-bind",
+        env = "REGISTRY_LOOKUP_BIND",
+        value_name = "ADDRESS",
+        default_value = "0.0.0.0:8090"
+    )]
+    registry_lookup_bind: std::net::SocketAddr,
+
+    /// Where the workflow registry serves its per-scope read API (web UI, CORS).
+    #[arg(
+        long = "registry-read-api-bind",
+        env = "REGISTRY_READ_API_BIND",
+        value_name = "ADDRESS",
+        default_value = "0.0.0.0:8091"
+    )]
+    registry_read_api_bind: std::net::SocketAddr,
+
+    /// How many deployments' live details (docs, metadata, schemas) the read API caches.
+    #[arg(
+        long = "registry-details-cache-entries",
+        env = "REGISTRY_DETAILS_CACHE_ENTRIES",
+        value_name = "ENTRIES",
+        default_value_t = restate_operator::registry::details::DEFAULT_CAPACITY
+    )]
+    registry_details_cache_entries: usize,
 }
 
 #[get("/metrics")]
@@ -180,6 +207,11 @@ async fn main() -> anyhow::Result<()> {
     );
     let deployment_controller = restate_operator::controllers::restatedeployment::run(
         client.clone(),
+        metric.clone(),
+        state.clone(),
+    );
+    let endpoint_controller = restate_operator::controllers::restatedeploymentendpoint::run(
+        client.clone(),
         metric,
         state.clone(),
     );
@@ -191,7 +223,20 @@ async fn main() -> anyhow::Result<()> {
     tokio::pin!(cluster_controller);
     tokio::pin!(cloud_environment_controller);
     tokio::pin!(deployment_controller);
+    tokio::pin!(endpoint_controller);
     tokio::pin!(crd_wait_reporter);
+
+    // The workflow registry's listeners (its index is fed by the endpoint controller's watch)
+    let registry_server = restate_operator::registry::server::run_with(
+        state.workflow_registry().clone(),
+        args.registry_lookup_bind,
+        args.registry_read_api_bind,
+        restate_operator::registry::server::ServerConfig {
+            details_cache_entries: args.registry_details_cache_entries,
+            ..Default::default()
+        },
+    );
+    tokio::pin!(registry_server);
 
     // Start web server
     let server = HttpServer::new(move || {
@@ -214,13 +259,16 @@ async fn main() -> anyhow::Result<()> {
     tokio::pin!(server);
 
     // Both runtimes implements graceful shutdown, so poll until both are done
-    let (_, _, _, _, server_result) = tokio::join!(
+    let (_, _, _, _, _, server_result, registry_result) = tokio::join!(
         cluster_controller,
         cloud_environment_controller,
         deployment_controller,
+        endpoint_controller,
         crd_wait_reporter,
-        server
+        server,
+        registry_server
     );
     server_result?;
+    registry_result?;
     Ok(())
 }

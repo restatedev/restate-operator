@@ -41,6 +41,204 @@ pub struct RestateClusterSpec {
     pub security: Option<RestateClusterSecurity>,
     /// TOML-encoded Restate config file
     pub config: Option<String>,
+    /// Run the cluster as a multitenant Restate: schemaless nodes in preflight mode, the relay
+    /// (with the ingress mux), the cron and a workflow registry, all managed by the operator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multitenancy: Option<Multitenancy>,
+}
+
+/// The multitenant package: what the operator runs next to the Restate nodes, in the cluster's
+/// namespace.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Multitenancy {
+    pub relay: RelaySpec,
+    pub cron: CronSpec,
+    pub workflow_registry: WorkflowRegistry,
+}
+
+/// The relay: Restate's single endpoint in preflight mode, the tenants' ingress mux, and
+/// optionally the tunnel receiver.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RelaySpec {
+    pub image: String,
+    /// Defaults to 3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicas: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_pull_policy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<ResourceRequirements>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<Vec<EnvVar>>,
+    /// The tenants' front door. Without it the mux listens but has no Service of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingress_mux: Option<IngressMuxSpec>,
+    /// Deployments outside the cluster dialing in (start_tunnel). Off when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel: Option<TunnelSpec>,
+    /// TOML merged over the relay config the operator generates (the user's keys win).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_config: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct IngressMuxSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<ExposedService>,
+    /// The mux's URL as the operator's browser reaches it (advertised to the web UI). Defaults
+    /// to `http://<the Service's load balancer address>:8080` when the Service is a
+    /// LoadBalancer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advertised_url: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TunnelSpec {
+    /// A Secret in the cluster's namespace with the key `auth-keys.toml`: the tunnel tokens.
+    pub auth_secret_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<ExposedService>,
+    /// The URL tunnel clients dial (advertised to them). Defaults to
+    /// `http://<the Service's load balancer address>:19080`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_url: Option<String>,
+}
+
+/// How a component is exposed: the Service the operator creates for it.
+#[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExposedService {
+    /// ClusterIP (default), NodePort or LoadBalancer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_balancer_source_ranges: Option<Vec<String>>,
+}
+
+/// The cron: the only platform service, registered in Restate's own registry at the relay's
+/// plain route.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CronSpec {
+    pub image: String,
+    /// Defaults to 3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicas: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_pull_policy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<ResourceRequirements>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<Vec<EnvVar>>,
+}
+
+/// Where the relay and the ingress mux look the tenants' workflows up.
+#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema)]
+#[serde(rename_all = "camelCase")]
+#[x_kube(validation = Rule::new(
+    "(self.mode == 'included') == has(self.included) && (self.mode == 'external') == has(self.external) && (!has(self.operator) || self.mode == 'operator')"
+).message("set exactly the block of workflowRegistry.mode (operator's is optional)"))]
+pub struct WorkflowRegistry {
+    /// included: the operator runs the schema registry. external: a URL serving the registry
+    /// API. operator: Kubernetes objects (RestateDeploymentEndpoint), served by the operator.
+    #[schemars(schema_with = "registry_mode_schema")]
+    pub mode: RegistryMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub included: Option<IncludedRegistry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external: Option<ExternalRegistry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator: Option<OperatorRegistry>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RegistryMode {
+    Included,
+    External,
+    Operator,
+}
+
+fn registry_mode_schema(_: &mut schemars::SchemaGenerator) -> Schema {
+    schemars::json_schema!({
+        "type": "string",
+        "enum": ["included", "external", "operator"],
+    })
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct IncludedRegistry {
+    pub image: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_pull_policy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<ResourceRequirements>,
+    /// The registry's sqlite volume (a StatefulSet volume claim template, so immutable).
+    #[x_kube(validation = Rule::new("self == oldSelf").message("the registry's storage is immutable"))]
+    pub storage: RegistryStorage,
+    /// Extra arguments, e.g. `["--readers", "4", "--cache-mib", "512"]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    /// The web UI's per-scope read API (:8091).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_api: Option<ReadApi>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistryStorage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_class_name: Option<String>,
+    #[schemars(range(min = 1))]
+    pub storage_request_bytes: i64,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadApi {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<ExposedService>,
+    /// The read API's URL as the operator's browser reaches it (advertised to the web UI).
+    /// Defaults to `http://<the Service's load balancer address>:8091`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advertised_url: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalRegistry {
+    /// The base URL of a service answering the registry lookups (`/v1/exec_lookup`,
+    /// `/v1/ingestion_lookup`).
+    pub url: String,
+    /// Its per-scope read API for the web UI, as the operator's browser reaches it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advertised_url: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorRegistry {
+    /// The web UI's per-scope read API (the operator's :8091), exposed by a Service in the
+    /// operator's namespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_api: Option<ReadApi>,
+}
+
+impl RestateCluster {
+    /// The workflow registry mode, if this is a multitenant cluster.
+    pub fn registry_mode(&self) -> Option<RegistryMode> {
+        self.spec
+            .multitenancy
+            .as_ref()
+            .map(|m| m.workflow_registry.mode)
+    }
 }
 
 /// Cluster-wide configuration options
@@ -375,6 +573,68 @@ pub struct RestateClusterStatus {
     /// This is set to true after successful provisioning to avoid repeated provisioning attempts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provisioned: Option<bool>,
+    /// What the operator runs for `spec.multitenancy`, and how far along it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multitenancy: Option<MultitenancyStatus>,
+}
+
+/// The state of the multitenant package. Each part also has its own condition (`RelayReady`,
+/// `CronRegistered`, `RegistryReady`); the cluster is `Ready` only when all of them are.
+#[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MultitenancyStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<RelayStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cron: Option<CronStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry: Option<RegistryStatus>,
+    /// The public addresses, as advertised to the web UI and to tunnel clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advertised: Option<AdvertisedAddresses>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayStatus {
+    pub replicas: i32,
+    pub ready_replicas: i32,
+    /// The hash of the rendered relay config (the suffix of the `relay-config-<hash>` ConfigMap).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_hash: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CronStatus {
+    pub ready_replicas: i32,
+    /// The cron's deployment id in Restate's registry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment_id: Option<String>,
+    /// The image the cron ran when it was registered; a new image is registered again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registered_image: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistryStatus {
+    #[schemars(schema_with = "registry_mode_schema")]
+    pub mode: RegistryMode,
+    /// The URL the relay and the ingress mux look the workflows up at.
+    pub url: String,
+    pub ready: bool,
+}
+
+#[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AdvertisedAddresses {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingress_mux: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_registry: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema, PartialEq, Eq)]
@@ -392,6 +652,7 @@ pub struct RestateClusterCondition {
     /// Status is the status of the condition. Can be True, False, Unknown.
     pub status: String,
 
-    /// Type of the condition, known values are (`Ready`).
+    /// Type of the condition, known values are (`Ready`, and with multitenancy `RelayReady`,
+    /// `CronRegistered`, `RegistryReady`).
     pub r#type: String,
 }
