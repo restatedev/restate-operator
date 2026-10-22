@@ -851,6 +851,18 @@ docker tag alpine:3.21 my-private-registry.example.com/alpine:3.21
 docker push my-private-registry.example.com/alpine:3.21
 ```
 
+### Resync Interval
+
+Every object the operator writes is watched, so out-of-band changes are undone as soon as the
+watch reports them, and reconciles that find nothing to change make no Kubernetes API requests.
+On top of that, each resource that reconciled cleanly is reconciled again every 30 minutes
+(±10% jitter) as a backstop for state the watches can't see, such as Restate's own view of a
+deployment. Change it with the `resyncIntervalSeconds` Helm value:
+
+```yaml
+resyncIntervalSeconds: 600
+```
+
 ### EKS Security Groups for Pods
 
 [EKS Security Groups for Pods](https://docs.aws.amazon.com/eks/latest/userguide/security-groups-for-pods.html) allows
