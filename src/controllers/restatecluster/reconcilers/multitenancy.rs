@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::time::Duration;
 
-use k8s_openapi::api::apps::v1::{Deployment, StatefulSet};
+use k8s_openapi::api::apps::v1::StatefulSet;
 use k8s_openapi::api::core::v1::{ConfigMap, EnvVar, Service, ServicePort, ServiceSpec};
 use k8s_openapi::api::policy::v1::PodDisruptionBudget;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
@@ -223,8 +223,8 @@ pub struct MultitenancyReport {
     pub relay: ComponentState,
     pub cron: ComponentState,
     pub registry: ComponentState,
-    /// Whether the cron can be registered once Restate is Ready: its pods are rolled out and
-    /// the relay, which Restate reaches it through, has a pod ready.
+    /// Whether the cron can be registered once Restate is Ready: the relay, which serves it, is
+    /// rolled out to its current spec (so the registration discovers the current image).
     cron_registrable: bool,
 }
 
@@ -287,7 +287,7 @@ pub fn validate_multitenancy(rc: &RestateCluster) -> Result<(), Error> {
 }
 
 /// Reconcile everything of the package that doesn't need Restate up: the Services (exposed
-/// ones first), the registry, the relay, the cron's pods. Returns the report so far and the env
+/// ones first), the registry, the relay. Returns the report so far and the env
 /// for the Restate nodes.
 pub async fn reconcile_multitenancy(
     ctx: &Context,
@@ -304,23 +304,11 @@ pub async fn reconcile_multitenancy(
     let previous = rc.status.as_ref().and_then(|s| s.multitenancy.as_ref());
 
     let registry = registry::reconcile_registry(ctx, name, base_metadata, mt, dns).await?;
-    let relay = relay::reconcile_relay(
-        ctx,
-        name,
-        base_metadata,
-        &mt.relay,
-        &registry.status.url,
-        dns,
-    )
-    .await?;
-    let cron = cron::reconcile_cron(
-        ctx,
-        name,
-        base_metadata,
-        &mt.cron,
-        previous.and_then(|p| p.cron.as_ref()),
-    )
-    .await?;
+    let relay =
+        relay::reconcile_relay(ctx, name, base_metadata, &mt.relay, &registry.relay, dns).await?;
+    // The registration carries over until it's checked again, once Restate is Ready.
+    let cron_status = previous.and_then(|p| p.cron.clone()).unwrap_or_default();
+    let cron_state = cron::cron_state(&cron_status, &mt.relay.image);
 
     let advertised = AdvertisedAddresses {
         ingress_mux: relay.ingress_mux.known(),
@@ -332,14 +320,14 @@ pub async fn reconcile_multitenancy(
     let report = MultitenancyReport {
         status: MultitenancyStatus {
             relay: Some(relay.status),
-            cron: Some(cron.status),
+            cron: Some(cron_status),
             registry: Some(registry.status),
             advertised: Some(advertised),
         },
         relay: relay.state,
-        cron: cron.state,
+        cron: cron_state,
         registry: registry.state,
-        cron_registrable: cron.rolled_out && relay.ready_replicas > 0,
+        cron_registrable: relay.rolled_out,
     };
 
     Ok((report, env))
@@ -358,7 +346,7 @@ pub async fn reconcile_multitenancy_after_compute(
             cluster_dns: &ctx.cluster_dns,
         };
         let cron_status = report.status.cron.get_or_insert_with(Default::default);
-        report.cron = cron::register_cron(ctx, dns, &mt.cron, cron_status).await?;
+        report.cron = cron::register_cron(ctx, dns, &mt.relay.image, cron_status).await?;
     }
 
     match report.not_ready() {
@@ -406,7 +394,7 @@ pub(super) fn restate_env(dns: Dns<'_>, advertised: &AdvertisedAddresses) -> Vec
 }
 
 /// `spec.multitenancy` was removed: delete what it created. Only when there's something to
-/// delete (the relay or the registry StatefulSet is in the cache), so that clusters without
+/// delete (the relay StatefulSet is in the cache), so that clusters without
 /// the package don't pay a dozen deletes per reconcile. The relay StatefulSet goes last, so a
 /// cleanup that fails halfway is tried again.
 pub async fn cleanup_multitenancy(ctx: &Context, name: &str) -> Result<(), Error> {
@@ -415,12 +403,11 @@ pub async fn cleanup_multitenancy(ctx: &Context, name: &str) -> Result<(), Error
             .get(&ObjectRef::new(sts).within(name))
             .is_some()
     };
-    if !in_cache(relay::RELAY) && !in_cache(registry::SCHEMA_REGISTRY) {
+    if !in_cache(relay::RELAY) {
         return Ok(());
     }
 
     debug!("Removing the multitenancy package from namespace {name}");
-    cron::cleanup_cron(ctx, name).await?;
     registry::cleanup_registry(ctx, name).await?;
     relay::cleanup_relay(ctx, name).await?;
     Ok(())
@@ -468,29 +455,9 @@ pub(super) fn statefulset_rollout(ss: &StatefulSet) -> (i32, bool) {
     (ready, rolled_out)
 }
 
-/// Ready pods of a Deployment, and whether it's fully rolled out to its current spec.
-pub(super) fn deployment_rollout(deployment: &Deployment) -> (i32, bool) {
-    let replicas = deployment
-        .spec
-        .as_ref()
-        .and_then(|s| s.replicas)
-        .unwrap_or(1);
-    let Some(status) = deployment.status.as_ref() else {
-        return (0, false);
-    };
-    let ready = status.ready_replicas.unwrap_or(0);
-    let rolled_out = status.observed_generation >= deployment.metadata.generation
-        && status.replicas == Some(replicas)
-        && status.updated_replicas == Some(replicas)
-        && status.available_replicas == Some(replicas)
-        && ready == replicas;
-    (ready, rolled_out)
-}
-
 /// The APIs the package's objects live in, in the cluster's namespace.
 pub(super) struct Apis {
     pub sts: Api<StatefulSet>,
-    pub deployments: Api<Deployment>,
     pub services: Api<Service>,
     pub configmaps: Api<ConfigMap>,
     pub pdbs: Api<PodDisruptionBudget>,
@@ -500,7 +467,6 @@ impl Apis {
     pub fn new(ctx: &Context, namespace: &str) -> Self {
         Self {
             sts: Api::namespaced(ctx.client.clone(), namespace),
-            deployments: Api::namespaced(ctx.client.clone(), namespace),
             services: Api::namespaced(ctx.client.clone(), namespace),
             configmaps: Api::namespaced(ctx.client.clone(), namespace),
             pdbs: Api::namespaced(ctx.client.clone(), namespace),

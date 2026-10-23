@@ -46,15 +46,22 @@ pub(super) fn operator_cluster(ctx: &Context, rsd: &RestateDeployment) -> Option
     (cluster.registry_mode() == Some(RegistryMode::Operator)).then(|| name.clone())
 }
 
-/// Operator mode serves ReplicaSet versions only.
+/// Operator and included modes serve ReplicaSet versions only.
 pub(super) fn reject_knative(ctx: &Context, rsd: &RestateDeployment) -> Result<()> {
-    match operator_cluster(ctx, rsd) {
-        Some(cluster) => Err(Error::InvalidRestateConfig(format!(
+    if let Some(cluster) = operator_cluster(ctx, rsd) {
+        return Err(Error::InvalidRestateConfig(format!(
             "RestateCluster {cluster} serves its workflow registry from the operator \
              (workflowRegistry.mode: operator), which supports replicaset deployments only"
-        ))),
-        None => Ok(()),
+        )));
     }
+    if let Some(included) = super::included_registry::included_cluster(ctx, rsd)? {
+        return Err(Error::InvalidRestateConfig(format!(
+            "RestateCluster {} keeps its workflow registry in the relay \
+             (workflowRegistry.mode: included), which supports replicaset deployments only",
+            included.cluster
+        )));
+    }
+    Ok(())
 }
 
 fn not_indexed_yet() -> Error {
@@ -249,7 +256,7 @@ async fn query<T: for<'de> Deserialize<'de>>(
     Ok(rows.rows)
 }
 
-async fn pinned_invocations<'a>(
+pub(super) async fn pinned_invocations<'a>(
     ctx: &Context,
     rsd: &RestateDeployment,
     ids: impl Iterator<Item = &'a String>,
@@ -261,7 +268,7 @@ async fn pinned_invocations<'a>(
         .collect())
 }
 
-async fn unpinned_invocations<'a>(
+pub(super) async fn unpinned_invocations<'a>(
     ctx: &Context,
     rsd: &RestateDeployment,
     tenant: &str,

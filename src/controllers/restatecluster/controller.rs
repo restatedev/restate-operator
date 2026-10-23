@@ -618,7 +618,6 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     let svcacc_api = Api::<ServiceAccount>::all(client.clone());
     let pdb_api = Api::<PodDisruptionBudget>::all(client.clone());
     let cm_api = Api::<ConfigMap>::all(client.clone());
-    let deployment_api = Api::<Deployment>::all(client.clone());
     let np_api = Api::<NetworkPolicy>::all(client.clone());
     let pia_api = Api::<PodIdentityAssociation>::all(client.clone());
     let ipm_api = Api::<IAMPolicyMember>::all(client.clone());
@@ -691,12 +690,6 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
                 .combine(status_predicate_serde),
         );
 
-    // the multitenancy package's cron; its status says when it's rolled out
-    let deployment_watcher = watcher(deployment_api, cfg.clone())
-        .map(ensure_deletion_change)
-        .touched_objects()
-        .predicate_filter(changed_predicate.combine(status_predicate_serde));
-
     let cm_watcher = watcher(cm_api, cfg.clone())
         .map(ensure_deletion_change)
         .touched_objects()
@@ -706,7 +699,6 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     let controller = Controller::new(rc_api, rc_cfg.clone())
         .shutdown_on_signal()
         .owns_stream(svc_watcher)
-        .owns_stream(deployment_watcher)
         .owns_stream(cm_watcher)
         .owns_stream(ns_watcher)
         .owns_stream(svcacc_watcher)

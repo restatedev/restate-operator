@@ -1,7 +1,7 @@
-//! The relay: Restate's single endpoint in preflight mode (`:9080/_/preflight/`), the cron's
-//! plain route, the tenants' ingress mux (`:8080`) and optionally the tunnel receiver
-//! (`:19080`), clustered over gossip. What cluster-setup's `k8s/40-relay.yaml`, `relay.toml`,
-//! `35-relay-tunnel-lb.yaml` and the mux half of `36-public-lbs.yaml` set up by hand.
+//! The relay: Restate's single endpoint in preflight mode (`:9080/_/preflight/`), the cron
+//! (served in process at the plain route `platform/cron`), the tenants' ingress mux (`:8080`),
+//! in `included` mode the workflow registry (the registry API `:8090`, the UI's read API
+//! `:8091`), and optionally the tunnel receiver (`:19080`), clustered over gossip.
 
 use std::collections::BTreeMap;
 
@@ -9,16 +9,17 @@ use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetSpec};
 use k8s_openapi::api::core::v1::{
     ConfigMap, ConfigMapVolumeSource, Container, ContainerPort, EnvVar, EnvVarSource,
     HTTPGetAction, ObjectFieldSelector, PersistentVolumeClaim, PersistentVolumeClaimSpec,
-    PodSecurityContext, PodSpec, PodTemplateSpec, Probe, SecretVolumeSource, Service, ServicePort,
-    ServiceSpec, TopologySpreadConstraint, Volume, VolumeMount, VolumeResourceRequirements,
+    PodSecurityContext, PodSpec, PodTemplateSpec, Probe, SecretVolumeSource, Service,
+    ServiceAccount, ServicePort, ServiceSpec, TopologySpreadConstraint, Volume, VolumeMount,
+    VolumeResourceRequirements,
 };
 use k8s_openapi::api::policy::v1::{PodDisruptionBudget, PodDisruptionBudgetSpec};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
-use kube::ResourceExt;
 use kube::api::ListParams;
 use kube::runtime::reflector::ObjectRef;
+use kube::{Api, ResourceExt};
 use sha2::Digest;
 
 use crate::Error;
@@ -45,11 +46,17 @@ const MUX_PORT: u16 = 8080;
 const GOSSIP_PORT: u16 = 6000;
 const CLUSTER_RPC_PORT: u16 = 6001;
 const CLUSTER_FORWARD_PORT: u16 = 6002;
+/// The registry API (`included` mode): register, list, delete; the lookups.
+pub(super) const REGISTRY_API_PORT: u16 = 8090;
+/// The web UI's per-scope read API (`included` mode).
+pub(super) const REGISTRY_READ_PORT: u16 = 8091;
 
 /// The pods' grace period unless `extraConfig` sets `[limits.drain]
 /// termination_grace_period_secs`: the two must be equal.
 const DEFAULT_GRACE_PERIOD_SECS: i64 = 70;
 const DEFAULT_REPLICAS: i32 = 3;
+/// The `state` PVC: the gossip generation and the registry's replica (1M tenants are a few GB).
+const DEFAULT_STORAGE: &str = "10Gi";
 
 /// Labels the relay's config ConfigMaps carry, so the old ones can be found and deleted.
 const RELAY_CONFIG_LABEL: &str = "restate.dev/relay-config";
@@ -61,12 +68,25 @@ const STATE_MOUNT: &str = "/var/lib/relay";
 /// loopback, behind no Service, and authorises nobody (this empty keys file).
 const NO_TUNNEL_KEYS: &str = "no-tunnel-auth-keys.toml";
 
+/// Where the relay and the mux look the workflows up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum RelayRegistry {
+    /// A service speaking `02-contract.md` §4 (`external` and `operator` modes).
+    Url(String),
+    /// The registry in the relay (`included` mode).
+    InRelay {
+        bucket_url: String,
+        shards: Option<i32>,
+        /// Serve the web UI's read API (`public_listen`).
+        read_api: bool,
+    },
+}
+
 /// What the relay config is rendered from.
 pub(super) struct RelayConfigParams<'a> {
     pub dns: Dns<'a>,
     pub replicas: i32,
-    /// Where the relay and the mux look the workflows up (by registry mode).
-    pub registry_url: &'a str,
+    pub registry: &'a RelayRegistry,
     /// The tunnel receiver's public URL, with a tunnel; `None` without one.
     pub tunnel_url: Option<&'a str>,
     pub extra_config: Option<&'a str>,
@@ -85,7 +105,7 @@ fn listen(port: u16) -> toml::Value {
     format!("0.0.0.0:{port}").into()
 }
 
-/// The relay's config: cluster-setup's `k8s/relay.toml`, from the spec. `__NODE_ID__` and
+/// The relay's config, from the spec (`testdata/relay-*.toml` are the reference renders). `__NODE_ID__` and
 /// `__POD_IP__` are per pod: the container's wrapper substitutes them at start (the relay
 /// config has no env interpolation). `extraConfig` is merged last, the user's keys winning.
 pub(super) fn render_relay_config(params: &RelayConfigParams<'_>) -> Result<toml::Table, Error> {
@@ -153,30 +173,53 @@ pub(super) fn render_relay_config(params: &RelayConfigParams<'_>) -> Result<toml
         )]),
     );
 
-    set(
-        "preflight",
-        table([
-            ("registry_url", params.registry_url.into()),
-            ("registry_timeout_ms", 1000.into()),
-            (
-                "cache",
-                table([
-                    ("deployment_ttl_secs", 3600.into()),
-                    ("target_ttl_secs", 30.into()),
-                ]),
-            ),
-            (
-                "retry",
-                table([
-                    ("initial_interval_ms", 100.into()),
-                    ("exponentiation_factor", 2.0.into()),
-                    ("max_interval_ms", 10000.into()),
-                    ("max_attempts", 70.into()),
-                    ("on_max_attempts", "pause".into()),
-                ]),
-            ),
-        ]),
-    );
+    let retry = table([
+        ("initial_interval_ms", 100.into()),
+        ("exponentiation_factor", 2.0.into()),
+        ("max_interval_ms", 10000.into()),
+        ("max_attempts", 70.into()),
+        ("on_max_attempts", "pause".into()),
+    ]);
+    match params.registry {
+        RelayRegistry::Url(url) => set(
+            "preflight",
+            table([
+                ("registry_url", url.as_str().into()),
+                ("registry_timeout_ms", 1000.into()),
+                (
+                    "cache",
+                    table([
+                        ("deployment_ttl_secs", 3600.into()),
+                        ("target_ttl_secs", 30.into()),
+                    ]),
+                ),
+                ("retry", retry),
+            ]),
+        ),
+        RelayRegistry::InRelay {
+            bucket_url,
+            shards,
+            read_api,
+        } => {
+            // The lookups are answered in process from the replica: no registry client, no
+            // caches in front of it.
+            set("preflight", table([("retry", retry)]));
+            let mut registry = toml::Table::new();
+            registry.insert("bucket_url".into(), bucket_url.as_str().into());
+            registry.insert(
+                "db_path".into(),
+                format!("{STATE_MOUNT}/registry.sqlite").into(),
+            );
+            registry.insert("api_listen".into(), listen(REGISTRY_API_PORT));
+            if *read_api {
+                registry.insert("public_listen".into(), listen(REGISTRY_READ_PORT));
+            }
+            if let Some(shards) = shards {
+                registry.insert("shards".into(), i64::from(*shards).into());
+            }
+            set("registry", toml::Value::Table(registry));
+        }
+    }
 
     // Gossip membership (which pod holds which tunnel) + cross-pod forwarding. Every pod is a
     // seed, through the headless Service's per-pod DNS.
@@ -201,9 +244,13 @@ pub(super) fn render_relay_config(params: &RelayConfigParams<'_>) -> Result<toml
         ]),
     );
 
-    // Plain routes run the same rewriting as preflight streams: that's the cron's path, a
-    // static route straight to its Service (h2c).
+    // Plain routes run the same rewriting as preflight streams: that's the cron's path, served
+    // by every relay in process.
     set("service_protocol", table([("policy", "preflight".into())]));
+    set(
+        "embedded",
+        table([("services", toml::Value::Array(vec![cron::CRON.into()]))]),
+    );
     set(
         "routing",
         table([(
@@ -212,14 +259,14 @@ pub(super) fn render_relay_config(params: &RelayConfigParams<'_>) -> Result<toml
                 "routes",
                 toml::Value::Array(vec![table([
                     ("env", "platform".into()),
-                    ("tunnel", "cron".into()),
-                    ("direct", dns.url(cron::CRON, cron::CRON_PORT).into()),
+                    ("tunnel", cron::CRON.into()),
+                    ("embedded", cron::CRON.into()),
                 ])]),
             )]),
         )]),
     );
 
-    // The tenants' front door to Restate's ingress; shares [preflight]'s registry client.
+    // The tenants' front door to Restate's ingress; looks the workflows up like preflight does.
     set(
         "ingress_mux",
         table([
@@ -342,13 +389,30 @@ fn field_ref_env(name: &str, field_path: &str) -> EnvVar {
     }
 }
 
+/// The relay pods' identity: what may reach the registry's bucket (workload identity).
+fn relay_service_account(base_metadata: &ObjectMeta, relay: &RelaySpec) -> ServiceAccount {
+    let mut metadata = object_meta(base_metadata, RELAY);
+    if let Some(annotations) = &relay.service_account_annotations {
+        metadata
+            .annotations
+            .get_or_insert_with(Default::default)
+            .extend(annotations.clone());
+    }
+    ServiceAccount {
+        metadata,
+        ..Default::default()
+    }
+}
+
 /// The relay pods: a StatefulSet for a stable, unique `node_id` per pod (relay-N), stable
-/// per-pod DNS for the gossip seeds, and the `state` PVC for the gossip generation.
+/// per-pod DNS for the gossip seeds, and the `state` PVC for the gossip generation and the
+/// registry's replica.
 fn relay_statefulset(
     base_metadata: &ObjectMeta,
     relay: &RelaySpec,
     cm_name: &str,
     grace_period_secs: i64,
+    in_relay_registry: bool,
 ) -> StatefulSet {
     let labels = component_labels(base_metadata, RELAY);
     let tunnel = relay.tunnel.as_ref();
@@ -375,7 +439,12 @@ fn relay_statefulset(
         container_port("cluster-rpc", CLUSTER_RPC_PORT, None),
         container_port("cluster-fwd", CLUSTER_FORWARD_PORT, None),
     ];
+    if in_relay_registry {
+        ports.push(container_port("registry", REGISTRY_API_PORT, None));
+        ports.push(container_port("registry-read", REGISTRY_READ_PORT, None));
+    }
 
+    let storage = relay.storage.as_ref();
     let mut volume_mounts = vec![
         VolumeMount {
             name: "config".into(),
@@ -431,6 +500,7 @@ fn relay_statefulset(
                     ..Default::default()
                 }),
                 spec: Some(PodSpec {
+                    service_account_name: Some(RELAY.into()),
                     termination_grace_period_seconds: Some(grace_period_secs),
                     security_context: Some(PodSecurityContext {
                         // The image runs as uid 10001; make the state PVC writable for it.
@@ -483,8 +553,9 @@ fn relay_statefulset(
                     ..Default::default()
                 }),
             },
-            // One tiny PVC per pod for [cluster].generation_state_path (a single integer that
-            // must survive restarts under the same pod name).
+            // One PVC per pod: [cluster].generation_state_path (a single integer that must
+            // survive restarts under the same pod name) and the registry's replica (a cache of
+            // the bucket; a lost volume only costs a reload).
             volume_claim_templates: Some(vec![PersistentVolumeClaim {
                 metadata: ObjectMeta {
                     name: Some("state".into()),
@@ -492,11 +563,16 @@ fn relay_statefulset(
                     ..Default::default()
                 },
                 spec: Some(PersistentVolumeClaimSpec {
+                    storage_class_name: storage.and_then(|s| s.storage_class_name.clone()),
                     access_modes: Some(vec!["ReadWriteOnce".into()]),
                     resources: Some(VolumeResourceRequirements {
                         requests: Some(BTreeMap::from([(
                             "storage".to_owned(),
-                            Quantity("1Gi".into()),
+                            Quantity(
+                                storage
+                                    .and_then(|s| s.storage_request_bytes)
+                                    .map_or_else(|| DEFAULT_STORAGE.into(), |b| b.to_string()),
+                            ),
                         )])),
                         limits: None,
                     }),
@@ -510,16 +586,21 @@ fn relay_statefulset(
     }
 }
 
-/// In-cluster: Restate's sender traffic and the metrics, spread across the pods.
-fn relay_service(base_metadata: &ObjectMeta) -> Service {
+/// In-cluster: Restate's sender traffic, the metrics and (in `included` mode) the registry
+/// API, spread across the pods.
+fn relay_service(base_metadata: &ObjectMeta, in_relay_registry: bool) -> Service {
+    let mut ports = vec![
+        service_port("sender", SENDER_PORT, None),
+        service_port("metrics", METRICS_PORT, None),
+    ];
+    if in_relay_registry {
+        ports.push(service_port("registry", REGISTRY_API_PORT, None));
+    }
     Service {
         metadata: object_meta(base_metadata, RELAY),
         spec: Some(ServiceSpec {
             selector: Some(component_selector(base_metadata, RELAY)),
-            ports: Some(vec![
-                service_port("sender", SENDER_PORT, None),
-                service_port("metrics", METRICS_PORT, None),
-            ]),
+            ports: Some(ports),
             ..Default::default()
         }),
         status: None,
@@ -562,7 +643,8 @@ fn relay_pod_disruption_budget(base_metadata: &ObjectMeta) -> PodDisruptionBudge
 pub(super) struct RelayOutcome {
     pub status: RelayStatus,
     pub state: ComponentState,
-    pub ready_replicas: i32,
+    /// Every pod runs the current spec and is ready.
+    pub rolled_out: bool,
     pub ingress_mux: Advertised,
     /// The tunnel receiver's URL, as advertised to tunnel clients.
     pub tunnel_url: Option<String>,
@@ -573,9 +655,10 @@ pub(super) async fn reconcile_relay(
     name: &str,
     base_metadata: &ObjectMeta,
     relay: &RelaySpec,
-    registry_url: &str,
+    registry: &RelayRegistry,
     dns: Dns<'_>,
 ) -> Result<RelayOutcome, Error> {
+    let in_relay_registry = matches!(registry, RelayRegistry::InRelay { .. });
     let apis = Apis::new(ctx, name);
     let replicas = relay.replicas.unwrap_or(DEFAULT_REPLICAS);
     let selector = component_selector(base_metadata, RELAY);
@@ -635,7 +718,17 @@ pub(super) async fn reconcile_relay(
         }
     };
 
-    apply(&apis.services, &relay_service(base_metadata)).await?;
+    let service_accounts: Api<ServiceAccount> = Api::namespaced(ctx.client.clone(), name);
+    apply(
+        &service_accounts,
+        &relay_service_account(base_metadata, relay),
+    )
+    .await?;
+    apply(
+        &apis.services,
+        &relay_service(base_metadata, in_relay_registry),
+    )
+    .await?;
     apply(&apis.services, &relay_headless_service(base_metadata)).await?;
     apply(&apis.pdbs, &relay_pod_disruption_budget(base_metadata)).await?;
 
@@ -648,7 +741,7 @@ pub(super) async fn reconcile_relay(
         let config = render_relay_config(&RelayConfigParams {
             dns,
             replicas,
-            registry_url,
+            registry,
             tunnel_url: tunnel_url.as_ref().and_then(|t| t.as_deref()),
             extra_config: relay.extra_config.as_deref(),
         })?;
@@ -661,7 +754,13 @@ pub(super) async fn reconcile_relay(
 
         let ss = apply(
             &apis.sts,
-            &relay_statefulset(base_metadata, relay, &cm_name, grace_period_secs(&config)),
+            &relay_statefulset(
+                base_metadata,
+                relay,
+                &cm_name,
+                grace_period_secs(&config),
+                in_relay_registry,
+            ),
         )
         .await?;
 
@@ -702,7 +801,7 @@ pub(super) async fn reconcile_relay(
             config_hash,
         },
         state,
-        ready_replicas,
+        rolled_out,
         ingress_mux,
         tunnel_url: tunnel_url.flatten(),
     })
@@ -733,6 +832,8 @@ pub(super) async fn cleanup_relay(ctx: &Context, name: &str) -> Result<(), Error
     }
     delete_if_exists(&apis.pdbs, RELAY).await?;
     delete_old_configs(&apis, name, "").await?;
+    let service_accounts: Api<ServiceAccount> = Api::namespaced(ctx.client.clone(), name);
+    delete_if_exists(&service_accounts, RELAY).await?;
     // last: its presence is what tells cleanup_multitenancy there's something to clean up
     delete_if_exists(&apis.sts, RELAY).await
 }
@@ -741,19 +842,20 @@ pub(super) async fn cleanup_relay(ctx: &Context, name: &str) -> Result<(), Error
 mod tests {
     use super::*;
     use crate::controllers::restatecluster::reconcilers::multitenancy::tests::base_metadata;
-    use crate::resources::restateclusters::TunnelSpec;
+    use crate::resources::restateclusters::{RelayStorage, TunnelSpec};
 
     const DNS: Dns<'static> = Dns {
         namespace: "restate-demo",
         cluster_dns: "cluster.local",
     };
 
-    /// cluster-setup's `k8s/relay.toml` with its `${...}` filled in (one namespace for the
-    /// relay and Restate, `restate-demo`; 3 relays; the tunnel LB at 34.1.2.3).
-    const CLUSTER_SETUP_RELAY_TOML: &str = include_str!("testdata/cluster-setup-relay.toml");
+    /// An `external`-mode relay: one namespace for the relay and Restate, `restate-demo`; 3
+    /// relays; the tunnel LB at 34.1.2.3.
+    const EXTERNAL_RELAY_TOML: &str = include_str!("testdata/relay-external.toml");
+    /// An `included`-mode relay in namespace `restate`, no tunnel.
+    const INCLUDED_RELAY_TOML: &str = include_str!("testdata/relay-included.toml");
 
-    /// What cluster-setup's config.env tunes (`RELAY_LATEST_TTL_SECS`,
-    /// `RELAY_CACHE_MAX_ENTRIES`) is the CR's extraConfig.
+    /// What the perf setup tunes in the registry client's caches.
     const EXTRA_CONFIG: &str = r#"
         [preflight.cache]
         latest_ttl_secs = 60
@@ -764,21 +866,15 @@ mod tests {
         render_relay_config(&RelayConfigParams {
             dns: DNS,
             replicas: 3,
-            registry_url,
+            registry: &RelayRegistry::Url(registry_url.into()),
             tunnel_url,
             extra_config: extra,
         })
         .unwrap()
     }
 
-    #[test]
-    fn renders_cluster_setups_relay_toml() {
-        let rendered = render(
-            "http://schema-registry.restate-demo.svc.cluster.local:8090",
-            Some("http://34.1.2.3:19080"),
-            Some(EXTRA_CONFIG),
-        );
-        let expected: toml::Table = toml::from_str(CLUSTER_SETUP_RELAY_TOML).unwrap();
+    fn assert_renders(rendered: toml::Table, expected: &str) {
+        let expected: toml::Table = toml::from_str(expected).unwrap();
         assert_eq!(
             toml::Value::Table(rendered.clone()),
             toml::Value::Table(expected),
@@ -789,6 +885,50 @@ mod tests {
         // and it survives the trip through the ConfigMap
         let reparsed: toml::Table = toml::from_str(&toml::to_string(&rendered).unwrap()).unwrap();
         assert_eq!(reparsed, rendered);
+    }
+
+    #[test]
+    fn renders_an_external_registry_relay() {
+        assert_renders(
+            render(
+                "http://schema-registry.restate-demo.svc.cluster.local:8090",
+                Some("http://34.1.2.3:19080"),
+                Some(EXTRA_CONFIG),
+            ),
+            EXTERNAL_RELAY_TOML,
+        );
+    }
+
+    fn render_included(shards: Option<i32>, read_api: bool) -> toml::Table {
+        render_relay_config(&RelayConfigParams {
+            dns: Dns {
+                namespace: "restate",
+                cluster_dns: "cluster.local",
+            },
+            replicas: 3,
+            registry: &RelayRegistry::InRelay {
+                bucket_url: "gs://restate-registry/registry".into(),
+                shards,
+                read_api,
+            },
+            tunnel_url: None,
+            extra_config: None,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn renders_an_included_registry_relay() {
+        assert_renders(render_included(None, true), INCLUDED_RELAY_TOML);
+
+        let rendered = render_included(Some(100), false);
+        assert_eq!(rendered["registry"]["shards"].as_integer(), Some(100));
+        assert!(
+            !rendered["registry"]
+                .as_table()
+                .unwrap()
+                .contains_key("public_listen")
+        );
     }
 
     #[test]
@@ -853,7 +993,7 @@ mod tests {
         let result = render_relay_config(&RelayConfigParams {
             dns: DNS,
             replicas: 3,
-            registry_url: "http://registry:8090",
+            registry: &RelayRegistry::Url("http://registry:8090".into()),
             tunnel_url: None,
             extra_config: Some("not [valid"),
         });
@@ -890,6 +1030,8 @@ mod tests {
                 value: Some("debug".into()),
                 value_from: None,
             }]),
+            storage: None,
+            service_account_annotations: None,
             ingress_mux: None,
             tunnel: tunnel.then(|| TunnelSpec {
                 auth_secret_name: "relay-auth".into(),
@@ -902,7 +1044,13 @@ mod tests {
 
     #[test]
     fn statefulset_matches_cluster_setups_relay() {
-        let ss = relay_statefulset(&base_metadata(), &relay_spec(true), "relay-config-abc", 70);
+        let ss = relay_statefulset(
+            &base_metadata(),
+            &relay_spec(true),
+            "relay-config-abc",
+            70,
+            false,
+        );
         let spec = ss.spec.unwrap();
         assert_eq!(spec.replicas, Some(3));
         assert_eq!(spec.pod_management_policy.as_deref(), Some("Parallel"));
@@ -962,7 +1110,13 @@ mod tests {
 
     #[test]
     fn statefulset_without_tunnel_mounts_no_secret() {
-        let ss = relay_statefulset(&base_metadata(), &relay_spec(false), "relay-config-abc", 70);
+        let ss = relay_statefulset(
+            &base_metadata(),
+            &relay_spec(false),
+            "relay-config-abc",
+            70,
+            false,
+        );
         let pod = ss.spec.unwrap().template.spec.unwrap();
         assert_eq!(pod.volumes.unwrap().len(), 1);
         assert!(
@@ -977,9 +1131,12 @@ mod tests {
 
     #[test]
     fn services_match_cluster_setups_relay() {
-        let svc = relay_service(&base_metadata()).spec.unwrap();
+        let svc = relay_service(&base_metadata(), false).spec.unwrap();
         let ports: Vec<_> = svc.ports.unwrap().iter().map(|p| p.port).collect();
         assert_eq!(ports, vec![9080, 9000]);
+        let svc = relay_service(&base_metadata(), true).spec.unwrap();
+        let ports: Vec<_> = svc.ports.unwrap().iter().map(|p| p.port).collect();
+        assert_eq!(ports, vec![9080, 9000, 8090]);
 
         let headless = relay_headless_service(&base_metadata()).spec.unwrap();
         assert_eq!(headless.cluster_ip.as_deref(), Some("None"));
@@ -993,5 +1150,75 @@ mod tests {
 
         let pdb = relay_pod_disruption_budget(&base_metadata()).spec.unwrap();
         assert_eq!(pdb.max_unavailable, Some(IntOrString::Int(1)));
+    }
+
+    #[test]
+    fn statefulset_storage_identity_and_registry_ports() {
+        let ss = relay_statefulset(
+            &base_metadata(),
+            &relay_spec(false),
+            "relay-config-abc",
+            70,
+            false,
+        );
+        let spec = ss.spec.unwrap();
+        let pvc = spec.volume_claim_templates.unwrap()[0]
+            .spec
+            .clone()
+            .unwrap();
+        assert_eq!(pvc.storage_class_name, None);
+        assert_eq!(
+            pvc.resources.unwrap().requests.unwrap()["storage"],
+            Quantity("10Gi".into())
+        );
+        let pod = spec.template.spec.unwrap();
+        assert_eq!(pod.service_account_name.as_deref(), Some("relay"));
+        assert!(
+            !pod.containers[0]
+                .ports
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|p| p.container_port == 8090)
+        );
+
+        let relay = RelaySpec {
+            storage: Some(RelayStorage {
+                storage_class_name: Some("standard-rwo".into()),
+                storage_request_bytes: Some(5368709120),
+            }),
+            service_account_annotations: Some(BTreeMap::from([(
+                "iam.gke.io/gcp-service-account".into(),
+                "relay@p.iam.gserviceaccount.com".into(),
+            )])),
+            ..relay_spec(false)
+        };
+        let spec = relay_statefulset(&base_metadata(), &relay, "relay-config-abc", 70, true)
+            .spec
+            .unwrap();
+        let pvc = spec.volume_claim_templates.unwrap()[0]
+            .spec
+            .clone()
+            .unwrap();
+        assert_eq!(pvc.storage_class_name.as_deref(), Some("standard-rwo"));
+        assert_eq!(
+            pvc.resources.unwrap().requests.unwrap()["storage"],
+            Quantity("5368709120".into())
+        );
+        let ports: Vec<_> = spec.template.spec.unwrap().containers[0]
+            .ports
+            .clone()
+            .unwrap()
+            .iter()
+            .map(|p| p.container_port)
+            .collect();
+        assert!(ports.contains(&8090) && ports.contains(&8091));
+
+        let sa = relay_service_account(&base_metadata(), &relay);
+        assert_eq!(sa.metadata.name.as_deref(), Some("relay"));
+        assert_eq!(
+            sa.metadata.annotations.unwrap()["iam.gke.io/gcp-service-account"],
+            "relay@p.iam.gserviceaccount.com"
+        );
     }
 }

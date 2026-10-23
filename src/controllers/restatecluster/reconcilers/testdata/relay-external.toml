@@ -1,15 +1,9 @@
-# cluster-setup/k8s/relay.toml with its ${...} rendered: NAMESPACE = CLUSTER_NAMESPACE =
-# restate-demo (the package runs the relay in the cluster's namespace), RELAY_TUNNEL_IP =
-# 34.1.2.3, RELAY_SEEDS for 3 relays, and config.env's RELAY_LATEST_TTL_SECS (60) and
-# RELAY_CACHE_MAX_ENTRIES (2000000). The unit test in relay.rs renders the same config.
-# Regenerate by re-running that substitution on the cluster-setup file; never edit the values.
+# The relay config the operator renders for an `external`-mode cluster (relay.rs tests): the
+# relay in the cluster's namespace `restate-demo`, 3 relays, the tunnel LB at 34.1.2.3, the
+# registry at http://schema-registry.restate-demo.svc.cluster.local:8090, and an extraConfig
+# with latest_ttl_secs = 60 and max_entries = 2000000. Started as cluster-setup's hand-wired
+# k8s/relay.toml (gone since the cluster is the operator's); the comments are that file's.
 
-# The relay's config. setup.sh renders the ${...} values (envsubst) and loads the
-# result into the `relay-config` ConfigMap (key relay.toml). __NODE_ID__ and
-# __POD_IP__ are per-pod: each pod sed-substitutes them at start (the relay config
-# has no env interpolation). Read the live one with:
-#   kubectl -n restate-demo get configmap relay-config -o jsonpath='{.data.relay\.toml}'
-#
 # Mode: preflight ([preflight]). Restate sends every unregistered service to
 # :9080/_/preflight/ through the in-cluster `relay` Service; the relay looks the
 # deployment up in the schema registry and opens it:
@@ -18,7 +12,7 @@
 #     :19080 through the public relay-tunnel LoadBalancer. A request landing on a
 #     pod that doesn't hold the tunnel is forwarded to the pod that does
 #     ([cluster]);
-#   - anything else (the cron, in-cluster) is dialed directly over h2.
+#   - anything else (in-cluster) is dialed directly over h2.
 
 # Restate's invokers + admins, via the ClusterIP `relay` Service. Not exposed
 # outside the cluster; no sender auth (demo, no NetworkPolicies).
@@ -61,7 +55,7 @@ straggler_window_secs         = 5
 drain_timeout_secs            = 60
 termination_grace_period_secs = 70
 
-# Preflight: the schema registry (k8s/15-schema-registry.yaml) decides which
+# Preflight: the schema registry (external) decides which
 # deployment runs each attempt and what each call targets. A scoped invocation's
 # calls are pinned to its scope (another scope fails the invocation); unscoped
 # ones (the cron) keep the scope their SDK chose. See the relay's
@@ -109,13 +103,17 @@ seeds                        = ["relay-0.relay-headless.restate-demo.svc.cluster
 [service_protocol]
 policy = "preflight"
 
-# platform/cron straight to the cron's Service (h2c). Every other (env, tunnel)
-# pair keeps its tunnel (demo/sample: the laptop tunnel client). Preflight
-# streams pick their own route from the registry address, not from here.
+# The cron, served by the relay itself (crates/relay-cron). Every other (env,
+# tunnel) pair keeps its tunnel (demo/sample: the laptop tunnel client).
+# Preflight streams pick their own route from the registry address, not from
+# here.
+[embedded]
+services = ["cron"]
+
 [[routing.static.routes]]
-env    = "platform"
-tunnel = "cron"
-direct = "http://cron.restate-demo.svc.cluster.local:9080"
+env      = "platform"
+tunnel   = "cron"
+embedded = "cron"
 
 # The ingress mux: the only public way into Restate's ingress. No auth for now
 # (docs D17): every request names its tenant in the x-restate-tenant header,

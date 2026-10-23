@@ -53,9 +53,9 @@ use crate::controllers::restatedeployment::cleanup::{
     deployment_usage_query, describe_abandoned_versions, describe_blocking_versions,
     drain_deadline, unschedule_version_removal,
 };
-use crate::controllers::restatedeployment::operator_registry;
 use crate::controllers::restatedeployment::reconcilers;
 use crate::controllers::restatedeployment::registration::{self, RegistrationAction};
+use crate::controllers::restatedeployment::{included_registry, operator_registry};
 
 use super::reconcilers::replicaset::{
     POD_TEMPLATE_HASH_LABEL, RESTATE_POD_TEMPLATE_ANNOTATION, RESTATE_TUNNEL_NAME_ANNOTATION,
@@ -508,9 +508,11 @@ impl RestateDeployment {
             )?,
         };
 
-        // In operator mode the version is an endpoint the operator discovers, not a
-        // registration in Restate (operator_registry.rs).
+        // In operator mode the version is an endpoint the operator discovers, in included mode
+        // a deployment in the relay's registry, not a registration in Restate
+        // (operator_registry.rs, included_registry.rs).
         let operator_cluster = operator_registry::operator_cluster(&ctx, self);
+        let included = included_registry::included_cluster(&ctx, self)?;
 
         // this path only runs for a live RestateDeployment; deletion goes to `cleanup`.
         let existing_deployment_id = replicaset
@@ -527,11 +529,16 @@ impl RestateDeployment {
             &versioned_name,
         ) && let Some(recorded_id) = existing_deployment_id.as_deref()
         {
-            let latest = match &operator_cluster {
-                Some(cluster) => operator_registry::is_latest(&ctx, cluster, recorded_id),
-                None => registration::latest_deployment_ids(&ctx, &self.spec.restate.register)
-                    .await?
-                    .contains(recorded_id),
+            let latest = match (&operator_cluster, &included) {
+                (Some(cluster), _) => operator_registry::is_latest(&ctx, cluster, recorded_id),
+                (None, Some(included)) => {
+                    included_registry::is_latest(&ctx, included, recorded_id).await?
+                }
+                (None, None) => {
+                    registration::latest_deployment_ids(&ctx, &self.spec.restate.register)
+                        .await?
+                        .contains(recorded_id)
+                }
             };
             if latest {
                 return Ok((replicaset, None));
@@ -611,8 +618,8 @@ impl RestateDeployment {
             // A promotion re-registers the same endpoint with overwrite, so Restate bumps
             // its service revisions past the current latest without minting a new
             // deployment id — leaving invocations already pinned to it undisturbed.
-            let registered = match &operator_cluster {
-                Some(cluster) => {
+            let registered = match (&operator_cluster, &included) {
+                (Some(cluster), _) => {
                     operator_registry::register(
                         &ctx,
                         self,
@@ -625,7 +632,18 @@ impl RestateDeployment {
                     )
                     .await?
                 }
-                None => {
+                (None, Some(included)) => {
+                    included_registry::register(
+                        &ctx,
+                        included,
+                        &service_endpoint,
+                        self.spec.restate.use_http11,
+                        action.overwrite(),
+                        existing_deployment_id.as_deref(),
+                    )
+                    .await?
+                }
+                (None, None) => {
                     registration::register_deployment(
                         &ctx,
                         self,
@@ -680,9 +698,14 @@ impl RestateDeployment {
             // existed, nothing changed" — both are a 200 carrying this deployment id. Ask
             // Restate what it actually routes before treating this as done, or `Ready=True`
             // would go on meaning "the pods are up" rather than "new work lands here".
-            match &operator_cluster {
-                Some(cluster) => operator_registry::confirm_latest(&ctx, cluster, &registered)?,
-                None => {
+            match (&operator_cluster, &included) {
+                (Some(cluster), _) => {
+                    operator_registry::confirm_latest(&ctx, cluster, &registered)?
+                }
+                (None, Some(included)) => {
+                    included_registry::confirm_latest(&ctx, included, &registered).await?
+                }
+                (None, None) => {
                     registration::confirm_latest(&ctx, &self.spec.restate.register, &registered)
                         .await?
                 }
@@ -1213,6 +1236,9 @@ impl RestateDeployment {
     ) -> Result<DeploymentUsageMap> {
         if let Some(cluster) = operator_registry::operator_cluster(ctx, self) {
             return operator_registry::list_deployments(ctx, self, &cluster, mode).await;
+        }
+        if let Some(included) = included_registry::included_cluster(ctx, self)? {
+            return included_registry::list_deployments(ctx, self, &included, mode).await;
         }
 
         let sql_query = deployment_usage_query(mode);

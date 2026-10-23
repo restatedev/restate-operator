@@ -3240,170 +3240,16 @@ spec:
                 type: string
               multitenancy:
                 description: |-
-                  Run the cluster as a multitenant Restate: schemaless nodes in preflight mode, the relay
-                  (with the ingress mux), the cron and a workflow registry, all managed by the operator.
+                  Run the cluster as a multitenant Restate: schemaless nodes in preflight mode and the relay
+                  (the ingress mux, the cron, and in `included` mode the workflow registry), all managed by
+                  the operator.
                 nullable: true
                 properties:
-                  cron:
-                    description: |-
-                      The cron: the only platform service, registered in Restate's own registry at the relay's
-                      plain route.
-                    properties:
-                      env:
-                        items:
-                          description: EnvVar represents an environment variable present in a Container.
-                          properties:
-                            name:
-                              description: Name of the environment variable. May consist of any printable ASCII characters except '='.
-                              type: string
-                            value:
-                              description: 'Variable references $(VAR_NAME) are expanded using the previously defined environment variables in the container and any service environment variables. If a variable cannot be resolved, the reference in the input string will be unchanged. Double $$ are reduced to a single $, which allows for escaping the $(VAR_NAME) syntax: i.e. "$$(VAR_NAME)" will produce the string literal "$(VAR_NAME)". Escaped references will never be expanded, regardless of whether the variable exists or not. Defaults to "".'
-                              type: string
-                            valueFrom:
-                              description: Source for the environment variable's value. Cannot be used if value is not empty.
-                              properties:
-                                configMapKeyRef:
-                                  description: Selects a key of a ConfigMap.
-                                  properties:
-                                    key:
-                                      description: The key to select.
-                                      type: string
-                                    name:
-                                      description: 'Name of the referent. This field is effectively required, but due to backwards compatibility is allowed to be empty. Instances of this type with an empty value here are almost certainly wrong. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names'
-                                      type: string
-                                    optional:
-                                      description: Specify whether the ConfigMap or its key must be defined
-                                      type: boolean
-                                  required:
-                                  - key
-                                  - name
-                                  type: object
-                                fieldRef:
-                                  description: 'Selects a field of the pod: supports metadata.name, metadata.namespace, `metadata.labels[''<KEY>'']`, `metadata.annotations[''<KEY>'']`, spec.nodeName, spec.serviceAccountName, status.hostIP, status.podIP, status.podIPs.'
-                                  properties:
-                                    apiVersion:
-                                      description: Version of the schema the FieldPath is written in terms of, defaults to "v1".
-                                      type: string
-                                    fieldPath:
-                                      description: Path of the field to select in the specified API version.
-                                      type: string
-                                  required:
-                                  - fieldPath
-                                  type: object
-                                fileKeyRef:
-                                  description: FileKeyRef selects a key of the env file. Requires the EnvFiles feature gate to be enabled.
-                                  properties:
-                                    key:
-                                      description: The key within the env file. An invalid key will prevent the pod from starting. The keys defined within a source may consist of any printable ASCII characters except '='. During Alpha stage of the EnvFiles feature gate, the key size is limited to 128 characters.
-                                      type: string
-                                    optional:
-                                      description: |-
-                                        Specify whether the file or its key must be defined. If the file or key does not exist, then the env var is not published. If optional is set to true and the specified key does not exist, the environment variable will not be set in the Pod's containers.
-
-                                        If optional is set to false and the specified key does not exist, an error will be returned during Pod creation.
-                                      type: boolean
-                                    path:
-                                      description: The path within the volume from which to select the file. Must be relative and may not contain the '..' path or start with '..'.
-                                      type: string
-                                    volumeName:
-                                      description: The name of the volume mount containing the env file.
-                                      type: string
-                                  required:
-                                  - key
-                                  - path
-                                  - volumeName
-                                  type: object
-                                resourceFieldRef:
-                                  description: 'Selects a resource of the container: only resources limits and requests (limits.cpu, limits.memory, limits.ephemeral-storage, requests.cpu, requests.memory and requests.ephemeral-storage) are currently supported.'
-                                  properties:
-                                    containerName:
-                                      description: 'Container name: required for volumes, optional for env vars'
-                                      type: string
-                                    divisor:
-                                      description: Specifies the output format of the exposed resources, defaults to "1"
-                                      x-kubernetes-int-or-string: true
-                                    resource:
-                                      description: 'Required: resource to select'
-                                      type: string
-                                  required:
-                                  - resource
-                                  type: object
-                                secretKeyRef:
-                                  description: Selects a key of a secret in the pod's namespace
-                                  properties:
-                                    key:
-                                      description: The key of the secret to select from.  Must be a valid secret key.
-                                      type: string
-                                    name:
-                                      description: 'Name of the referent. This field is effectively required, but due to backwards compatibility is allowed to be empty. Instances of this type with an empty value here are almost certainly wrong. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names'
-                                      type: string
-                                    optional:
-                                      description: Specify whether the Secret or its key must be defined
-                                      type: boolean
-                                  required:
-                                  - key
-                                  - name
-                                  type: object
-                              type: object
-                          required:
-                          - name
-                          type: object
-                        nullable: true
-                        type: array
-                      image:
-                        type: string
-                      imagePullPolicy:
-                        nullable: true
-                        type: string
-                      replicas:
-                        description: Defaults to 3.
-                        format: int32
-                        nullable: true
-                        type: integer
-                      resources:
-                        description: ResourceRequirements describes the compute resource requirements.
-                        nullable: true
-                        properties:
-                          claims:
-                            description: |-
-                              Claims lists the names of resources, defined in spec.resourceClaims, that are used by this container.
-
-                              This field depends on the DynamicResourceAllocation feature gate.
-
-                              This field is immutable. It can only be set for containers.
-                            items:
-                              description: ResourceClaim references one entry in PodSpec.ResourceClaims.
-                              properties:
-                                name:
-                                  description: Name must match the name of one entry in pod.spec.resourceClaims of the Pod where this field is used. It makes that resource available inside a container.
-                                  type: string
-                                request:
-                                  description: Request is the name chosen for a request in the referenced claim. If empty, everything from the claim is made available, otherwise only the result of this request.
-                                  type: string
-                              required:
-                              - name
-                              type: object
-                            type: array
-                          limits:
-                            additionalProperties:
-                              description: "Quantity is a fixed-point representation of a number. It provides convenient marshaling/unmarshaling in JSON and YAML, in addition to String() and AsInt64() accessors.\n\nThe serialization format is:\n\n``` <quantity>        ::= <signedNumber><suffix>\n\n\t(Note that <suffix> may be empty, from the \"\" case in <decimalSI>.)\n\n<digit>           ::= 0 | 1 | ... | 9 <digits>          ::= <digit> | <digit><digits> <number>          ::= <digits> | <digits>.<digits> | <digits>. | .<digits> <sign>            ::= \"+\" | \"-\" <signedNumber>    ::= <number> | <sign><number> <suffix>          ::= <binarySI> | <decimalExponent> | <decimalSI> <binarySI>        ::= Ki | Mi | Gi | Ti | Pi | Ei\n\n\t(International System of units; See: http://physics.nist.gov/cuu/Units/binary.html)\n\n<decimalSI>       ::= m | \"\" | k | M | G | T | P | E\n\n\t(Note that 1024 = 1Ki but 1000 = 1k; I didn't choose the capitalization.)\n\n<decimalExponent> ::= \"e\" <signedNumber> | \"E\" <signedNumber> ```\n\nNo matter which of the three exponent forms is used, no quantity may represent a number greater than 2^63-1 in magnitude, nor may it have more than 3 decimal places. Numbers larger or more precise will be capped or rounded up. (E.g.: 0.1m will rounded up to 1m.) This may be extended in the future if we require larger or smaller quantities.\n\nWhen a Quantity is parsed from a string, it will remember the type of suffix it had, and will use the same type again when it is serialized.\n\nBefore serializing, Quantity will be put in \"canonical form\". This means that Exponent/suffix will be adjusted up or down (with a corresponding increase or decrease in Mantissa) such that:\n\n- No precision is lost - No fractional digits will be emitted - The exponent (or suffix) is as large as possible.\n\nThe sign will be omitted unless the number is negative.\n\nExamples:\n\n- 1.5 will be serialized as \"1500m\" - 1.5Gi will be serialized as \"1536Mi\"\n\nNote that the quantity will NEVER be internally represented by a floating point number. That is the whole point of this exercise.\n\nNon-canonical values will still parse as long as they are well formed, but will be re-emitted in their canonical form. (So always use canonical form, or don't diff.)\n\nThis format is intended to make it difficult to use these numbers without writing some sort of special handling code in the hopes that that will cause implementors to also use a fixed point implementation."
-                              x-kubernetes-int-or-string: true
-                            description: 'Limits describes the maximum amount of compute resources allowed. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
-                            type: object
-                          requests:
-                            additionalProperties:
-                              description: "Quantity is a fixed-point representation of a number. It provides convenient marshaling/unmarshaling in JSON and YAML, in addition to String() and AsInt64() accessors.\n\nThe serialization format is:\n\n``` <quantity>        ::= <signedNumber><suffix>\n\n\t(Note that <suffix> may be empty, from the \"\" case in <decimalSI>.)\n\n<digit>           ::= 0 | 1 | ... | 9 <digits>          ::= <digit> | <digit><digits> <number>          ::= <digits> | <digits>.<digits> | <digits>. | .<digits> <sign>            ::= \"+\" | \"-\" <signedNumber>    ::= <number> | <sign><number> <suffix>          ::= <binarySI> | <decimalExponent> | <decimalSI> <binarySI>        ::= Ki | Mi | Gi | Ti | Pi | Ei\n\n\t(International System of units; See: http://physics.nist.gov/cuu/Units/binary.html)\n\n<decimalSI>       ::= m | \"\" | k | M | G | T | P | E\n\n\t(Note that 1024 = 1Ki but 1000 = 1k; I didn't choose the capitalization.)\n\n<decimalExponent> ::= \"e\" <signedNumber> | \"E\" <signedNumber> ```\n\nNo matter which of the three exponent forms is used, no quantity may represent a number greater than 2^63-1 in magnitude, nor may it have more than 3 decimal places. Numbers larger or more precise will be capped or rounded up. (E.g.: 0.1m will rounded up to 1m.) This may be extended in the future if we require larger or smaller quantities.\n\nWhen a Quantity is parsed from a string, it will remember the type of suffix it had, and will use the same type again when it is serialized.\n\nBefore serializing, Quantity will be put in \"canonical form\". This means that Exponent/suffix will be adjusted up or down (with a corresponding increase or decrease in Mantissa) such that:\n\n- No precision is lost - No fractional digits will be emitted - The exponent (or suffix) is as large as possible.\n\nThe sign will be omitted unless the number is negative.\n\nExamples:\n\n- 1.5 will be serialized as \"1500m\" - 1.5Gi will be serialized as \"1536Mi\"\n\nNote that the quantity will NEVER be internally represented by a floating point number. That is the whole point of this exercise.\n\nNon-canonical values will still parse as long as they are well formed, but will be re-emitted in their canonical form. (So always use canonical form, or don't diff.)\n\nThis format is intended to make it difficult to use these numbers without writing some sort of special handling code in the hopes that that will cause implementors to also use a fixed point implementation."
-                              x-kubernetes-int-or-string: true
-                            description: 'Requests describes the minimum amount of compute resources required. If Requests is omitted for a container, it defaults to Limits if that is explicitly specified, otherwise to an implementation-defined value. Requests cannot exceed Limits. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
-                            type: object
-                        type: object
-                    required:
-                    - image
-                    type: object
                   relay:
                     description: |-
-                      The relay: Restate's single endpoint in preflight mode, the tenants' ingress mux, and
-                      optionally the tunnel receiver.
+                      The relay: Restate's single endpoint in preflight mode, the tenants' ingress mux, the cron
+                      (served in process), in `included` mode the workflow registry, and optionally the tunnel
+                      receiver.
                     properties:
                       env:
                         items:
@@ -3588,6 +3434,34 @@ spec:
                             description: 'Requests describes the minimum amount of compute resources required. If Requests is omitted for a container, it defaults to Limits if that is explicitly specified, otherwise to an implementation-defined value. Requests cannot exceed Limits. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
                             type: object
                         type: object
+                      serviceAccountAnnotations:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          Annotations on the relay pods' ServiceAccount (`relay`), e.g. the workload identity that
+                          may read and write the registry's bucket (`iam.gke.io/gcp-service-account`,
+                          `eks.amazonaws.com/role-arn`).
+                        nullable: true
+                        type: object
+                      storage:
+                        description: |-
+                          The relay pods' volume: the gossip generation and, in `included` mode, the registry's
+                          local replica (a cache of the bucket: losing it only costs a reload). A StatefulSet
+                          volume claim template, so immutable. Defaults to 10Gi of the default StorageClass.
+                        nullable: true
+                        properties:
+                          storageClassName:
+                            nullable: true
+                            type: string
+                          storageRequestBytes:
+                            format: int64
+                            minimum: 1.0
+                            nullable: true
+                            type: integer
+                        type: object
+                        x-kubernetes-validations:
+                        - message: the relay's storage is immutable
+                          rule: self == oldSelf
                       tunnel:
                         description: Deployments outside the cluster dialing in (start_tunnel). Off when unset.
                         nullable: true
@@ -3645,21 +3519,20 @@ spec:
                         - url
                         type: object
                       included:
+                        description: |-
+                          The registry inside the relay: its truth is a set of shard objects in a bucket, every relay
+                          pod holds a replica and answers the lookups in process (`59-registry-replication.md`). The
+                          registry API (`:8090`, the operator API of the standalone registry: register, list, delete) is
+                          on the `relay` Service, cluster-internal.
                         nullable: true
                         properties:
-                          args:
-                            description: Extra arguments, e.g. `["--readers", "4", "--cache-mib", "512"]`.
-                            items:
-                              type: string
-                            nullable: true
-                            type: array
-                          image:
-                            type: string
-                          imagePullPolicy:
-                            nullable: true
+                          bucketUrl:
+                            description: |-
+                              Where the registry lives, e.g. `gs://my-bucket/registry`, `s3://my-bucket/registry`. The
+                              relay pods need read and write access (`relay.serviceAccountAnnotations`).
                             type: string
                           readApi:
-                            description: The web UI's per-scope read API (:8091).
+                            description: The web UI's per-scope read API (:8091 on the relay pods).
                             nullable: true
                             properties:
                               advertisedUrl:
@@ -3688,67 +3561,23 @@ spec:
                                     type: string
                                 type: object
                             type: object
-                          resources:
-                            description: ResourceRequirements describes the compute resource requirements.
+                          shards:
+                            description: |-
+                              The number of shards, used only when the registry is created in an empty bucket
+                              (afterwards the bucket's own count wins). The relay's default (500) when unset.
+                            format: int32
+                            maximum: 1000.0
+                            minimum: 1.0
                             nullable: true
-                            properties:
-                              claims:
-                                description: |-
-                                  Claims lists the names of resources, defined in spec.resourceClaims, that are used by this container.
-
-                                  This field depends on the DynamicResourceAllocation feature gate.
-
-                                  This field is immutable. It can only be set for containers.
-                                items:
-                                  description: ResourceClaim references one entry in PodSpec.ResourceClaims.
-                                  properties:
-                                    name:
-                                      description: Name must match the name of one entry in pod.spec.resourceClaims of the Pod where this field is used. It makes that resource available inside a container.
-                                      type: string
-                                    request:
-                                      description: Request is the name chosen for a request in the referenced claim. If empty, everything from the claim is made available, otherwise only the result of this request.
-                                      type: string
-                                  required:
-                                  - name
-                                  type: object
-                                type: array
-                              limits:
-                                additionalProperties:
-                                  description: "Quantity is a fixed-point representation of a number. It provides convenient marshaling/unmarshaling in JSON and YAML, in addition to String() and AsInt64() accessors.\n\nThe serialization format is:\n\n``` <quantity>        ::= <signedNumber><suffix>\n\n\t(Note that <suffix> may be empty, from the \"\" case in <decimalSI>.)\n\n<digit>           ::= 0 | 1 | ... | 9 <digits>          ::= <digit> | <digit><digits> <number>          ::= <digits> | <digits>.<digits> | <digits>. | .<digits> <sign>            ::= \"+\" | \"-\" <signedNumber>    ::= <number> | <sign><number> <suffix>          ::= <binarySI> | <decimalExponent> | <decimalSI> <binarySI>        ::= Ki | Mi | Gi | Ti | Pi | Ei\n\n\t(International System of units; See: http://physics.nist.gov/cuu/Units/binary.html)\n\n<decimalSI>       ::= m | \"\" | k | M | G | T | P | E\n\n\t(Note that 1024 = 1Ki but 1000 = 1k; I didn't choose the capitalization.)\n\n<decimalExponent> ::= \"e\" <signedNumber> | \"E\" <signedNumber> ```\n\nNo matter which of the three exponent forms is used, no quantity may represent a number greater than 2^63-1 in magnitude, nor may it have more than 3 decimal places. Numbers larger or more precise will be capped or rounded up. (E.g.: 0.1m will rounded up to 1m.) This may be extended in the future if we require larger or smaller quantities.\n\nWhen a Quantity is parsed from a string, it will remember the type of suffix it had, and will use the same type again when it is serialized.\n\nBefore serializing, Quantity will be put in \"canonical form\". This means that Exponent/suffix will be adjusted up or down (with a corresponding increase or decrease in Mantissa) such that:\n\n- No precision is lost - No fractional digits will be emitted - The exponent (or suffix) is as large as possible.\n\nThe sign will be omitted unless the number is negative.\n\nExamples:\n\n- 1.5 will be serialized as \"1500m\" - 1.5Gi will be serialized as \"1536Mi\"\n\nNote that the quantity will NEVER be internally represented by a floating point number. That is the whole point of this exercise.\n\nNon-canonical values will still parse as long as they are well formed, but will be re-emitted in their canonical form. (So always use canonical form, or don't diff.)\n\nThis format is intended to make it difficult to use these numbers without writing some sort of special handling code in the hopes that that will cause implementors to also use a fixed point implementation."
-                                  x-kubernetes-int-or-string: true
-                                description: 'Limits describes the maximum amount of compute resources allowed. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
-                                type: object
-                              requests:
-                                additionalProperties:
-                                  description: "Quantity is a fixed-point representation of a number. It provides convenient marshaling/unmarshaling in JSON and YAML, in addition to String() and AsInt64() accessors.\n\nThe serialization format is:\n\n``` <quantity>        ::= <signedNumber><suffix>\n\n\t(Note that <suffix> may be empty, from the \"\" case in <decimalSI>.)\n\n<digit>           ::= 0 | 1 | ... | 9 <digits>          ::= <digit> | <digit><digits> <number>          ::= <digits> | <digits>.<digits> | <digits>. | .<digits> <sign>            ::= \"+\" | \"-\" <signedNumber>    ::= <number> | <sign><number> <suffix>          ::= <binarySI> | <decimalExponent> | <decimalSI> <binarySI>        ::= Ki | Mi | Gi | Ti | Pi | Ei\n\n\t(International System of units; See: http://physics.nist.gov/cuu/Units/binary.html)\n\n<decimalSI>       ::= m | \"\" | k | M | G | T | P | E\n\n\t(Note that 1024 = 1Ki but 1000 = 1k; I didn't choose the capitalization.)\n\n<decimalExponent> ::= \"e\" <signedNumber> | \"E\" <signedNumber> ```\n\nNo matter which of the three exponent forms is used, no quantity may represent a number greater than 2^63-1 in magnitude, nor may it have more than 3 decimal places. Numbers larger or more precise will be capped or rounded up. (E.g.: 0.1m will rounded up to 1m.) This may be extended in the future if we require larger or smaller quantities.\n\nWhen a Quantity is parsed from a string, it will remember the type of suffix it had, and will use the same type again when it is serialized.\n\nBefore serializing, Quantity will be put in \"canonical form\". This means that Exponent/suffix will be adjusted up or down (with a corresponding increase or decrease in Mantissa) such that:\n\n- No precision is lost - No fractional digits will be emitted - The exponent (or suffix) is as large as possible.\n\nThe sign will be omitted unless the number is negative.\n\nExamples:\n\n- 1.5 will be serialized as \"1500m\" - 1.5Gi will be serialized as \"1536Mi\"\n\nNote that the quantity will NEVER be internally represented by a floating point number. That is the whole point of this exercise.\n\nNon-canonical values will still parse as long as they are well formed, but will be re-emitted in their canonical form. (So always use canonical form, or don't diff.)\n\nThis format is intended to make it difficult to use these numbers without writing some sort of special handling code in the hopes that that will cause implementors to also use a fixed point implementation."
-                                  x-kubernetes-int-or-string: true
-                                description: 'Requests describes the minimum amount of compute resources required. If Requests is omitted for a container, it defaults to Limits if that is explicitly specified, otherwise to an implementation-defined value. Requests cannot exceed Limits. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
-                                type: object
-                            type: object
-                          storage:
-                            description: The registry's sqlite volume (a StatefulSet volume claim template, so immutable).
-                            properties:
-                              storageClassName:
-                                nullable: true
-                                type: string
-                              storageRequestBytes:
-                                format: int64
-                                minimum: 1.0
-                                type: integer
-                            required:
-                            - storageRequestBytes
-                            type: object
-                            x-kubernetes-validations:
-                            - message: the registry's storage is immutable
-                              rule: self == oldSelf
+                            type: integer
                         required:
-                        - image
-                        - storage
+                        - bucketUrl
                         type: object
                       mode:
                         description: |-
-                          included: the operator runs the schema registry. external: a URL serving the registry
-                          API. operator: Kubernetes objects (RestateDeploymentEndpoint), served by the operator.
+                          included: the relay runs the registry, its truth in an object store bucket. external: a
+                          URL serving the registry API. operator: Kubernetes objects (RestateDeploymentEndpoint),
+                          served by the operator.
                         enum:
                         - included
                         - external
@@ -3797,7 +3626,6 @@ spec:
                     - message: set exactly the block of workflowRegistry.mode (operator's is optional)
                       rule: (self.mode == 'included') == has(self.included) && (self.mode == 'external') == has(self.external) && (!has(self.operator) || self.mode == 'operator')
                 required:
-                - cron
                 - relay
                 - workflowRegistry
                 type: object
@@ -4479,15 +4307,12 @@ spec:
                         description: The cron's deployment id in Restate's registry.
                         nullable: true
                         type: string
-                      readyReplicas:
-                        format: int32
-                        type: integer
                       registeredImage:
-                        description: The image the cron ran when it was registered; a new image is registered again.
+                        description: |-
+                          The relay image serving the cron when it was registered; a new image is registered
+                          again.
                         nullable: true
                         type: string
-                    required:
-                    - readyReplicas
                     type: object
                   registry:
                     nullable: true

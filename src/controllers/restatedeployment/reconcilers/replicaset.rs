@@ -21,7 +21,7 @@ use crate::controllers::restatedeployment::cleanup::{
 use crate::controllers::restatedeployment::controller::{
     APP_MANAGED_BY_LABEL, Context, OWNED_BY_LABEL, RESTATE_DEPLOYMENT_ID_ANNOTATION,
 };
-use crate::controllers::restatedeployment::operator_registry;
+use crate::controllers::restatedeployment::{included_registry, operator_registry};
 use crate::resources::restatecloudenvironments::InProcessTunnelParams;
 use crate::resources::restatedeployments::RestateDeployment;
 use crate::{Error, Result};
@@ -333,8 +333,10 @@ pub async fn cleanup_old_replicasets(
     // Keep track of how many zero-scaled rs there are (for revision history limit)
     let mut historic_count = 0;
     let mut next_removal = None;
-    // In operator mode a version is an endpoint object, not a registration in Restate.
+    // In operator mode a version is an endpoint object, in included mode a deployment in the
+    // relay's registry, not a registration in Restate.
     let operator_mode = operator_registry::operator_cluster(ctx, rsd).is_some();
+    let included = included_registry::included_cluster(ctx, rsd)?;
 
     let now = chrono::Utc::now();
 
@@ -502,6 +504,12 @@ pub async fn cleanup_old_replicasets(
                 if operator_mode && deployment_exists {
                     operator_registry::remove_endpoint(ctx, namespace, &rs_name).await?;
                 }
+                // Same in included mode: a rollback registers it again (same id, D31).
+                if let (Some(included), Some(id)) = (&included, rs_deployment_id)
+                    && deployment_exists
+                {
+                    included_registry::delete(ctx, included, id).await?;
+                }
 
                 // If we are here, there is a 0 sized replicaset which should be subject to the history limit
                 if retain_for_rollback(mode, historic_count, rsd.spec.revision_history_limit) {
@@ -518,7 +526,7 @@ pub async fn cleanup_old_replicasets(
                     });
                 }
 
-                if deployment_exists && !operator_mode {
+                if deployment_exists && !operator_mode && included.is_none() {
                     let rs_deployment_id = rs_deployment_id.unwrap();
 
                     debug!(

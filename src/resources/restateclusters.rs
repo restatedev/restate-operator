@@ -41,8 +41,9 @@ pub struct RestateClusterSpec {
     pub security: Option<RestateClusterSecurity>,
     /// TOML-encoded Restate config file
     pub config: Option<String>,
-    /// Run the cluster as a multitenant Restate: schemaless nodes in preflight mode, the relay
-    /// (with the ingress mux), the cron and a workflow registry, all managed by the operator.
+    /// Run the cluster as a multitenant Restate: schemaless nodes in preflight mode and the relay
+    /// (the ingress mux, the cron, and in `included` mode the workflow registry), all managed by
+    /// the operator.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multitenancy: Option<Multitenancy>,
 }
@@ -53,13 +54,13 @@ pub struct RestateClusterSpec {
 #[serde(rename_all = "camelCase")]
 pub struct Multitenancy {
     pub relay: RelaySpec,
-    pub cron: CronSpec,
     pub workflow_registry: WorkflowRegistry,
 }
 
-/// The relay: Restate's single endpoint in preflight mode, the tenants' ingress mux, and
-/// optionally the tunnel receiver.
-#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
+/// The relay: Restate's single endpoint in preflight mode, the tenants' ingress mux, the cron
+/// (served in process), in `included` mode the workflow registry, and optionally the tunnel
+/// receiver.
+#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RelaySpec {
     pub image: String,
@@ -72,6 +73,17 @@ pub struct RelaySpec {
     pub resources: Option<ResourceRequirements>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<Vec<EnvVar>>,
+    /// The relay pods' volume: the gossip generation and, in `included` mode, the registry's
+    /// local replica (a cache of the bucket: losing it only costs a reload). A StatefulSet
+    /// volume claim template, so immutable. Defaults to 10Gi of the default StorageClass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[x_kube(validation = Rule::new("self == oldSelf").message("the relay's storage is immutable"))]
+    pub storage: Option<RelayStorage>,
+    /// Annotations on the relay pods' ServiceAccount (`relay`), e.g. the workload identity that
+    /// may read and write the registry's bucket (`iam.gke.io/gcp-service-account`,
+    /// `eks.amazonaws.com/role-arn`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_account_annotations: Option<BTreeMap<String, String>>,
     /// The tenants' front door. Without it the mux listens but has no Service of its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ingress_mux: Option<IngressMuxSpec>,
@@ -121,21 +133,14 @@ pub struct ExposedService {
     pub load_balancer_source_ranges: Option<Vec<String>>,
 }
 
-/// The cron: the only platform service, registered in Restate's own registry at the relay's
-/// plain route.
-#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct CronSpec {
-    pub image: String,
-    /// Defaults to 3.
+pub struct RelayStorage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replicas: Option<i32>,
+    pub storage_class_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image_pull_policy: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resources: Option<ResourceRequirements>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub env: Option<Vec<EnvVar>>,
+    #[schemars(range(min = 1))]
+    pub storage_request_bytes: Option<i64>,
 }
 
 /// Where the relay and the ingress mux look the tenants' workflows up.
@@ -145,8 +150,9 @@ pub struct CronSpec {
     "(self.mode == 'included') == has(self.included) && (self.mode == 'external') == has(self.external) && (!has(self.operator) || self.mode == 'operator')"
 ).message("set exactly the block of workflowRegistry.mode (operator's is optional)"))]
 pub struct WorkflowRegistry {
-    /// included: the operator runs the schema registry. external: a URL serving the registry
-    /// API. operator: Kubernetes objects (RestateDeploymentEndpoint), served by the operator.
+    /// included: the relay runs the registry, its truth in an object store bucket. external: a
+    /// URL serving the registry API. operator: Kubernetes objects (RestateDeploymentEndpoint),
+    /// served by the operator.
     #[schemars(schema_with = "registry_mode_schema")]
     pub mode: RegistryMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -172,32 +178,24 @@ fn registry_mode_schema(_: &mut schemars::SchemaGenerator) -> Schema {
     })
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct IncludedRegistry {
-    pub image: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image_pull_policy: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resources: Option<ResourceRequirements>,
-    /// The registry's sqlite volume (a StatefulSet volume claim template, so immutable).
-    #[x_kube(validation = Rule::new("self == oldSelf").message("the registry's storage is immutable"))]
-    pub storage: RegistryStorage,
-    /// Extra arguments, e.g. `["--readers", "4", "--cache-mib", "512"]`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub args: Option<Vec<String>>,
-    /// The web UI's per-scope read API (:8091).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub read_api: Option<ReadApi>,
-}
-
+/// The registry inside the relay: its truth is a set of shard objects in a bucket, every relay
+/// pod holds a replica and answers the lookups in process (`59-registry-replication.md`). The
+/// registry API (`:8090`, the operator API of the standalone registry: register, list, delete) is
+/// on the `relay` Service, cluster-internal.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct RegistryStorage {
+pub struct IncludedRegistry {
+    /// Where the registry lives, e.g. `gs://my-bucket/registry`, `s3://my-bucket/registry`. The
+    /// relay pods need read and write access (`relay.serviceAccountAnnotations`).
+    pub bucket_url: String,
+    /// The number of shards, used only when the registry is created in an empty bucket
+    /// (afterwards the bucket's own count wins). The relay's default (500) when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub storage_class_name: Option<String>,
-    #[schemars(range(min = 1))]
-    pub storage_request_bytes: i64,
+    #[schemars(range(min = 1, max = 1000))]
+    pub shards: Option<i32>,
+    /// The web UI's per-scope read API (:8091 on the relay pods).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_api: Option<ReadApi>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema)]
@@ -607,11 +605,11 @@ pub struct RelayStatus {
 #[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CronStatus {
-    pub ready_replicas: i32,
     /// The cron's deployment id in Restate's registry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deployment_id: Option<String>,
-    /// The image the cron ran when it was registered; a new image is registered again.
+    /// The relay image serving the cron when it was registered; a new image is registered
+    /// again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registered_image: Option<String>,
 }

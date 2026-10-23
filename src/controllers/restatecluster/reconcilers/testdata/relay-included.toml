@@ -1,0 +1,65 @@
+# The relay config the operator renders for an `included`-mode cluster (relay.rs tests): the
+# relay in the cluster's namespace `restate`, 3 relays, no tunnel, the registry in the relay
+# (59-registry-replication.md) at gs://restate-registry/registry with the UI's read API.
+
+sender_listen = "0.0.0.0:9080"
+allow_unauthenticated_sender = true
+external_proxy_url = "http://relay.restate.svc.cluster.local:9080"
+# No tunnel: a loopback receiver that authorises nobody.
+receiver_listen = "127.0.0.1:19080"
+
+[auth.static]
+keys_path = "/etc/relay/no-tunnel-auth-keys.toml"
+
+[metrics]
+listen = "0.0.0.0:9000"
+
+[limits.drain]
+deregistration_delay_secs     = 15
+straggler_window_secs         = 5
+drain_timeout_secs            = 60
+termination_grace_period_secs = 70
+
+# The lookups are answered in process from the relay's replica: no registry client.
+[preflight.retry]
+initial_interval_ms   = 100
+exponentiation_factor = 2.0
+max_interval_ms       = 10000
+max_attempts          = 70
+on_max_attempts       = "pause"
+
+# The registry: shards in the bucket, a replica on the state PVC, the registry API on :8090
+# (the relay Service), the UI's read API on :8091 (the registry-read Service). No `shards`:
+# the relay's default.
+[registry]
+bucket_url    = "gs://restate-registry/registry"
+db_path       = "/var/lib/relay/registry.sqlite"
+api_listen    = "0.0.0.0:8090"
+public_listen = "0.0.0.0:8091"
+
+[cluster]
+node_id                      = "__NODE_ID__"
+cluster_id                   = "restate-relay"
+insecure_gossip_acknowledged = true
+gossip_listen                = "0.0.0.0:6000"
+cluster_rpc_listen           = "0.0.0.0:6001"
+cluster_forward_listen       = "0.0.0.0:6002"
+advertise_addr               = "__POD_IP__"
+generation_state_path        = "/var/lib/relay/generation.state"
+seeds                        = ["relay-0.relay-headless.restate.svc.cluster.local:6000", "relay-1.relay-headless.restate.svc.cluster.local:6000", "relay-2.relay-headless.restate.svc.cluster.local:6000"]
+
+[service_protocol]
+policy = "preflight"
+
+[embedded]
+services = ["cron"]
+
+[[routing.static.routes]]
+env      = "platform"
+tunnel   = "cron"
+embedded = "cron"
+
+[ingress_mux]
+listen   = "0.0.0.0:8080"
+upstream = "http://restate.restate.svc.cluster.local:8080"
+admin    = "http://restate.restate.svc.cluster.local:9070"
