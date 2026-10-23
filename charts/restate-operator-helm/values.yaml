@@ -8,6 +8,8 @@ installCrds: true
 image:
   repository: ghcr.io/restatedev/restate-operator
   pullPolicy: IfNotPresent
+  # pins the image (repository:tag@digest), e.g. a moving branch tag; the tag still labels the objects
+  digest: ""
 
 imagePullSecrets: []
 
