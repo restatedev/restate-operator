@@ -4307,10 +4307,11 @@ spec:
                         description: The cron's deployment id in Restate's registry.
                         nullable: true
                         type: string
-                      registeredImage:
+                      registeredRevision:
                         description: |-
-                          The relay image serving the cron when it was registered; a new image is registered
-                          again.
+                          The relay StatefulSet revision serving the cron when it was registered: every rollout
+                          of the relay (a new image, a moved tag after a restart, a new config) registers it again,
+                          so Restate rediscovers what the relay now serves.
                         nullable: true
                         type: string
                     type: object

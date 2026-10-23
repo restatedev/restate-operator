@@ -643,8 +643,8 @@ fn relay_pod_disruption_budget(base_metadata: &ObjectMeta) -> PodDisruptionBudge
 pub(super) struct RelayOutcome {
     pub status: RelayStatus,
     pub state: ComponentState,
-    /// Every pod runs the current spec and is ready.
-    pub rolled_out: bool,
+    /// The StatefulSet revision every pod runs, once it's rolled out and ready.
+    pub rolled_out_revision: Option<String>,
     pub ingress_mux: Advertised,
     /// The tunnel receiver's URL, as advertised to tunnel clients.
     pub tunnel_url: Option<String>,
@@ -801,7 +801,11 @@ pub(super) async fn reconcile_relay(
             config_hash,
         },
         state,
-        rolled_out,
+        rolled_out_revision: ss
+            .as_ref()
+            .filter(|_| rolled_out)
+            .and_then(|ss| ss.status.as_ref())
+            .and_then(|s| s.update_revision.clone()),
         ingress_mux,
         tunnel_url: tunnel_url.flatten(),
     })

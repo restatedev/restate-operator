@@ -39,10 +39,10 @@ fn registration_payload(dns: Dns<'_>) -> serde_json::Value {
     })
 }
 
-/// The cron's state before its registration is checked: registered at the relay image that
+/// The cron's state before its registration is checked: registered at the relay revision that
 /// serves it, or waiting for Restate and the relay to be Ready.
-pub(super) fn cron_state(status: &CronStatus, relay_image: &str) -> ComponentState {
-    if is_registered(status, relay_image) {
+pub(super) fn cron_state(status: &CronStatus, relay_revision: Option<&str>) -> ComponentState {
+    if relay_revision.is_some_and(|revision| is_registered(status, revision)) {
         ComponentState::ready(
             "CronRegistered",
             format!(
@@ -58,21 +58,21 @@ pub(super) fn cron_state(status: &CronStatus, relay_image: &str) -> ComponentSta
     }
 }
 
-fn is_registered(status: &CronStatus, relay_image: &str) -> bool {
-    status.deployment_id.is_some() && status.registered_image.as_deref() == Some(relay_image)
+fn is_registered(status: &CronStatus, relay_revision: &str) -> bool {
+    status.deployment_id.is_some() && status.registered_revision.as_deref() == Some(relay_revision)
 }
 
-/// Make sure Restate has the cron, at the relay's current image: re-register it when the image
-/// changed or Restate doesn't know the recorded deployment (e.g. a wiped cluster). Updates
+/// Make sure Restate has the cron, at the relay's current revision: re-register it when the relay
+/// rolled out again or Restate doesn't know the recorded deployment (e.g. a wiped cluster). Updates
 /// `status` with what's registered. Admin API failures are reported in the state (and retried
 /// by the requeue), not as reconcile errors.
 pub(super) async fn register_cron(
     ctx: &Context,
     dns: Dns<'_>,
-    relay_image: &str,
+    relay_revision: &str,
     status: &mut CronStatus,
 ) -> Result<ComponentState, Error> {
-    match ensure_registered(ctx, dns, relay_image, status).await {
+    match ensure_registered(ctx, dns, relay_revision, status).await {
         Ok(()) => Ok(ComponentState::ready(
             "CronRegistered",
             format!(
@@ -93,12 +93,12 @@ pub(super) async fn register_cron(
 async fn ensure_registered(
     ctx: &Context,
     dns: Dns<'_>,
-    relay_image: &str,
+    relay_revision: &str,
     status: &mut CronStatus,
 ) -> Result<(), Error> {
     let admin = url::Url::parse(&dns.url("restate", 9070))?;
 
-    if is_registered(status, relay_image)
+    if is_registered(status, relay_revision)
         && let Some(id) = status.deployment_id.as_deref()
     {
         let resp = ctx
@@ -125,12 +125,12 @@ async fn ensure_registered(
     .await?;
     info!(
         deployment_id = %registered.id,
-        relay_image,
+        relay_revision,
         services = ?registered.services,
         "Registered the cron with Restate"
     );
     status.deployment_id = Some(registered.id);
-    status.registered_image = Some(relay_image.to_owned());
+    status.registered_revision = Some(relay_revision.to_owned());
     Ok(())
 }
 
@@ -156,15 +156,17 @@ mod tests {
     }
 
     #[test]
-    fn a_new_relay_image_is_not_registered() {
+    fn a_new_relay_revision_is_not_registered() {
         let status = CronStatus {
             deployment_id: Some("dp_1".into()),
-            registered_image: Some("relay:demo".into()),
+            registered_revision: Some("relay-5f8c".into()),
         };
-        assert!(is_registered(&status, "relay:demo"));
-        assert!(cron_state(&status, "relay:demo").ready);
-        assert!(!is_registered(&status, "relay:v2"));
-        assert!(!cron_state(&status, "relay:v2").ready);
-        assert!(!is_registered(&CronStatus::default(), "relay:demo"));
+        assert!(is_registered(&status, "relay-5f8c"));
+        assert!(cron_state(&status, Some("relay-5f8c")).ready);
+        assert!(!is_registered(&status, "relay-77aa"));
+        assert!(!cron_state(&status, Some("relay-77aa")).ready);
+        // the relay is rolling out: not registered at what it'll run
+        assert!(!cron_state(&status, None).ready);
+        assert!(!is_registered(&CronStatus::default(), "relay-5f8c"));
     }
 }

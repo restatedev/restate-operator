@@ -287,8 +287,8 @@ impl RestateCluster {
         )
         .await?;
 
-        if let (Some(mt), Some(report)) = (self.spec.multitenancy.as_ref(), multitenancy.as_mut()) {
-            reconcile_multitenancy_after_compute(&ctx, name, mt, report).await?;
+        if let Some(report) = multitenancy.as_mut() {
+            reconcile_multitenancy_after_compute(&ctx, name, report).await?;
         }
 
         Ok(())

@@ -608,10 +608,11 @@ pub struct CronStatus {
     /// The cron's deployment id in Restate's registry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deployment_id: Option<String>,
-    /// The relay image serving the cron when it was registered; a new image is registered
-    /// again.
+    /// The relay StatefulSet revision serving the cron when it was registered: every rollout
+    /// of the relay (a new image, a moved tag after a restart, a new config) registers it again,
+    /// so Restate rediscovers what the relay now serves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub registered_image: Option<String>,
+    pub registered_revision: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]

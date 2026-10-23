@@ -223,9 +223,9 @@ pub struct MultitenancyReport {
     pub relay: ComponentState,
     pub cron: ComponentState,
     pub registry: ComponentState,
-    /// Whether the cron can be registered once Restate is Ready: the relay, which serves it, is
-    /// rolled out to its current spec (so the registration discovers the current image).
-    cron_registrable: bool,
+    /// The relay revision the cron can be registered at once Restate is Ready: set when the
+    /// relay, which serves it, is rolled out (so the registration discovers what it now serves).
+    relay_revision: Option<String>,
 }
 
 impl MultitenancyReport {
@@ -308,7 +308,7 @@ pub async fn reconcile_multitenancy(
         relay::reconcile_relay(ctx, name, base_metadata, &mt.relay, &registry.relay, dns).await?;
     // The registration carries over until it's checked again, once Restate is Ready.
     let cron_status = previous.and_then(|p| p.cron.clone()).unwrap_or_default();
-    let cron_state = cron::cron_state(&cron_status, &mt.relay.image);
+    let cron_state = cron::cron_state(&cron_status, relay.rolled_out_revision.as_deref());
 
     let advertised = AdvertisedAddresses {
         ingress_mux: relay.ingress_mux.known(),
@@ -327,7 +327,7 @@ pub async fn reconcile_multitenancy(
         relay: relay.state,
         cron: cron_state,
         registry: registry.state,
-        cron_registrable: relay.rolled_out,
+        relay_revision: relay.rolled_out_revision,
     };
 
     Ok((report, env))
@@ -337,16 +337,15 @@ pub async fn reconcile_multitenancy(
 pub async fn reconcile_multitenancy_after_compute(
     ctx: &Context,
     name: &str,
-    mt: &Multitenancy,
     report: &mut MultitenancyReport,
 ) -> Result<(), Error> {
-    if report.cron_registrable {
+    if let Some(revision) = report.relay_revision.clone() {
         let dns = Dns {
             namespace: name,
             cluster_dns: &ctx.cluster_dns,
         };
         let cron_status = report.status.cron.get_or_insert_with(Default::default);
-        report.cron = cron::register_cron(ctx, dns, &mt.relay.image, cron_status).await?;
+        report.cron = cron::register_cron(ctx, dns, &revision, cron_status).await?;
     }
 
     match report.not_ready() {
