@@ -274,8 +274,16 @@ impl InProcessTunnelParams {
         tunnel_name: &str,
         service_path: Option<&str>,
     ) -> Result<Url, crate::Error> {
+        // BYOC exposes the invocation side of an in-process tunnel through the
+        // proxy listener. The legacy tunnel URL can time out during registration
+        // even after the pod has completed its outbound tunnel handshake.
+        let (endpoint, port) = if self.region.split('.').any(|label| label == "byoc") {
+            ("proxy", 9082)
+        } else {
+            ("tunnel", 9080)
+        };
         let url = Url::parse(&format!(
-            "https://tunnel.{}.restate.cloud:9080/{}/{tunnel_name}/http/in-process/9080/",
+            "https://{endpoint}.{}.restate.cloud:{port}/{}/{tunnel_name}/http/in-process/9080/",
             self.region,
             self.unprefixed_environment_id(),
         ))?;
@@ -463,8 +471,7 @@ mod tests {
 
     #[test]
     fn from_rce_accepts_multi_label_byoc_region() {
-        // BYOC environments use a multi-label region (dots); it still forms a
-        // valid tunnel.{region}.restate.cloud host.
+        // The BYOC invocation endpoint differs from the tunnel listener.
         let params = InProcessTunnelParams::from_rce(&rce(
             "env_123abc",
             "inl4edhpbxasp9yuz1n0yvvkme.byoc",
@@ -474,8 +481,47 @@ mod tests {
         assert_eq!(params.region, "inl4edhpbxasp9yuz1n0yvvkme.byoc");
         assert_eq!(
             params.tunnel_url("greeter-5b8c7d", None).unwrap().as_str(),
-            "https://tunnel.inl4edhpbxasp9yuz1n0yvvkme.byoc.restate.cloud:9080/123abc/greeter-5b8c7d/http/in-process/9080/"
+            "https://proxy.inl4edhpbxasp9yuz1n0yvvkme.byoc.restate.cloud:9082/123abc/greeter-5b8c7d/http/in-process/9080/"
         );
+    }
+
+    #[test]
+    fn in_process_byoc_registration_preserves_routing_and_service_path() {
+        for environment_id in ["env_123abc", "123abc"] {
+            let params = InProcessTunnelParams::from_rce(&rce(
+                environment_id,
+                "tenant.byoc.us",
+                "publickeyv1_abc",
+            ))
+            .unwrap();
+            for service_path in ["/api/restate", "api/restate"] {
+                assert_eq!(
+                    params
+                        .tunnel_url("greeter-5b8c7d", Some(service_path))
+                        .unwrap()
+                        .as_str(),
+                    "https://proxy.tenant.byoc.us.restate.cloud:9082/123abc/greeter-5b8c7d/http/in-process/9080/api/restate"
+                );
+            }
+            assert!(matches!(
+                params.tunnel_url("greeter-5b8c7d", Some("../..")),
+                Err(crate::Error::InvalidRestateConfig(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn in_process_hosted_regions_keep_their_registration_endpoint() {
+        for region in ["us", "eu", "not-byoc.us"] {
+            let mut params = params();
+            params.region = region.into();
+            let url = params.tunnel_url("greeter-5b8c7d", None).unwrap();
+            assert_eq!(
+                url.host_str(),
+                Some(format!("tunnel.{region}.restate.cloud").as_str())
+            );
+            assert_eq!(url.port(), Some(9080));
+        }
     }
 
     #[test]
