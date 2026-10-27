@@ -1,4 +1,14 @@
 replicaCount: 1
+# The operator has no leader election, so two pods must not reconcile at once. The default
+# rolling update (25% surge) starts the new pod while the old one still runs, and two versions
+# that render a resource differently then rewrite it in turn. maxSurge 0 stops the old pod
+# first. Recreate does the same, but an existing Deployment cannot switch to it through
+# `helm upgrade` with server-side apply (Helm 4), because the defaulted rollingUpdate stays.
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 0
+    maxUnavailable: 1
 nameOverride: "restate-operator"
 version: "" # pin a specific version
 
