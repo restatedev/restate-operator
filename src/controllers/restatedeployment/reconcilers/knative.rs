@@ -52,8 +52,8 @@ pub async fn reconcile_knative(
     trace!(tag = %tag, "Determined deployment tag");
 
     // Early status update based on tag change
-    let config_name = format!("{}-{}", rsd.name_any(), &tag);
-    let route_name = format!("{}-{}", rsd.name_any(), &tag);
+    let config_name = format!("{}-{}", rsd.name_any(), tag);
+    let route_name = format!("{}-{}", rsd.name_any(), tag);
 
     if status.knative.is_none() {
         status.knative = Some(KnativeDeploymentStatus::default());
