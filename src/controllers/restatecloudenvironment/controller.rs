@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
 use futures::StreamExt;
 
 use k8s_openapi::api::apps::v1::Deployment;
@@ -69,7 +68,7 @@ async fn reconcile(rs: Arc<RestateCloudEnvironment>, ctx: Arc<Context>) -> Resul
         Span::current().record("trace_id", field::display(&trace_id));
     }
     let _timer = ctx.metrics.count_and_measure::<RestateCloudEnvironment>();
-    ctx.diagnostics.write().await.last_event = Utc::now();
+    ctx.diagnostics.write().await.last_event = jiff::Timestamp::now();
 
     let services_api: Api<RestateCloudEnvironment> = Api::all(ctx.client.clone());
 
@@ -135,7 +134,7 @@ impl RestateCloudEnvironment {
             .as_ref()
             .and_then(|s| s.conditions.as_ref())
             .and_then(|c| c.iter().find(|cond| cond.r#type == RECONCILING_CONDITION));
-        let now = k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(Utc::now());
+        let now = k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(jiff::Timestamp::now());
 
         let suspended = RestateCloudEnvironmentCondition {
             last_transition_time: Some(
@@ -206,7 +205,7 @@ impl RestateCloudEnvironment {
             .as_ref()
             .and_then(|s| s.conditions.as_ref())
             .and_then(|c| c.iter().find(|cond| cond.r#type == "Ready"));
-        let now = k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(Utc::now());
+        let now = k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(jiff::Timestamp::now());
 
         let mut ready = RestateCloudEnvironmentCondition {
             last_transition_time: Some(

@@ -2,7 +2,6 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use chrono::Utc;
 use futures::StreamExt;
 use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetStatus};
 use k8s_openapi::api::batch::v1::Job;
@@ -17,7 +16,7 @@ use kube::core::PartialObjectMeta;
 use kube::core::object::HasStatus;
 use kube::runtime::events::Recorder;
 use kube::runtime::reflector::{ObjectRef, Store};
-use kube::runtime::{Predicate, WatchStreamExt, metadata_watcher, reflector, watcher};
+use kube::runtime::{Predicate, PredicateConfig, WatchStreamExt, reflector, watcher};
 use kube::{
     Resource,
     api::{Api, Patch, PatchParams, ResourceExt},
@@ -128,7 +127,7 @@ async fn reconcile(rc: Arc<RestateCluster>, ctx: Arc<Context>) -> Result<Action>
         Span::current().record("trace_id", field::display(&trace_id));
     }
     let _timer = ctx.metrics.count_and_measure::<RestateCluster>();
-    ctx.diagnostics.write().await.last_event = Utc::now();
+    ctx.diagnostics.write().await.last_event = jiff::Timestamp::now();
     let rcs: Api<RestateCluster> = Api::all(ctx.client.clone());
 
     // Check this before the finalizer helper, which adds our finalizer to resources that
@@ -275,7 +274,7 @@ impl RestateCluster {
             .as_ref()
             .and_then(|s| s.conditions.as_ref())
             .and_then(|c| c.iter().find(|cond| cond.r#type == RECONCILING_CONDITION));
-        let now = k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(Utc::now());
+        let now = k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(jiff::Timestamp::now());
 
         let suspended = RestateClusterCondition {
             // Only the start of the suspension is a transition.
@@ -397,7 +396,7 @@ impl RestateCluster {
             .as_ref()
             .and_then(|s| s.conditions.as_ref())
             .and_then(|c| c.iter().find(|cond| cond.r#type == "Ready"));
-        let now = k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(Utc::now());
+        let now = k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(jiff::Timestamp::now());
 
         let mut ready = RestateClusterCondition {
             last_transition_time: Some(
@@ -504,18 +503,18 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     );
 
     let rc_api = Api::<RestateCluster>::all(client.clone());
-    let ns_api = Api::<Namespace>::all(client.clone());
+    let ns_api = Api::<PartialObjectMeta<Namespace>>::all(client.clone());
     let ss_api = Api::<StatefulSet>::all(client.clone());
-    let pvc_api = Api::<PersistentVolumeClaim>::all(client.clone());
+    let pvc_api = Api::<PartialObjectMeta<PersistentVolumeClaim>>::all(client.clone());
     let svc_api = Api::<Service>::all(client.clone());
-    let svcacc_api = Api::<ServiceAccount>::all(client.clone());
-    let pdb_api = Api::<PodDisruptionBudget>::all(client.clone());
+    let svcacc_api = Api::<PartialObjectMeta<ServiceAccount>>::all(client.clone());
+    let pdb_api = Api::<PartialObjectMeta<PodDisruptionBudget>>::all(client.clone());
     let cm_api = Api::<ConfigMap>::all(client.clone());
-    let np_api = Api::<NetworkPolicy>::all(client.clone());
+    let np_api = Api::<PartialObjectMeta<NetworkPolicy>>::all(client.clone());
     let pia_api = Api::<PodIdentityAssociation>::all(client.clone());
     let ipm_api = Api::<IAMPolicyMember>::all(client.clone());
-    let sgp_api = Api::<SecurityGroupPolicy>::all(client.clone());
-    let spc_api = Api::<SecretProviderClass>::all(client.clone());
+    let sgp_api = Api::<PartialObjectMeta<SecurityGroupPolicy>>::all(client.clone());
+    let spc_api = Api::<PartialObjectMeta<SecretProviderClass>>::all(client.clone());
 
     if state.aws_pod_identity_association_cluster.is_some() && !pod_identity_association_installed {
         error!(
@@ -541,7 +540,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     let rc_cfg = Config::default();
 
     let (pvc_meta_store, pvc_meta_writer) = reflector::store();
-    let pvc_meta_reflector = reflector(pvc_meta_writer, metadata_watcher(pvc_api, cfg.clone()))
+    let pvc_meta_reflector = reflector(pvc_meta_writer, watcher(pvc_api, cfg.clone()))
         .touched_objects()
         .default_backoff();
 
@@ -550,39 +549,48 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         .map(ensure_deletion_change)
         .touched_objects()
         .default_backoff()
-        .predicate_filter(changed_predicate.combine(status_predicate_serde));
+        .predicate_filter(
+            changed_predicate.combine(status_predicate_serde),
+            PredicateConfig::default(),
+        );
 
-    let np_watcher = metadata_watcher(np_api, cfg.clone())
+    let np_watcher = watcher(np_api, cfg.clone())
         .map(ensure_deletion_change)
         .touched_objects()
-        .predicate_filter(changed_predicate);
+        .predicate_filter(changed_predicate, PredicateConfig::default());
 
-    let ns_watcher = metadata_watcher(ns_api, cfg.clone())
+    let ns_watcher = watcher(ns_api, cfg.clone())
         .map(ensure_deletion_change)
         .touched_objects()
-        .predicate_filter(changed_predicate);
+        .predicate_filter(changed_predicate, PredicateConfig::default());
 
-    let svcacc_watcher = metadata_watcher(svcacc_api, cfg.clone())
+    let svcacc_watcher = watcher(svcacc_api, cfg.clone())
         .map(ensure_deletion_change)
         .touched_objects()
-        .predicate_filter(changed_predicate);
+        .predicate_filter(changed_predicate, PredicateConfig::default());
 
-    let pdb_watcher = metadata_watcher(pdb_api, cfg.clone())
+    let pdb_watcher = watcher(pdb_api, cfg.clone())
         .map(ensure_deletion_change)
         .touched_objects()
-        .predicate_filter(changed_predicate);
+        .predicate_filter(changed_predicate, PredicateConfig::default());
 
     let svc_watcher = watcher(svc_api, cfg.clone())
         .map(ensure_deletion_change)
         .touched_objects()
         // svc has no generation so we hash the spec to check for changes
-        .predicate_filter(changed_predicate.combine(spec_predicate_serde));
+        .predicate_filter(
+            changed_predicate.combine(spec_predicate_serde),
+            PredicateConfig::default(),
+        );
 
     let cm_watcher = watcher(cm_api, cfg.clone())
         .map(ensure_deletion_change)
         .touched_objects()
         // cm has no generation so we hash the data to check for changes
-        .predicate_filter(changed_predicate.combine(spec_predicate));
+        .predicate_filter(
+            changed_predicate.combine(spec_predicate),
+            PredicateConfig::default(),
+        );
 
     let controller = Controller::new(rc_api, rc_cfg.clone())
         .shutdown_on_signal()
@@ -612,39 +620,42 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
             .map(ensure_deletion_change)
             .touched_objects()
             // avoid apply loops that seem to happen with crds
-            .predicate_filter(changed_predicate.combine(status_predicate));
+            .predicate_filter(
+                changed_predicate.combine(status_predicate),
+                PredicateConfig::default(),
+            );
 
-        let job_api = Api::<Job>::all(client.clone());
+        let job_api = Api::<PartialObjectMeta<Job>>::all(client.clone());
 
-        let job_watcher = metadata_watcher(
+        let job_watcher = watcher(
             job_api,
             Config::default().labels("app.kubernetes.io/name=restate-pia-canary"),
         )
         .map(ensure_deletion_change)
         .touched_objects()
-        .predicate_filter(changed_predicate);
+        .predicate_filter(changed_predicate, PredicateConfig::default());
 
         controller.owns_stream(pia_watcher).owns_stream(job_watcher)
     } else {
         controller
     };
     let controller = if security_group_policy_installed {
-        let sgp_watcher = metadata_watcher(sgp_api, cfg.clone())
+        let sgp_watcher = watcher(sgp_api, cfg.clone())
             .map(ensure_deletion_change)
             .touched_objects()
             // avoid apply loops that seem to happen with crds
-            .predicate_filter(changed_predicate);
+            .predicate_filter(changed_predicate, PredicateConfig::default());
 
         controller.owns_stream(sgp_watcher)
     } else {
         controller
     };
     let controller = if secret_provider_class_installed {
-        let spc_watcher = metadata_watcher(spc_api, cfg.clone())
+        let spc_watcher = watcher(spc_api, cfg.clone())
             .map(ensure_deletion_change)
             .touched_objects()
             // avoid apply loops that seem to happen with crds
-            .predicate_filter(changed_predicate);
+            .predicate_filter(changed_predicate, PredicateConfig::default());
 
         controller.owns_stream(spc_watcher)
     } else {
@@ -654,16 +665,19 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         let ipm_watcher = watcher(ipm_api, cfg.clone())
             .map(ensure_deletion_change)
             .touched_objects()
-            .predicate_filter(changed_predicate.combine(status_predicate));
+            .predicate_filter(
+                changed_predicate.combine(status_predicate),
+                PredicateConfig::default(),
+            );
 
-        let wi_job_api = Api::<Job>::all(client.clone());
-        let wi_job_watcher = metadata_watcher(
+        let wi_job_api = Api::<PartialObjectMeta<Job>>::all(client.clone());
+        let wi_job_watcher = watcher(
             wi_job_api,
             Config::default().labels("app.kubernetes.io/name=restate-wi-canary"),
         )
         .map(ensure_deletion_change)
         .touched_objects()
-        .predicate_filter(changed_predicate);
+        .predicate_filter(changed_predicate, PredicateConfig::default());
 
         controller
             .owns_stream(ipm_watcher)

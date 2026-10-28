@@ -333,7 +333,7 @@ pub async fn cleanup_old_replicasets(
     let mut historic_count = 0;
     let mut next_removal = None;
 
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
 
     for rs in replicasets {
         let rs_name = rs.name_any();
@@ -437,11 +437,7 @@ pub async fn cleanup_old_replicasets(
         let current_remove_at = rs
             .annotations()
             .get(RESTATE_REMOVE_VERSION_AT_ANNOTATION)
-            .and_then(|remove_at| {
-                chrono::DateTime::parse_from_rfc3339(remove_at)
-                    .map(|t| t.to_utc())
-                    .ok()
-            });
+            .and_then(|remove_at| remove_at.parse::<jiff::Timestamp>().ok());
 
         // a force deletion doesn't wait out the drain delay, so every version it gets
         // this far with is due for removal now
@@ -575,8 +571,8 @@ pub async fn cleanup_old_replicasets(
     if !blocking.is_empty() && next_removal.is_none() {
         let poll_seconds = 10;
         next_removal = Some(
-            chrono::Utc::now()
-                .checked_add_signed(chrono::TimeDelta::seconds(poll_seconds))
+            jiff::Timestamp::now()
+                .checked_add(jiff::SignedDuration::from_secs(poll_seconds))
                 .expect("next_removal in bounds"),
         );
     }
@@ -1045,16 +1041,13 @@ mod tests {
             rsd.metadata.namespace = Some(NAMESPACE.into());
             if deleting {
                 rsd.metadata.deletion_timestamp = Some(
-                    k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(chrono::Utc::now()),
+                    k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(jiff::Timestamp::now()),
                 );
             }
             rsd
         }
 
-        fn version(
-            deployment_id: &str,
-            remove_at: Option<chrono::DateTime<chrono::Utc>>,
-        ) -> ReplicaSet {
+        fn version(deployment_id: &str, remove_at: Option<jiff::Timestamp>) -> ReplicaSet {
             let mut annotations = serde_json::Map::new();
             annotations.insert(
                 RESTATE_DEPLOYMENT_ID_ANNOTATION.into(),
@@ -1063,7 +1056,7 @@ mod tests {
             if let Some(remove_at) = remove_at {
                 annotations.insert(
                     RESTATE_REMOVE_VERSION_AT_ANNOTATION.into(),
-                    json!(remove_at.to_rfc3339()),
+                    json!(remove_at.to_string()),
                 );
             }
 
@@ -1154,7 +1147,7 @@ mod tests {
         #[tokio::test]
         async fn draining_version_keeps_its_autoscaler_until_the_deadline() {
             let rsd = rsd(true, false);
-            let remove_at = chrono::Utc::now() + chrono::TimeDelta::seconds(300);
+            let remove_at = jiff::Timestamp::now() + jiff::SignedDuration::from_secs(300);
             let harness = harness(
                 vec![version("dp_draining", Some(remove_at))],
                 vec![version_hpa()],
@@ -1192,7 +1185,7 @@ mod tests {
         /// walked over.
         #[tokio::test]
         async fn force_deletion_tears_down_a_busy_version_immediately() {
-            let remove_at = chrono::Utc::now() + chrono::TimeDelta::seconds(300);
+            let remove_at = jiff::Timestamp::now() + jiff::SignedDuration::from_secs(300);
             let harness = harness(
                 vec![version("dp_busy", Some(remove_at))],
                 vec![version_hpa()],
@@ -1258,7 +1251,7 @@ mod tests {
         #[tokio::test]
         async fn deletion_does_not_strip_autoscalers_up_front() {
             let rsd = rsd(true, true);
-            let remove_at = chrono::Utc::now() + chrono::TimeDelta::seconds(300);
+            let remove_at = jiff::Timestamp::now() + jiff::SignedDuration::from_secs(300);
             let harness = harness(
                 vec![version("dp_busy", Some(remove_at))],
                 vec![version_hpa()],
@@ -1332,7 +1325,10 @@ mod tests {
             );
 
             // a version still holding an invocation sheds its deadline, same manager
-            let clearing = harness(vec![version("dp_pinned", Some(chrono::Utc::now()))], vec![]);
+            let clearing = harness(
+                vec![version("dp_pinned", Some(jiff::Timestamp::now()))],
+                vec![],
+            );
             let pinned = DeploymentUsage {
                 latest_for_service: false,
                 pinned_invocations: 1,

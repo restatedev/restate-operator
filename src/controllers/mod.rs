@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use futures::StreamExt;
+use jiff::Timestamp;
 use k8s_openapi::api::core::v1::ObjectReference;
 use kube::Resource;
 use kube::client::Client;
@@ -87,13 +87,13 @@ pub fn state_after_reconcile(
 #[derive(Clone, Serialize)]
 pub struct Diagnostics {
     #[serde(deserialize_with = "from_ts")]
-    pub last_event: DateTime<Utc>,
+    pub last_event: Timestamp,
 }
 
 impl Default for Diagnostics {
     fn default() -> Self {
         Self {
-            last_event: Utc::now(),
+            last_event: jiff::Timestamp::now(),
         }
     }
 }
@@ -679,7 +679,6 @@ mod tests {
     };
     use crate::resources::ReconciliationState;
     use crate::resources::restateclusters::{RestateCluster, RestateClusterSpec};
-    use chrono::Utc;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
     use kube::ResourceExt;
 
@@ -723,7 +722,7 @@ mod tests {
         let mut rc = annotated(&[(RECONCILE_ANNOTATION, "disabled")]);
         assert!(reconciliation_suspended(&rc));
 
-        rc.metadata.deletion_timestamp = Some(Time(Utc::now()));
+        rc.metadata.deletion_timestamp = Some(Time(jiff::Timestamp::now()));
         assert!(!reconciliation_suspended(&rc));
     }
 

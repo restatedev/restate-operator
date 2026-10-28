@@ -167,7 +167,7 @@ pub async fn remove_secret_provider_class(
         .delete(SECRET_PROVIDER_CLASS_NAME, &DeleteParams::default())
         .await
     {
-        Err(kube::Error::Api(kube::error::ErrorResponse { code: 404, .. })) => Ok(()),
+        Err(kube::Error::Api(status)) if status.code == 404 => Ok(()),
         Err(err) => Err(err.into()),
         Ok(_) => Ok(()),
     }

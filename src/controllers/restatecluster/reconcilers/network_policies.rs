@@ -467,7 +467,7 @@ async fn delete_network_policy(
         name, namespace
     );
     match np_api.delete(name, &DeleteParams::default()).await {
-        Err(kube::Error::Api(kube::error::ErrorResponse { code: 404, .. })) => Ok(()),
+        Err(kube::Error::Api(status)) if status.code == 404 => Ok(()),
         Err(err) => Err(err.into()),
         Ok(_) => Ok(()),
     }
