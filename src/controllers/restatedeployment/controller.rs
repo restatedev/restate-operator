@@ -114,7 +114,7 @@ pub(super) struct Context {
 /// reconcile forever. The bound is generous because registering a deployment runs
 /// discovery against it, and the deployment-usage query scans every partition.
 fn admin_http_client() -> reqwest::Client {
-    reqwest::Client::builder()
+    crate::http_client_builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(120))
         .build()
