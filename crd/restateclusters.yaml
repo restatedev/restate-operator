@@ -4136,7 +4136,10 @@ spec:
                 nullable: true
                 type: boolean
               reconciliation:
-                description: What the operator is currently doing with this cluster.
+                description: |-
+                  What the operator is currently doing with this cluster: `Reconciling`, `Disabled`
+                  (suspended by the `restate.dev/reconcile: disabled` annotation), or
+                  `ResumingReconciliation` (the annotation has gone but the cluster is not ready yet).
                 enum:
                 - Reconciling
                 - Disabled
