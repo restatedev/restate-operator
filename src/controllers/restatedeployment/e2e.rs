@@ -203,7 +203,7 @@ where
 async fn legacy_query_tracks_safe_rollout_decisions() {
     let server = RestateServer::start(LEGACY_IMAGE);
     let admin = Admin {
-        client: reqwest::Client::new(),
+        client: crate::http_client(),
         admin_url: server.admin_url.clone(),
     };
 
@@ -274,7 +274,7 @@ async fn legacy_query_tracks_safe_rollout_decisions() {
 async fn legacy_query_attributes_unpinned_work_when_deleting() {
     let server = RestateServer::start(LEGACY_IMAGE);
     let admin = Admin {
-        client: reqwest::Client::new(),
+        client: crate::http_client(),
         admin_url: server.admin_url.clone(),
     };
 

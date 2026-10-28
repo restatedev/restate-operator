@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use futures::StreamExt;
+use jiff::Timestamp;
 use k8s_openapi::api::core::v1::ObjectReference;
 use kube::Resource;
 use kube::client::Client;
@@ -87,13 +87,13 @@ pub fn state_after_reconcile(
 #[derive(Clone, Serialize)]
 pub struct Diagnostics {
     #[serde(deserialize_with = "from_ts")]
-    pub last_event: DateTime<Utc>,
+    pub last_event: Timestamp,
 }
 
 impl Default for Diagnostics {
     fn default() -> Self {
         Self {
-            last_event: Utc::now(),
+            last_event: jiff::Timestamp::now(),
         }
     }
 }
@@ -224,8 +224,10 @@ pub struct State {
     pub diagnostics: Arc<RwLock<Diagnostics>>,
     /// Which controllers have started reconciling, served by the web server's `/ready` endpoint
     pub readiness: Arc<Readiness>,
-    /// Metrics registry
-    pub registry: prometheus::Registry,
+    /// Metrics registry, served by the web server's `/metrics` endpoint
+    registry: Arc<prometheus_client::registry::Registry>,
+    /// The metrics in `registry`, for the controllers to update
+    pub metrics: Metrics,
     /// If set, watch AWS PodIdentityAssociation resources, and if requested create them against this cluster
     aws_pod_identity_association_cluster: Option<String>,
     /// If true, manage GCP Workload Identity via Config Connector IAMPolicyMember
@@ -277,10 +279,14 @@ impl State {
             ..Default::default()
         });
 
+        let mut registry = prometheus_client::registry::Registry::default();
+        let metrics = Metrics::default().register(&mut registry);
+
         Self {
             diagnostics: Arc::new(RwLock::new(Diagnostics::default())),
             readiness: Arc::new(Readiness::new()),
-            registry: prometheus::Registry::default(),
+            registry: Arc::new(registry),
+            metrics,
             aws_pod_identity_association_cluster,
             gcp_workload_identity,
             operator_namespace,
@@ -293,9 +299,12 @@ impl State {
         }
     }
 
-    /// Metrics getter
-    pub fn metrics(&self) -> Vec<prometheus::proto::MetricFamily> {
-        self.registry.gather()
+    /// The metrics in the OpenMetrics text format
+    pub fn encode_metrics(&self) -> String {
+        let mut buffer = String::new();
+        prometheus_client::encoding::text::encode(&mut buffer, &self.registry)
+            .expect("writing to a String never fails");
+        buffer
     }
 
     /// State getter
@@ -382,7 +391,7 @@ where
 /// The handlers are registered once, when this is constructed, rather than around each
 /// individual wait: recreating the signal streams would leave a brief window with no
 /// handler installed, during which a signal would terminate the process outright.
-struct ShutdownSignals {
+pub struct ShutdownSignals {
     #[cfg(unix)]
     sigterm: tokio::signal::unix::Signal,
     #[cfg(unix)]
@@ -390,7 +399,7 @@ struct ShutdownSignals {
 }
 
 impl ShutdownSignals {
-    fn new() -> Self {
+    pub fn new() -> Self {
         #[cfg(unix)]
         {
             use tokio::signal::unix::{SignalKind, signal};
@@ -405,7 +414,7 @@ impl ShutdownSignals {
     }
 
     /// Resolves once a termination signal has been received.
-    async fn recv(&mut self) {
+    pub async fn recv(&mut self) {
         #[cfg(unix)]
         {
             let Self { sigterm, sigint } = self;
@@ -418,6 +427,12 @@ impl ShutdownSignals {
         {
             let _ = tokio::signal::ctrl_c().await;
         }
+    }
+}
+
+impl Default for ShutdownSignals {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -525,7 +540,7 @@ where
     let plural = K::plural(&());
     let crd_name = format!("{}.{}", plural, K::group(&()));
 
-    let missing = metrics.crd_missing.with_label_values(&[crd_name.as_str()]);
+    let missing = metrics.crd_missing_gauge(&crd_name);
     missing.set(0);
 
     let mut signals = ShutdownSignals::new();
@@ -673,7 +688,6 @@ mod tests {
     };
     use crate::resources::ReconciliationState;
     use crate::resources::restateclusters::{RestateCluster, RestateClusterSpec};
-    use chrono::Utc;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
     use kube::ResourceExt;
 
@@ -717,7 +731,7 @@ mod tests {
         let mut rc = annotated(&[(RECONCILE_ANNOTATION, "disabled")]);
         assert!(reconciliation_suspended(&rc));
 
-        rc.metadata.deletion_timestamp = Some(Time(Utc::now()));
+        rc.metadata.deletion_timestamp = Some(Time(jiff::Timestamp::now()));
         assert!(!reconciliation_suspended(&rc));
     }
 

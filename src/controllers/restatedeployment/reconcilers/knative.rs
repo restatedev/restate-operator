@@ -40,7 +40,7 @@ pub async fn reconcile_knative(
     rsd: &RestateDeployment,
     namespace: &str,
     status: &mut crate::resources::restatedeployments::RestateDeploymentStatus,
-) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+) -> Result<Option<jiff::Timestamp>> {
     trace!(
         namespace = %namespace,
         name = %rsd.name_any(),
@@ -52,8 +52,8 @@ pub async fn reconcile_knative(
     trace!(tag = %tag, "Determined deployment tag");
 
     // Early status update based on tag change
-    let config_name = format!("{}-{}", rsd.name_any(), &tag);
-    let route_name = format!("{}-{}", rsd.name_any(), &tag);
+    let config_name = format!("{}-{}", rsd.name_any(), tag);
+    let route_name = format!("{}-{}", rsd.name_any(), tag);
 
     if status.knative.is_none() {
         status.knative = Some(KnativeDeploymentStatus::default());
@@ -805,7 +805,7 @@ async fn annotate_configuration(
                             ),
                             (
                                 RESTATE_REGISTERED_AT_ANNOTATION.to_string(),
-                                chrono::Utc::now().to_rfc3339(),
+                                jiff::Timestamp::now().to_string(),
                             ),
                         ]
                         .into(),
@@ -898,7 +898,7 @@ pub async fn cleanup_old_configurations(
     let mut historic_count = 0;
     let mut next_removal = None;
 
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
 
     for config in configurations {
         let config_name = config.name_any();
@@ -933,11 +933,7 @@ pub async fn cleanup_old_configurations(
             .annotations
             .as_ref()
             .and_then(|a| a.get(RESTATE_REMOVE_VERSION_AT_ANNOTATION))
-            .and_then(|remove_at| {
-                chrono::DateTime::parse_from_rfc3339(remove_at)
-                    .map(|t| t.to_utc())
-                    .ok()
-            });
+            .and_then(|remove_at| remove_at.parse::<jiff::Timestamp>().ok());
 
         // a force deletion doesn't wait out the drain delay, so every version it gets
         // this far with is due for removal now
@@ -1036,8 +1032,8 @@ pub async fn cleanup_old_configurations(
     if !blocking.is_empty() && next_removal.is_none() {
         let poll_seconds = 10;
         next_removal = Some(
-            chrono::Utc::now()
-                .checked_add_signed(chrono::TimeDelta::seconds(poll_seconds))
+            jiff::Timestamp::now()
+                .checked_add(jiff::SignedDuration::from_secs(poll_seconds))
                 .expect("next_removal in bounds"),
         );
     }

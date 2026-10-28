@@ -1,8 +1,7 @@
 /// Adapted from https://github.com/sombralibre/k8s-quantity-parser to resolve dependency conflict
 /// MIT licensed, Copyright (c) 2022 Alejandro Llanes
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
-use regex::Regex;
-use std::{num::ParseIntError, sync::OnceLock};
+use std::num::ParseIntError;
 
 #[allow(non_camel_case_types)]
 enum QuantityMemoryUnits {
@@ -78,90 +77,89 @@ pub enum ParseError {
 impl QuantityParser for Quantity {
     fn to_bytes(&self) -> Result<Option<i64>, ParseError> {
         let unit_str = &self.0;
-        static REGEX: OnceLock<Regex> = OnceLock::new();
-        let cap = REGEX
-            .get_or_init(|| Regex::new(r"([[:alpha:]]{1,2}$)").unwrap())
-            .captures(unit_str);
+        let alpha_suffix = unit_str
+            .bytes()
+            .rev()
+            .take(2)
+            .take_while(u8::is_ascii_alphabetic)
+            .count();
 
-        if cap.is_none() {
+        if alpha_suffix == 0 {
             return Ok(Some(unit_str.parse::<i64>()?));
         };
 
-        // Is safe to use unwrap here, as the value is already checked.
-        match cap.unwrap().get(0) {
-            Some(m) => match QuantityMemoryUnits::new(m.as_str()) {
-                QuantityMemoryUnits::Ki => {
-                    let unit_str = unit_str.replace(m.as_str(), "");
-                    let amount = unit_str.parse::<i64>()?;
-                    Ok(Some(amount * 1024))
-                }
-                QuantityMemoryUnits::Mi => {
-                    let unit_str = unit_str.replace(m.as_str(), "");
-                    let amount = unit_str.parse::<i64>()?;
-                    Ok(Some((amount * 1024) * 1024))
-                }
-                QuantityMemoryUnits::Gi => {
-                    let unit_str = unit_str.replace(m.as_str(), "");
-                    let amount = unit_str.parse::<i64>()?;
-                    Ok(Some(((amount * 1024) * 1024) * 1024))
-                }
-                QuantityMemoryUnits::Ti => {
-                    let unit_str = unit_str.replace(m.as_str(), "");
-                    let amount = unit_str.parse::<i64>()?;
-                    Ok(Some((((amount * 1024) * 1024) * 1024) * 1024))
-                }
-                QuantityMemoryUnits::Pi => {
-                    let unit_str = unit_str.replace(m.as_str(), "");
-                    let amount = unit_str.parse::<i64>()?;
-                    Ok(Some(((((amount * 1024) * 1024) * 1024) * 1024) * 1024))
-                }
-                QuantityMemoryUnits::Ei => {
-                    let unit_str = unit_str.replace(m.as_str(), "");
-                    let amount = unit_str.parse::<i64>()?;
-                    Ok(Some(
-                        (((((amount * 1024) * 1024) * 1024) * 1024) * 1024) * 1024,
-                    ))
-                }
-                QuantityMemoryUnits::k => {
-                    let unit_str = unit_str.replace(m.as_str(), "");
-                    let amount = unit_str.parse::<i64>()?;
-                    Ok(Some(amount * 1000))
-                }
-                QuantityMemoryUnits::M => {
-                    let unit_str = unit_str.replace(m.as_str(), "");
-                    let amount = unit_str.parse::<i64>()?;
-                    Ok(Some((amount * 1000) * 1000))
-                }
-                QuantityMemoryUnits::G => {
-                    let unit_str = unit_str.replace(m.as_str(), "");
-                    let amount = unit_str.parse::<i64>()?;
-                    Ok(Some(((amount * 1000) * 1000) * 1000))
-                }
-                QuantityMemoryUnits::T => {
-                    let unit_str = unit_str.replace(m.as_str(), "");
-                    let amount = unit_str.parse::<i64>()?;
-                    Ok(Some((((amount * 1000) * 1000) * 1000) * 1000))
-                }
-                QuantityMemoryUnits::P => {
-                    let unit_str = unit_str.replace(m.as_str(), "");
-                    let amount = unit_str.parse::<i64>()?;
-                    Ok(Some(((((amount * 1000) * 1000) * 1000) * 1000) * 1000))
-                }
-                QuantityMemoryUnits::E => {
-                    let unit_str = unit_str.replace(m.as_str(), "");
-                    let amount = unit_str.parse::<i64>()?;
-                    Ok(Some(
-                        (((((amount * 1000) * 1000) * 1000) * 1000) * 1000) * 1000,
-                    ))
-                }
-                QuantityMemoryUnits::m => {
-                    let unit_str = unit_str.replace(m.as_str(), "");
-                    let amount = unit_str.parse::<i64>()?;
-                    Ok(Some(amount / 1000))
-                }
-                QuantityMemoryUnits::Invalid => Err(ParseError::InvalidMemoryUnit),
-            },
-            None => Ok(None),
+        let m = &unit_str[unit_str.len() - alpha_suffix..];
+        match QuantityMemoryUnits::new(m) {
+            QuantityMemoryUnits::Ki => {
+                let unit_str = unit_str.replace(m, "");
+                let amount = unit_str.parse::<i64>()?;
+                Ok(Some(amount * 1024))
+            }
+            QuantityMemoryUnits::Mi => {
+                let unit_str = unit_str.replace(m, "");
+                let amount = unit_str.parse::<i64>()?;
+                Ok(Some((amount * 1024) * 1024))
+            }
+            QuantityMemoryUnits::Gi => {
+                let unit_str = unit_str.replace(m, "");
+                let amount = unit_str.parse::<i64>()?;
+                Ok(Some(((amount * 1024) * 1024) * 1024))
+            }
+            QuantityMemoryUnits::Ti => {
+                let unit_str = unit_str.replace(m, "");
+                let amount = unit_str.parse::<i64>()?;
+                Ok(Some((((amount * 1024) * 1024) * 1024) * 1024))
+            }
+            QuantityMemoryUnits::Pi => {
+                let unit_str = unit_str.replace(m, "");
+                let amount = unit_str.parse::<i64>()?;
+                Ok(Some(((((amount * 1024) * 1024) * 1024) * 1024) * 1024))
+            }
+            QuantityMemoryUnits::Ei => {
+                let unit_str = unit_str.replace(m, "");
+                let amount = unit_str.parse::<i64>()?;
+                Ok(Some(
+                    (((((amount * 1024) * 1024) * 1024) * 1024) * 1024) * 1024,
+                ))
+            }
+            QuantityMemoryUnits::k => {
+                let unit_str = unit_str.replace(m, "");
+                let amount = unit_str.parse::<i64>()?;
+                Ok(Some(amount * 1000))
+            }
+            QuantityMemoryUnits::M => {
+                let unit_str = unit_str.replace(m, "");
+                let amount = unit_str.parse::<i64>()?;
+                Ok(Some((amount * 1000) * 1000))
+            }
+            QuantityMemoryUnits::G => {
+                let unit_str = unit_str.replace(m, "");
+                let amount = unit_str.parse::<i64>()?;
+                Ok(Some(((amount * 1000) * 1000) * 1000))
+            }
+            QuantityMemoryUnits::T => {
+                let unit_str = unit_str.replace(m, "");
+                let amount = unit_str.parse::<i64>()?;
+                Ok(Some((((amount * 1000) * 1000) * 1000) * 1000))
+            }
+            QuantityMemoryUnits::P => {
+                let unit_str = unit_str.replace(m, "");
+                let amount = unit_str.parse::<i64>()?;
+                Ok(Some(((((amount * 1000) * 1000) * 1000) * 1000) * 1000))
+            }
+            QuantityMemoryUnits::E => {
+                let unit_str = unit_str.replace(m, "");
+                let amount = unit_str.parse::<i64>()?;
+                Ok(Some(
+                    (((((amount * 1000) * 1000) * 1000) * 1000) * 1000) * 1000,
+                ))
+            }
+            QuantityMemoryUnits::m => {
+                let unit_str = unit_str.replace(m, "");
+                let amount = unit_str.parse::<i64>()?;
+                Ok(Some(amount / 1000))
+            }
+            QuantityMemoryUnits::Invalid => Err(ParseError::InvalidMemoryUnit),
         }
     }
 }

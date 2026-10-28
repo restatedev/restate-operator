@@ -37,7 +37,7 @@ impl CleanupMode {
             DeletePolicy::Drain => match rsd.spec.restate.drain_on_timeout() {
                 OnTimeout::Hold => Self::Deleting,
                 OnTimeout::Force => match drain_deadline(rsd) {
-                    Some(deadline) if deadline <= chrono::Utc::now() => Self::ForceDeleting,
+                    Some(deadline) if deadline <= jiff::Timestamp::now() => Self::ForceDeleting,
                     _ => Self::Deleting,
                 },
             },
@@ -63,11 +63,14 @@ impl CleanupMode {
 
 /// When a drain stops waiting: under `onTimeout: force` it force-deregisters, under
 /// `onTimeout: hold` it keeps waiting but reports itself overdue.
-pub(crate) fn drain_deadline(rsd: &RestateDeployment) -> Option<chrono::DateTime<chrono::Utc>> {
+pub(crate) fn drain_deadline(rsd: &RestateDeployment) -> Option<jiff::Timestamp> {
     let deleted_at = rsd.metadata.deletion_timestamp.as_ref()?;
-    deleted_at.0.checked_add_signed(chrono::TimeDelta::seconds(
-        rsd.spec.restate.drain_timeout_seconds(),
-    ))
+    deleted_at
+        .0
+        .checked_add(jiff::SignedDuration::from_secs(
+            rsd.spec.restate.drain_timeout_seconds(),
+        ))
+        .ok()
 }
 
 /// What Restate believes about one registered deployment. Kept as separate facts
@@ -242,7 +245,7 @@ pub(crate) struct CleanupOutcome {
     /// Versions Restate still needs, which cleanup therefore left alone.
     pub blocking: Vec<BlockingVersion>,
     /// When the soonest drained-but-not-yet-due version comes up for removal.
-    pub next_removal: Option<chrono::DateTime<chrono::Utc>>,
+    pub next_removal: Option<jiff::Timestamp>,
     /// Versions torn down while invocations were still in flight. Only a force deletion
     /// produces these.
     pub abandoned: Vec<BlockingVersion>,
@@ -311,9 +314,7 @@ pub(crate) const RESTATE_REMOVE_VERSION_AT_ANNOTATION: &str = "restate.dev/remov
 /// Every write to the deadline goes out under this one manager.
 const REMOVE_VERSION_AT_FIELD_MANAGER: &str = "restate-operator/remove-version-at";
 
-fn stamp_patch<K>(
-    remove_at: chrono::DateTime<chrono::Utc>,
-) -> (PatchParams, Patch<serde_json::Value>)
+fn stamp_patch<K>(remove_at: jiff::Timestamp) -> (PatchParams, Patch<serde_json::Value>)
 where
     K: Resource<DynamicType = ()>,
 {
@@ -321,7 +322,7 @@ where
         "apiVersion": K::api_version(&()),
         "kind": K::kind(&()),
         "metadata": { "annotations": {
-            RESTATE_REMOVE_VERSION_AT_ANNOTATION: remove_at.to_rfc3339(),
+            RESTATE_REMOVE_VERSION_AT_ANNOTATION: remove_at.to_string(),
         } },
     });
 
@@ -355,12 +356,12 @@ pub(crate) async fn schedule_version_removal<K>(
     namespace: &str,
     name: &str,
     drain_delay_seconds: i64,
-) -> Result<chrono::DateTime<chrono::Utc>>
+) -> Result<jiff::Timestamp>
 where
     K: Resource<DynamicType = ()> + Clone + DeserializeOwned + Debug,
 {
-    let remove_at = chrono::Utc::now()
-        .checked_add_signed(chrono::TimeDelta::seconds(drain_delay_seconds))
+    let remove_at = jiff::Timestamp::now()
+        .checked_add(jiff::SignedDuration::from_secs(drain_delay_seconds))
         .expect("remove_version_at in bounds");
 
     info!(
@@ -368,7 +369,7 @@ where
         version = %name,
         namespace = %namespace,
         drain_delay_seconds,
-        remove_at = %remove_at.to_rfc3339(),
+        remove_at = %remove_at.to_string(),
         "Scheduling removal of old version (after drain delay)"
     );
 
@@ -414,9 +415,9 @@ mod tests {
     /// Both deployment modes write the same annotation under the same field manager.
     #[test]
     fn the_deadline_is_stamped_and_cleared_under_one_field_manager() {
-        let remove_at = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00+00:00")
-            .expect("test deadline parses")
-            .to_utc();
+        let remove_at = "2026-01-01T00:00:00Z"
+            .parse::<jiff::Timestamp>()
+            .expect("test deadline parses");
 
         let (params, patch) = stamp_patch::<ReplicaSet>(remove_at);
         assert_eq!(
@@ -429,7 +430,7 @@ mod tests {
                 "apiVersion": "apps/v1",
                 "kind": "ReplicaSet",
                 "metadata": { "annotations": {
-                    "restate.dev/remove-version-at": "2026-01-01T00:00:00+00:00",
+                    "restate.dev/remove-version-at": "2026-01-01T00:00:00Z",
                 } },
             })),
         );
@@ -440,7 +441,7 @@ mod tests {
                 "apiVersion": "serving.knative.dev/v1",
                 "kind": "Configuration",
                 "metadata": { "annotations": {
-                    "restate.dev/remove-version-at": "2026-01-01T00:00:00+00:00",
+                    "restate.dev/remove-version-at": "2026-01-01T00:00:00Z",
                 } },
             })),
         );
@@ -570,7 +571,7 @@ mod tests {
             assert_eq!(
                 deadline(&rs_api).await,
                 (
-                    Some(first.to_rfc3339()),
+                    Some(first.to_string()),
                     vec![REMOVE_VERSION_AT_FIELD_MANAGER.to_owned()],
                 ),
             );
@@ -591,11 +592,11 @@ mod tests {
             let second = schedule_version_removal(&rs_api, NAMESPACE, VERSION, 300)
                 .await
                 .expect("the cleared deadline is stamped again");
-            assert_ne!(second.to_rfc3339(), first.to_rfc3339());
+            assert_ne!(second.to_string(), first.to_string());
             assert_eq!(
                 deadline(&rs_api).await,
                 (
-                    Some(second.to_rfc3339()),
+                    Some(second.to_string()),
                     vec![REMOVE_VERSION_AT_FIELD_MANAGER.to_owned()],
                 ),
                 "the re-stamped deadline landed, under the one manager",
@@ -682,7 +683,7 @@ mod tests {
         let mut rsd = RestateDeployment::new("greeter", spec);
         rsd.metadata.deletion_timestamp =
             Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
-                chrono::Utc::now() - chrono::TimeDelta::seconds(deleted_secs_ago),
+                jiff::Timestamp::now() - jiff::SignedDuration::from_secs(deleted_secs_ago),
             ));
         rsd
     }
@@ -743,7 +744,10 @@ mod tests {
         assert_eq!(rsd.spec.restate.drain_on_timeout(), OnTimeout::Hold);
         assert_eq!(
             drain_deadline(&rsd),
-            Some(rsd.metadata.deletion_timestamp.as_ref().unwrap().0 + chrono::TimeDelta::hours(1))
+            Some(
+                rsd.metadata.deletion_timestamp.as_ref().unwrap().0
+                    + jiff::SignedDuration::from_hours(1)
+            )
         );
     }
 
