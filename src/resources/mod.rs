@@ -59,6 +59,25 @@ pub fn reconciliation_schema(_g: &mut schemars::SchemaGenerator) -> schemars::Sc
     })
 }
 
+/// Renders a CRD as the YAML checked in under `crd/`.
+///
+/// Long single-line descriptions stay on one line, and the blank lines inside multi-line
+/// descriptions carry no indentation, so the files diff cleanly.
+pub fn crd_yaml<K: kube::CustomResourceExt>() -> String {
+    let yaml = serde_saphyr::to_string_with_options(
+        &K::crd(),
+        serde_saphyr::ser_options! { folded_wrap_chars: usize::MAX },
+    )
+    .expect("CRD to serialize");
+    yaml.lines()
+        .map(|line| if line.trim().is_empty() { "" } else { line })
+        .fold(String::with_capacity(yaml.len()), |mut out, line| {
+            out.push_str(line);
+            out.push('\n');
+            out
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::ReconciliationState;
