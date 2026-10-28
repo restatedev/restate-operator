@@ -7,7 +7,6 @@ use axum::{
 };
 use clap::Parser;
 use kube::Client;
-use prometheus::{Encoder, TextEncoder};
 
 use restate_operator::controllers::{ShutdownSignals, State};
 pub use restate_operator::{self, telemetry};
@@ -94,13 +93,12 @@ struct Arguments {
 }
 
 async fn metrics(AxumState(c): AxumState<State>) -> impl IntoResponse {
-    let metrics = c.metrics();
-    let encoder = TextEncoder::new();
-    let mut buffer = vec![];
-    encoder.encode(&metrics, &mut buffer).unwrap();
     (
-        [(header::CONTENT_TYPE, encoder.format_type().to_owned())],
-        buffer,
+        [(
+            header::CONTENT_TYPE,
+            "application/openmetrics-text; version=1.0.0; charset=utf-8",
+        )],
+        c.encode_metrics(),
     )
 }
 
@@ -166,9 +164,7 @@ async fn main() -> anyhow::Result<()> {
         .await
         .expect("failed to create kube Client");
 
-    let metric = restate_operator::Metrics::default()
-        .register(&state.registry)
-        .unwrap();
+    let metric = state.metrics.clone();
 
     // Start the controllers
     let cluster_controller = restate_operator::controllers::restatecluster::run(

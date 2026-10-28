@@ -224,8 +224,10 @@ pub struct State {
     pub diagnostics: Arc<RwLock<Diagnostics>>,
     /// Which controllers have started reconciling, served by the web server's `/ready` endpoint
     pub readiness: Arc<Readiness>,
-    /// Metrics registry
-    pub registry: prometheus::Registry,
+    /// Metrics registry, served by the web server's `/metrics` endpoint
+    registry: Arc<prometheus_client::registry::Registry>,
+    /// The metrics in `registry`, for the controllers to update
+    pub metrics: Metrics,
     /// If set, watch AWS PodIdentityAssociation resources, and if requested create them against this cluster
     aws_pod_identity_association_cluster: Option<String>,
     /// If true, manage GCP Workload Identity via Config Connector IAMPolicyMember
@@ -277,10 +279,14 @@ impl State {
             ..Default::default()
         });
 
+        let mut registry = prometheus_client::registry::Registry::default();
+        let metrics = Metrics::default().register(&mut registry);
+
         Self {
             diagnostics: Arc::new(RwLock::new(Diagnostics::default())),
             readiness: Arc::new(Readiness::new()),
-            registry: prometheus::Registry::default(),
+            registry: Arc::new(registry),
+            metrics,
             aws_pod_identity_association_cluster,
             gcp_workload_identity,
             operator_namespace,
@@ -293,9 +299,12 @@ impl State {
         }
     }
 
-    /// Metrics getter
-    pub fn metrics(&self) -> Vec<prometheus::proto::MetricFamily> {
-        self.registry.gather()
+    /// The metrics in the OpenMetrics text format
+    pub fn encode_metrics(&self) -> String {
+        let mut buffer = String::new();
+        prometheus_client::encoding::text::encode(&mut buffer, &self.registry)
+            .expect("writing to a String never fails");
+        buffer
     }
 
     /// State getter
@@ -531,7 +540,7 @@ where
     let plural = K::plural(&());
     let crd_name = format!("{}.{}", plural, K::group(&()));
 
-    let missing = metrics.crd_missing.with_label_values(&[crd_name.as_str()]);
+    let missing = metrics.crd_missing_gauge(&crd_name);
     missing.set(0);
 
     let mut signals = ShutdownSignals::new();

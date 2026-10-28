@@ -63,7 +63,7 @@ kube = { version = "4.2.0", features = ["runtime", "client", "derive", "unstable
 opentelemetry = { version = "0.32.0", features = ["trace"], optional = true }
 opentelemetry_sdk = { version = "0.32.1", optional = true }
 opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["tokio", "grpc-tonic", "trace"], optional = true }
-prometheus = { version = "0.14.0", default-features = false }
+prometheus-client = "0.25.1"
 prost = "0.14.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls-no-provider"] }
 rustls = { version = "0.23.31", default-features = false, features = ["ring", "std"] }
