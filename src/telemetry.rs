@@ -1,7 +1,9 @@
+#[cfg(feature = "telemetry")]
 use opentelemetry::trace::TraceId;
 use tracing_subscriber::{EnvFilter, Registry, prelude::*};
 
 /// Fetch an opentelemetry::trace::TraceId as hex through the full tracing stack
+#[cfg(feature = "telemetry")]
 pub fn get_trace_id() -> Option<TraceId> {
     use opentelemetry::trace::TraceContextExt as _; // opentelemetry::Context -> opentelemetry::trace::Span
     use tracing_opentelemetry::OpenTelemetrySpanExt as _; // tracing::Span to opentelemetry::Context
@@ -15,6 +17,12 @@ pub fn get_trace_id() -> Option<TraceId> {
         TraceId::INVALID => None,
         valid => Some(valid),
     }
+}
+
+/// Without the `telemetry` feature there is no OpenTelemetry context, so there is never a trace id.
+#[cfg(not(feature = "telemetry"))]
+pub fn get_trace_id() -> Option<std::convert::Infallible> {
+    None
 }
 
 #[cfg(feature = "telemetry")]

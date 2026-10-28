@@ -785,8 +785,8 @@ where
 {
     let mut hasher = DefaultHasher::new();
     if let Some(s) = obj.status() {
-        serde_hashkey::to_key(s)
-            .expect("serde_hashkey never to return an error")
+        serde_json::to_vec(s)
+            .expect("status to serialize")
             .hash(&mut hasher);
     }
     Some(hasher.finish())
@@ -828,8 +828,8 @@ where
     K::Spec: Serialize,
 {
     let mut hasher = DefaultHasher::new();
-    serde_hashkey::to_key(obj.spec())
-        .expect("serde_hashkey never to return an error")
+    serde_json::to_vec(obj.spec())
+        .expect("spec to serialize")
         .hash(&mut hasher);
     Some(hasher.finish())
 }
