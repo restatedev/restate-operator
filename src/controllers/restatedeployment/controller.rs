@@ -131,7 +131,7 @@ impl Context {
             cluster_dns: state.cluster_dns,
             metrics,
             diagnostics: state.diagnostics.clone(),
-            http_client: reqwest::Client::new(),
+            http_client: crate::http_client(),
         })
     }
 
