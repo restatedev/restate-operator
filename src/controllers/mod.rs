@@ -382,7 +382,7 @@ where
 /// The handlers are registered once, when this is constructed, rather than around each
 /// individual wait: recreating the signal streams would leave a brief window with no
 /// handler installed, during which a signal would terminate the process outright.
-struct ShutdownSignals {
+pub struct ShutdownSignals {
     #[cfg(unix)]
     sigterm: tokio::signal::unix::Signal,
     #[cfg(unix)]
@@ -390,7 +390,7 @@ struct ShutdownSignals {
 }
 
 impl ShutdownSignals {
-    fn new() -> Self {
+    pub fn new() -> Self {
         #[cfg(unix)]
         {
             use tokio::signal::unix::{SignalKind, signal};
@@ -405,7 +405,7 @@ impl ShutdownSignals {
     }
 
     /// Resolves once a termination signal has been received.
-    async fn recv(&mut self) {
+    pub async fn recv(&mut self) {
         #[cfg(unix)]
         {
             let Self { sigterm, sigint } = self;
@@ -418,6 +418,12 @@ impl ShutdownSignals {
         {
             let _ = tokio::signal::ctrl_c().await;
         }
+    }
+}
+
+impl Default for ShutdownSignals {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
