@@ -2385,6 +2385,7 @@ mod tests {
             environment_id: "env_123".into(),
             region: "us".into(),
             signing_public_key: "publickeyv1_abc".into(),
+            proxy_base_url: None,
         };
 
         let annotation = reconcilers::replicaset::pod_template_annotation(&rsd);

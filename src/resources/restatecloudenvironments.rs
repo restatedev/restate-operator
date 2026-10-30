@@ -37,6 +37,12 @@ pub struct RestateCloudEnvironmentSpec {
     pub authentication: RestateCloudEnvironmentAuthentication,
     /// Optional configuration for the deployment of tunnel pods
     pub tunnel: Option<TunnelSpec>,
+    /// Where the environment reaches deployments through the tunnel: the `proxyBaseUrl` that
+    /// describing the environment returns. The port defaults to 9080. Defaults to
+    /// `https://tunnel.<region>.restate.cloud:9080`; only some BYOC regions need it set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(regex(pattern = r"^https?://[^/?#]+/?$"))]
+    pub proxy_base_url: Option<String>,
 }
 
 // Hoisted from the derived implementation so that we can restrict names to be valid Service names
@@ -143,8 +149,8 @@ impl RestateCloudEnvironment {
             .expect("service url should have a host");
 
         let mut url = Url::parse(&format!(
-            "https://tunnel.{}.restate.cloud:9080/{unprefixed_env}/{tunnel_name}/{}/{}/{}/",
-            self.spec.region,
+            "{}/{unprefixed_env}/{tunnel_name}/{}/{}/{}/",
+            proxy_origin(&self.spec.region, self.spec.proxy_base_url.as_deref())?,
             service_url.scheme(),
             host,
             port,
@@ -186,6 +192,21 @@ impl RestateCloudEnvironment {
     }
 }
 
+/// The scheme and authority deployments are registered under. The port defaults to 9080, as the
+/// `restate` CLI reads the same `proxyBaseUrl`.
+fn proxy_origin(region: &str, proxy_base_url: Option<&str>) -> Result<String, url::ParseError> {
+    let Some(base) = proxy_base_url else {
+        return Ok(format!("https://tunnel.{region}.restate.cloud:9080"));
+    };
+    let base = Url::parse(base)?;
+    let host = base.host_str().ok_or(url::ParseError::EmptyHost)?;
+    Ok(format!(
+        "{}://{host}:{}",
+        base.scheme(),
+        base.port().unwrap_or(9080)
+    ))
+}
+
 /// The RestateCloudEnvironment-derived values a `tunnelMode: in-process` deployment
 /// needs. They serve three purposes that must stay consistent within one revision:
 /// they are injected into the pods as `RESTATE_INPROC_*` environment variables, folded
@@ -196,6 +217,7 @@ pub struct InProcessTunnelParams {
     pub environment_id: String,
     pub region: String,
     pub signing_public_key: String,
+    pub proxy_base_url: Option<String>,
 }
 
 impl InProcessTunnelParams {
@@ -250,10 +272,20 @@ impl InProcessTunnelParams {
             )));
         }
 
+        let proxy_base_url = rce.spec.proxy_base_url.clone();
+        if let Some(base) = proxy_base_url.as_deref() {
+            proxy_origin(&region, Some(base)).map_err(|err| {
+                crate::Error::InvalidRestateConfig(format!(
+                    "RestateCloudEnvironment '{rce_name}' has an invalid proxyBaseUrl {base:?}: {err}"
+                ))
+            })?;
+        }
+
         Ok(Self {
             environment_id,
             region,
             signing_public_key,
+            proxy_base_url,
         })
     }
 
@@ -275,8 +307,8 @@ impl InProcessTunnelParams {
         service_path: Option<&str>,
     ) -> Result<Url, crate::Error> {
         let url = Url::parse(&format!(
-            "https://tunnel.{}.restate.cloud:9080/{}/{tunnel_name}/http/in-process/9080/",
-            self.region,
+            "{}/{}/{tunnel_name}/http/in-process/9080/",
+            proxy_origin(&self.region, self.proxy_base_url.as_deref())?,
             self.unprefixed_environment_id(),
         ))?;
 
@@ -376,6 +408,7 @@ mod tests {
             environment_id: "env_123abc".into(),
             region: "us".into(),
             signing_public_key: "publickeyv1_abc".into(),
+            proxy_base_url: None,
         }
     }
 
@@ -447,8 +480,49 @@ mod tests {
                     },
                 },
                 tunnel: None,
+                proxy_base_url: None,
             },
         )
+    }
+
+    #[test]
+    fn proxy_base_url_overrides_the_tunnel_origin() {
+        let mut rce = rce("env_123abc", "abc123xyz.byoc.us", "publickeyv1_abc");
+        rce.metadata.uid = Some("uid-1".into());
+        let service = Url::parse("http://greeter.default.svc.cluster.local:9080/api").unwrap();
+
+        // the default port is 9080, as the restate CLI reads the same value
+        for base in [
+            "https://proxy.abc123xyz.byoc.us.restate.cloud:9080",
+            "https://proxy.abc123xyz.byoc.us.restate.cloud/",
+        ] {
+            rce.spec.proxy_base_url = Some(base.into());
+            let params = InProcessTunnelParams::from_rce(&rce).unwrap();
+            assert_eq!(
+                params.tunnel_url("greeter-5b8c7d", None).unwrap().as_str(),
+                "https://proxy.abc123xyz.byoc.us.restate.cloud:9080/123abc/greeter-5b8c7d/http/in-process/9080/"
+            );
+            assert_eq!(
+                rce.tunnel_url(service.clone()).unwrap().as_str(),
+                "https://proxy.abc123xyz.byoc.us.restate.cloud:9080/123abc/uid-1/http/greeter.default.svc.cluster.local/9080/api"
+            );
+        }
+
+        rce.spec.proxy_base_url = Some("https://proxy.example:9443".into());
+        assert_eq!(
+            InProcessTunnelParams::from_rce(&rce)
+                .unwrap()
+                .tunnel_url("t", None)
+                .unwrap()
+                .as_str(),
+            "https://proxy.example:9443/123abc/t/http/in-process/9080/"
+        );
+
+        rce.spec.proxy_base_url = Some("not a url".into());
+        assert!(matches!(
+            InProcessTunnelParams::from_rce(&rce),
+            Err(crate::Error::InvalidRestateConfig(_))
+        ));
     }
 
     #[test]
