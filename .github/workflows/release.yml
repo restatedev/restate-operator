@@ -5,14 +5,21 @@ on:
     tags:
       - v**
 
+# The default GITHUB_TOKEN is read-only, so each job asks for what it writes.
 jobs:
   build-docker-image:
     name: Build release Docker image
+    permissions:
+      contents: read
+      packages: write
     uses: ./.github/workflows/docker.yml
     secrets: inherit
 
   build-helm-chart:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     needs: [build-docker-image] # otherwise you might install a latest helm chart and get image pull error
     steps:
       - name: Checkout
@@ -42,6 +49,9 @@ jobs:
 
   build-crds-helm-chart:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     # Independent of the operator image: the CRD chart carries no runtime image.
     steps:
       - name: Checkout
@@ -67,6 +77,8 @@ jobs:
   publish-release:
     name: Publish release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     needs: [build-docker-image, build-helm-chart, build-crds-helm-chart]
 
     steps:
