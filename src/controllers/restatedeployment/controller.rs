@@ -29,10 +29,11 @@ use serde_json::json;
 use tokio::sync::RwLock;
 use tracing::*;
 
+use crate::controllers::owned_objects::OwnedObjects;
 use crate::controllers::{
-    CrdWait, Diagnostics, RECONCILING_CONDITION, ReadinessGate, State, log_suspended,
-    prewarmed_reflector, reconciliation_suspended, state_after_reconcile, suspended_message,
-    wait_for_crd,
+    CrdWait, Diagnostics, RECONCILING_CONDITION, ReadinessGate, ResyncInterval, State,
+    log_suspended, prewarmed_reflector, reconciliation_suspended, reflected, state_after_reconcile,
+    status_unchanged, suspended_message, wait_for_crd,
 };
 use crate::metrics::Metrics;
 use crate::resources::ReconciliationState;
@@ -92,6 +93,8 @@ pub(super) struct Context {
     pub configuration_store: Store<Configuration>,
     /// Store for operator-managed per-version HorizontalPodAutoscalers
     pub hpa_store: Store<HorizontalPodAutoscaler>,
+    /// The per-version Services
+    pub services: OwnedObjects<Service>,
     /// The namespace in which this operator runs
     pub operator_namespace: String,
     /// The cluster DNS suffix (e.g. "cluster.local")
@@ -102,6 +105,8 @@ pub(super) struct Context {
     pub metrics: Metrics,
     /// HTTP client
     pub http_client: reqwest::Client,
+    /// When a deployment that reconciled cleanly is next reconciled unprompted
+    pub resync: ResyncInterval,
 }
 
 impl Context {
@@ -114,6 +119,7 @@ impl Context {
         revision_store: Store<Revision>,
         configuration_store: Store<Configuration>,
         hpa_store: Store<HorizontalPodAutoscaler>,
+        services: OwnedObjects<Service>,
         metrics: Metrics,
         state: State,
     ) -> Arc<Context> {
@@ -126,11 +132,13 @@ impl Context {
             revision_store,
             configuration_store,
             hpa_store,
+            services,
             operator_namespace: state.operator_namespace,
             cluster_dns: state.cluster_dns,
             metrics,
             diagnostics: state.diagnostics.clone(),
             http_client: reqwest::Client::new(),
+            resync: state.resync,
         })
     }
 
@@ -293,6 +301,77 @@ impl RestateDeployment {
         Ok(Some(InProcessTunnelParams::from_rce(rce.as_ref())?))
     }
 
+    /// Bring an existing ReplicaSet for the latest version in line with this deployment, or
+    /// fail with [`Error::HashCollision`] if it belongs to something else. Writes nothing
+    /// when it already is in line.
+    async fn update_existing_replicaset(
+        &self,
+        rs_api: &Api<ReplicaSet>,
+        existing_replicaset: ReplicaSet,
+        my_uid: &str,
+        pod_template_annotation: &str,
+        annotations: &BTreeMap<String, String>,
+    ) -> Result<ReplicaSet> {
+        let versioned_name = existing_replicaset.name_any();
+        let namespace = existing_replicaset.namespace().unwrap_or_default();
+
+        if !is_version_of(&existing_replicaset, my_uid, pod_template_annotation) {
+            debug!(
+                "Found a hash collision ({versioned_name}) for deployment {} in namespace {namespace}, incrementing collision count",
+                self.name_any(),
+            );
+
+            return Err(Error::HashCollision);
+        }
+
+        debug!(
+            "Found an existing ReplicaSet {versioned_name} in namespace {namespace}, ensuring it matches the deployment",
+        );
+
+        // the replicaset already exists, ensure its scaled and annotated appropriately
+        if existing_replicaset.spec.as_ref().and_then(|s| s.replicas) != Some(self.spec.replicas) {
+            rs_api
+                .patch_scale(
+                    &versioned_name,
+                    &PatchParams::apply("restate-operator/propagate-replicas").force(),
+                    &Patch::Apply(serde_json::json!({
+                        "apiVersion": Scale::api_version(&()),
+                        "kind": Scale::kind(&()),
+                        "spec": { "replicas": self.spec.replicas }
+                    })),
+                )
+                .await?;
+        }
+
+        if !annotations_applied(
+            &existing_replicaset,
+            PROPAGATE_ANNOTATIONS_MANAGER,
+            annotations,
+        ) {
+            rs_api
+                .patch_metadata(
+                    &versioned_name,
+                    &PatchParams::apply(PROPAGATE_ANNOTATIONS_MANAGER).force(),
+                    &Patch::Apply(
+                        ObjectMeta {
+                            // ensure the base annotations from the rsd are kept up to date
+                            annotations: Some(annotations.clone()),
+                            ..Default::default()
+                        }
+                        .into_request_partial::<ReplicaSet>(),
+                    ),
+                )
+                .await?;
+        }
+
+        // This ReplicaSet was superseded before, so it can still carry the
+        // deadline it drained under; nothing else removes it, and the next
+        // rollout would tear it down early.
+        unschedule_version_removal(rs_api, &existing_replicaset).await?;
+
+        Ok(existing_replicaset)
+    }
+
     // Reconcile (for non-finalizer related changes)
     async fn reconcile(
         &self,
@@ -345,103 +424,73 @@ impl RestateDeployment {
         // the drain deadline; a copy would land under a manager the clear can't give up
         annotations.remove(RESTATE_REMOVE_VERSION_AT_ANNOTATION);
 
-        // Create/update the ReplicaSet for this version
-        let reconcile_result = reconcilers::replicaset::reconcile_replicaset(
-            &ctx.client,
-            self,
-            namespace,
-            &versioned_name,
-            replicaset_selector.clone(),
-            {
-                let mut annotations = annotations.clone();
-                // we use this annotation to compare templates to see if we have a hash collision
+        let rs_annotations = {
+            let mut annotations = annotations.clone();
+            // we use this annotation to compare templates to see if we have a hash collision
+            annotations.insert(
+                RESTATE_POD_TEMPLATE_ANNOTATION.to_string(),
+                pod_template_annotation.to_string(),
+            );
+            if in_process_tunnel.is_some() {
+                // persist the tunnel name the pods were created with, so the
+                // registered URL keeps matching them even if a future operator
+                // version computes the hash differently
                 annotations.insert(
-                    RESTATE_POD_TEMPLATE_ANNOTATION.to_string(),
-                    pod_template_annotation.to_string(),
+                    RESTATE_TUNNEL_NAME_ANNOTATION.to_string(),
+                    versioned_name.clone(),
                 );
-                if in_process_tunnel.is_some() {
-                    // persist the tunnel name the pods were created with, so the
-                    // registered URL keeps matching them even if a future operator
-                    // version computes the hash differently
-                    annotations.insert(
-                        RESTATE_TUNNEL_NAME_ANNOTATION.to_string(),
-                        versioned_name.clone(),
-                    );
-                }
-                annotations
-            },
-            &hash,
-            in_process_tunnel.as_ref(),
-        )
-        .await;
+            }
+            annotations
+        };
 
         let my_uid = self.uid().expect("RestateDeployment to have a uid");
 
-        let replicaset = match reconcile_result {
-            Ok(replicaset) => replicaset,
-            Err(Error::KubeError(kube::Error::Api(err))) if err.reason == "AlreadyExists" => {
-                let existing_replicaset = rs_api.get(&versioned_name).await?;
-
-                let controller = existing_replicaset
-                    .metadata
-                    .owner_references
-                    .as_ref()
-                    .and_then(|r| r.first());
-
-                let existing_pod_template_annotation = existing_replicaset
-                    .annotations()
-                    .get(RESTATE_POD_TEMPLATE_ANNOTATION);
-
-                if controller.as_ref().map(|c| c.uid.as_str()) == Some(my_uid.as_str())
-                    && existing_pod_template_annotation == Some(&pod_template_annotation)
-                {
-                    debug!(
-                        "Found an existing ReplicaSet {versioned_name} in namespace {namespace}, ensuring it matches the deployment",
-                    );
-
-                    // the replicaset already exists, ensure its scaled and annotated appropriately
-                    rs_api
-                        .patch_scale(
-                            &versioned_name,
-                            &PatchParams::apply("restate-operator/propagate-replicas").force(),
-                            &Patch::Apply(serde_json::json!({
-                                "apiVersion": Scale::api_version(&()),
-                                "kind": Scale::kind(&()),
-                                "spec": { "replicas": self.spec.replicas }
-                            })),
-                        )
-                        .await?;
-
-                    rs_api
-                        .patch_metadata(
-                            &versioned_name,
-                            &PatchParams::apply("restate-operator/propagate-annotations").force(),
-                            &Patch::Apply(
-                                ObjectMeta {
-                                    // ensure the base annotations from the rsd are kept up to date
-                                    annotations: Some(annotations.clone()),
-                                    ..Default::default()
-                                }
-                                .into_request_partial::<ReplicaSet>(),
-                            ),
-                        )
-                        .await?;
-
-                    // This ReplicaSet was superseded before, so it can still carry the
-                    // deadline it drained under; nothing else removes it, and the next
-                    // rollout would tear it down early.
-                    unschedule_version_removal(&rs_api, &existing_replicaset).await?;
-
-                    existing_replicaset
-                } else {
-                    debug!(
-                        "Found a hash collision ({versioned_name}) for deployment {deployment_name} in namespace {namespace}, incrementing collision count",
-                    );
-
-                    return Err(Error::HashCollision);
-                }
+        // The store is prewarmed, so a miss almost always means this version is new. A cached
+        // ReplicaSet of someone else's may already be gone from the apiserver, so only the
+        // apiserver's answer to the create below can establish a hash collision.
+        let cached = ctx
+            .replicasets_store
+            .get(&ObjectRef::new(&versioned_name).within(namespace))
+            .filter(|rs| is_version_of(rs, &my_uid, &pod_template_annotation));
+        let replicaset = match cached {
+            Some(cached) => {
+                self.update_existing_replicaset(
+                    &rs_api,
+                    ReplicaSet::clone(&cached),
+                    &my_uid,
+                    &pod_template_annotation,
+                    &annotations,
+                )
+                .await?
             }
-            Err(err) => return Err(err),
+            // Create the ReplicaSet for this version
+            None => match reconcilers::replicaset::reconcile_replicaset(
+                &ctx.client,
+                self,
+                namespace,
+                &versioned_name,
+                replicaset_selector.clone(),
+                rs_annotations,
+                &hash,
+                in_process_tunnel.as_ref(),
+            )
+            .await
+            {
+                Ok(created) => created,
+                // the store hadn't caught up yet
+                Err(Error::KubeError(kube::Error::Api(err))) if err.reason == "AlreadyExists" => {
+                    let existing = rs_api.get(&versioned_name).await?;
+                    self.update_existing_replicaset(
+                        &rs_api,
+                        existing,
+                        &my_uid,
+                        &pod_template_annotation,
+                        &annotations,
+                    )
+                    .await?
+                }
+                Err(err) => return Err(err),
+            },
         };
 
         // The latest version is scaled via the RD scale subresource (the operator
@@ -468,7 +517,7 @@ impl RestateDeployment {
 
         // Create/update the Service for this version
         reconcilers::service::reconcile_service(
-            namespace,
+            &ctx.services,
             &svc_api,
             &versioned_name,
             replicaset_selector,
@@ -808,18 +857,7 @@ impl RestateDeployment {
             };
             match knative_result {
                 Ok(next_removal) => {
-                    let action = match next_removal {
-                        Some(next_removal) if next_removal < now => Action::requeue(Duration::ZERO),
-                        Some(next_removal) => {
-                            let secs = (next_removal - now).num_seconds() as u64;
-                            if secs < 5 * 60 {
-                                Action::requeue(Duration::from_secs(secs))
-                            } else {
-                                Action::requeue(Duration::from_secs(5 * 60))
-                            }
-                        }
-                        None => Action::requeue(Duration::from_secs(5 * 60)),
-                    };
+                    let action = requeue_until(next_removal, now, ctx.resync);
 
                     (
                         Ok(action),
@@ -953,18 +991,7 @@ impl RestateDeployment {
             // ReplicaSet mode
             match self.reconcile(ctx.clone(), namespace).await {
                 Ok((current_replicaset, next_removal)) => {
-                    let action = match next_removal {
-                        Some(next_removal) if next_removal < now => Action::requeue(Duration::ZERO), // immediate requeue
-                        Some(next_removal) => {
-                            let secs = (next_removal - now).num_seconds() as u64;
-                            if secs < 5 * 60 {
-                                Action::requeue(Duration::from_secs(secs))
-                            } else {
-                                Action::requeue(Duration::from_secs(5 * 60))
-                            }
-                        }
-                        None => Action::requeue(Duration::from_secs(5 * 60)),
-                    };
+                    let action = requeue_until(next_removal, now, ctx.resync);
 
                     status_from_replica_set(
                         self.spec.replicas,
@@ -1148,21 +1175,22 @@ impl RestateDeployment {
         }
         rsd_status.observed_generation = self.metadata.generation;
 
-        // Create the status update
-        let new_status = json!({
-            "apiVersion": RestateDeployment::api_version(&()),
-            "kind": RestateDeployment::kind(&()),
-            "status": rsd_status,
-        });
+        if !status_unchanged(self.status.as_ref(), &rsd_status) {
+            let new_status = json!({
+                "apiVersion": RestateDeployment::api_version(&()),
+                "kind": RestateDeployment::kind(&()),
+                "status": rsd_status,
+            });
 
-        let name = self.name_any();
+            let name = self.name_any();
 
-        debug!("Updating status of RestateDeployment {name} in namespace {namespace}");
+            debug!("Updating status of RestateDeployment {name} in namespace {namespace}");
 
-        let ps = PatchParams::apply("restate-operator").force();
-        let _o = rsd_api
-            .patch_status(&name, &ps, &Patch::Apply(new_status))
-            .await?;
+            let ps = PatchParams::apply("restate-operator").force();
+            rsd_api
+                .patch_status(&name, &ps, &Patch::Apply(new_status))
+                .await?;
+        }
 
         result
     }
@@ -1626,6 +1654,80 @@ impl RestateDeployment {
     }
 }
 
+/// Whether `rs` is the ReplicaSet of the RestateDeployment with `rsd_uid` for the pod template
+/// `pod_template_annotation`, rather than one that merely shares its hashed name.
+fn is_version_of(rs: &ReplicaSet, rsd_uid: &str, pod_template_annotation: &str) -> bool {
+    let controller = rs
+        .metadata
+        .owner_references
+        .as_ref()
+        .and_then(|r| r.first());
+    controller.map(|c| c.uid.as_str()) == Some(rsd_uid)
+        && rs
+            .annotations()
+            .get(RESTATE_POD_TEMPLATE_ANNOTATION)
+            .map(String::as_str)
+            == Some(pod_template_annotation)
+}
+
+const PROPAGATE_ANNOTATIONS_MANAGER: &str = "restate-operator/propagate-annotations";
+
+/// Whether applying exactly `annotations` to `object` as `manager` would change nothing: each
+/// one is already there, and `manager` owns no other annotation that the apply would remove.
+fn annotations_applied<K: Resource>(
+    object: &K,
+    manager: &str,
+    annotations: &BTreeMap<String, String>,
+) -> bool {
+    let current = object.meta().annotations.as_ref();
+    if annotations
+        .iter()
+        .any(|(key, value)| current.and_then(|current| current.get(key)) != Some(value))
+    {
+        return false;
+    }
+
+    let owned: std::collections::BTreeSet<&str> = object
+        .meta()
+        .managed_fields
+        .iter()
+        .flatten()
+        .filter(|entry| {
+            entry.manager.as_deref() == Some(manager) && entry.operation.as_deref() == Some("Apply")
+        })
+        .filter_map(|entry| {
+            entry
+                .fields_v1
+                .as_ref()?
+                .0
+                .get("f:metadata")?
+                .get("f:annotations")?
+                .as_object()
+        })
+        .flat_map(|owned| owned.keys().filter_map(|key| key.strip_prefix("f:")))
+        .collect();
+    owned.len() == annotations.len() && annotations.keys().all(|key| owned.contains(key.as_str()))
+}
+
+/// Requeue when the next version is due for removal, or at the next resync if that is sooner
+/// or there is none.
+fn requeue_until(
+    next_removal: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+    resync: ResyncInterval,
+) -> Action {
+    let resync = resync.next();
+    match next_removal {
+        Some(next_removal) => Action::requeue(
+            (next_removal - now)
+                .to_std()
+                .unwrap_or(Duration::ZERO)
+                .min(resync),
+        ),
+        None => Action::requeue(resync),
+    }
+}
+
 /// Build the `.status.labelSelector` for a ReplicaSet-mode RestateDeployment,
 /// scoped to the latest version's pods by appending the pod-template-hash.
 ///
@@ -1827,6 +1929,10 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
             // status heartbeats. After the reflector write, so `hpa_store` still sees every update.
             .predicate_filter(predicates::generation);
 
+    // The per-version Services are owned by their ReplicaSets, so map them to the
+    // RestateDeployment by label; that way out-of-band edits are reverted promptly.
+    let (service_store, service_reflector) = reflected(services, cfg.clone());
+
     let (rce_store, rce_writer) = kube::runtime::reflector::store();
     let rce_reflector = kube::runtime::reflector(
         rce_writer,
@@ -1929,7 +2035,10 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         // just so that these get polled; we have no way to figure out which rsd may use the updated rce or secret
         .watches_stream(rce_reflector, |_| std::iter::empty())
         .watches_stream(secret_reflector, |_| std::iter::empty())
-        .owns(services, cfg.clone())
+        .watches_stream(service_reflector, |svc| {
+            let name = svc.labels().get(OWNED_BY_LABEL)?;
+            Some(ObjectRef::new(name).within(&svc.namespace()?))
+        })
         .owns_stream(hpa_reflector)
         .run(
             reconcile,
@@ -1942,6 +2051,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
                 revision_store,
                 configuration_store,
                 hpa_store,
+                OwnedObjects::watched(service_store),
                 metrics,
                 state,
             ),

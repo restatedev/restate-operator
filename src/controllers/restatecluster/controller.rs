@@ -13,11 +13,10 @@ use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::api::policy::v1::PodDisruptionBudget;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{APIGroup, ObjectMeta};
 
-use kube::core::PartialObjectMeta;
 use kube::core::object::HasStatus;
 use kube::runtime::events::Recorder;
 use kube::runtime::reflector::{ObjectRef, Store};
-use kube::runtime::{Predicate, WatchStreamExt, metadata_watcher, reflector, watcher};
+use kube::runtime::{Predicate, WatchStreamExt};
 use kube::{
     Resource,
     api::{Api, Patch, PatchParams, ResourceExt},
@@ -34,10 +33,11 @@ use serde_json::json;
 use tokio::{sync::RwLock, time::Duration};
 use tracing::*;
 
+use crate::controllers::owned_objects::OwnedObjects;
 use crate::controllers::{
-    CrdWait, Diagnostics, RECONCILING_CONDITION, ReadinessGate, State, log_suspended,
-    reconciliation_suspended, state_after_reconcile, suspended_message, wait_for_api_groups,
-    wait_for_crd,
+    CrdWait, Diagnostics, RECONCILING_CONDITION, ReadinessGate, ResyncInterval, State,
+    cluster_scoped_owners, log_suspended, reconciliation_suspended, reflected,
+    state_after_reconcile, status_unchanged, suspended_message, wait_for_api_groups, wait_for_crd,
 };
 use crate::resources::ReconciliationState;
 use crate::resources::iampolicymembers::IAMPolicyMember;
@@ -55,16 +55,27 @@ use super::reconcilers::object_meta;
 use super::reconcilers::signing_key::reconcile_signing_key;
 
 // Context for our reconciler
-#[derive(Clone)]
 pub(super) struct Context {
     /// Kubernetes client
     pub client: Client,
     /// Kubernetes event recorder
     pub recorder: Recorder,
-    // Store for pvc metadata
-    pub pvc_meta_store: Store<PartialObjectMeta<PersistentVolumeClaim>>,
-    // Store for statefulsets
-    pub ss_store: Store<StatefulSet>,
+    // Store for the PVCs of every RestateCluster
+    pub pvc_store: Store<PersistentVolumeClaim>,
+    pub namespaces: OwnedObjects<Namespace>,
+    pub network_policies: OwnedObjects<NetworkPolicy>,
+    pub service_accounts: OwnedObjects<ServiceAccount>,
+    pub config_maps: OwnedObjects<ConfigMap>,
+    pub services: OwnedObjects<Service>,
+    pub pod_disruption_budgets: OwnedObjects<PodDisruptionBudget>,
+    pub stateful_sets: OwnedObjects<StatefulSet>,
+    pub persistent_volume_claims: OwnedObjects<PersistentVolumeClaim>,
+    /// The canary Jobs that check cloud credentials are injected into pods
+    pub jobs: OwnedObjects<Job>,
+    pub pod_identity_associations: OwnedObjects<PodIdentityAssociation>,
+    pub security_group_policies: OwnedObjects<SecurityGroupPolicy>,
+    pub secret_provider_classes: OwnedObjects<SecretProviderClass>,
+    pub iam_policy_members: OwnedObjects<IAMPolicyMember>,
     // If set, watch PodIdentityAssociation resources, and if requested create them against this cluster
     pub aws_pod_identity_association_cluster: Option<String>,
     // Our namespace, needed to support the case where restate clusters need to be reached by the operator
@@ -83,43 +94,12 @@ pub(super) struct Context {
     pub cluster_dns: String,
     /// The container image to use for canary jobs
     pub canary_image: String,
+    /// When a cluster that reconciled cleanly is next reconciled unprompted
+    pub resync: ResyncInterval,
     /// Diagnostics read by the web server
     pub diagnostics: Arc<RwLock<Diagnostics>>,
     /// Prometheus metrics
     pub metrics: Metrics,
-}
-
-impl Context {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        client: Client,
-        metrics: Metrics,
-        state: State,
-        pvc_meta_store: Store<PartialObjectMeta<PersistentVolumeClaim>>,
-        ss_store: Store<StatefulSet>,
-        security_group_policy_installed: bool,
-        secret_provider_class_installed: bool,
-    ) -> Arc<Context> {
-        Arc::new(Context {
-            client: client.clone(),
-            recorder: Recorder::new(client, "restate-operator".into()),
-            pvc_meta_store,
-            ss_store,
-            aws_pod_identity_association_cluster: state
-                .aws_pod_identity_association_cluster
-                .clone(),
-            operator_namespace: state.operator_namespace.clone(),
-            operator_label_name: state.operator_label_name.clone(),
-            operator_label_value: state.operator_label_value.clone(),
-            security_group_policy_installed,
-            secret_provider_class_installed,
-            gcp_workload_identity: state.gcp_workload_identity,
-            cluster_dns: state.cluster_dns.clone(),
-            canary_image: state.canary_image.clone(),
-            diagnostics: state.diagnostics.clone(),
-            metrics,
-        })
-    }
 }
 
 #[instrument(skip(ctx, rc), fields(trace_id))]
@@ -190,38 +170,23 @@ impl RestateCluster {
             ..Default::default()
         };
 
-        // Check if namespace exists
-        if let Some(existing_ns) = nss.get_metadata_opt(name).await? {
-            // Check if we own the namespace
-            let we_own_namespace = existing_ns
-                .metadata
-                .owner_references
-                .map(|orefs| orefs.contains(&oref))
-                .unwrap_or(false);
-
-            if we_own_namespace {
-                // We own it, apply our full metadata including ownership
-                apply_namespace(
-                    &nss,
-                    Namespace {
-                        metadata: object_meta(&base_metadata, name),
-                        ..Default::default()
-                    },
-                )
-                .await?;
-            } else {
-                // We don't own it, just use it without mutation
-            }
-        } else {
-            // Namespace doesn't exist, create it with full ownership
-            apply_namespace(
-                &nss,
-                Namespace {
-                    metadata: object_meta(&base_metadata, name),
-                    ..Default::default()
-                },
-            )
-            .await?;
+        let namespace = Namespace {
+            metadata: object_meta(&base_metadata, name),
+            ..Default::default()
+        };
+        let existing_owners = match ctx.namespaces.cached(&nss, name) {
+            Some(existing) => Some(existing.metadata.owner_references.clone()),
+            // Namespaces we create carry the label the cache selects on, so a miss means the
+            // namespace is either absent or not ours; only the apiserver can say which.
+            None => nss
+                .get_metadata_opt(name)
+                .await?
+                .map(|existing| existing.metadata.owner_references),
+        };
+        // A namespace someone else created is used as it is, without mutation.
+        if existing_owners.is_none_or(|owners| owners.is_some_and(|owners| owners.contains(&oref)))
+        {
+            ctx.namespaces.apply(&nss, &namespace).await?;
         }
 
         reconcile_network_policies(
@@ -323,14 +288,14 @@ impl RestateCluster {
         let rcs: Api<RestateCluster> = Api::all(ctx.client.clone());
 
         let name = self.name_any();
+        let resync = ctx.resync;
 
         // Track whether we should set provisioned = true in status
         let mut set_provisioned = false;
 
         let (result, message, reason, status) = match self.reconcile(ctx, &name).await {
             Ok(()) => {
-                // If no events were received, check back every 5 minutes
-                let action = Action::requeue(Duration::from_secs(5 * 60));
+                let action = Action::requeue(resync.next());
 
                 (
                     Ok(action),
@@ -424,22 +389,25 @@ impl RestateCluster {
         } else {
             self.status.as_ref().and_then(|s| s.provisioned)
         };
-        let new_status = Patch::Apply(json!({
-            "apiVersion": "restate.dev/v1",
-            "kind": "RestateCluster",
-            "status": RestateClusterStatus {
-                // Replacing the whole list is what clears the `Reconciling` condition after
-                // a suspension.
-                conditions: Some(vec![ready]),
-                reconciliation: Some(state_after_reconcile(
-                    self.status.as_ref().and_then(|s| s.reconciliation),
-                    &ready_status,
-                )),
-                provisioned,
-            }
-        }));
-        let ps = PatchParams::apply("restate-operator").force();
-        let _o = rcs.patch_status(&name, &ps, &new_status).await?;
+        let new_status = RestateClusterStatus {
+            // Replacing the whole list is what clears the `Reconciling` condition after
+            // a suspension.
+            conditions: Some(vec![ready]),
+            reconciliation: Some(state_after_reconcile(
+                self.status.as_ref().and_then(|s| s.reconciliation),
+                &ready_status,
+            )),
+            provisioned,
+        };
+        if !status_unchanged(self.status.as_ref(), &new_status) {
+            let new_status = Patch::Apply(json!({
+                "apiVersion": "restate.dev/v1",
+                "kind": "RestateCluster",
+                "status": new_status,
+            }));
+            let ps = PatchParams::apply("restate-operator").force();
+            rcs.patch_status(&name, &ps, &new_status).await?;
+        }
 
         result
     }
@@ -461,14 +429,6 @@ impl RestateCluster {
             .await?;
         Ok(Action::await_change())
     }
-}
-
-async fn apply_namespace(nss: &Api<Namespace>, ns: Namespace) -> std::result::Result<(), Error> {
-    let name = ns.metadata.name.as_ref().unwrap();
-    let params = PatchParams::apply("restate-operator").force();
-    debug!("Applying Namespace {}", name);
-    nss.patch(name, &params, &Patch::Apply(&ns)).await?;
-    Ok(())
 }
 
 // Initialize the controller and shared state (given the crd is installed)
@@ -540,169 +500,147 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
     // but restateclusters themselves dont
     let rc_cfg = Config::default();
 
-    let (pvc_meta_store, pvc_meta_writer) = reflector::store();
-    let pvc_meta_reflector = reflector(pvc_meta_writer, metadata_watcher(pvc_api, cfg.clone()))
-        .touched_objects()
-        .default_backoff();
-
-    let (ss_store, ss_writer) = reflector::store();
-    let ss_reflector = reflector(ss_writer, watcher(ss_api, cfg.clone()))
-        .map(ensure_deletion_change)
-        .touched_objects()
-        .default_backoff()
-        .predicate_filter(changed_predicate.combine(status_predicate_serde));
-
-    let np_watcher = metadata_watcher(np_api, cfg.clone())
-        .map(ensure_deletion_change)
-        .touched_objects()
-        .predicate_filter(changed_predicate);
-
-    let ns_watcher = metadata_watcher(ns_api, cfg.clone())
-        .map(ensure_deletion_change)
-        .touched_objects()
-        .predicate_filter(changed_predicate);
-
-    let svcacc_watcher = metadata_watcher(svcacc_api, cfg.clone())
-        .map(ensure_deletion_change)
-        .touched_objects()
-        .predicate_filter(changed_predicate);
-
-    let pdb_watcher = metadata_watcher(pdb_api, cfg.clone())
-        .map(ensure_deletion_change)
-        .touched_objects()
-        .predicate_filter(changed_predicate);
-
-    let svc_watcher = watcher(svc_api, cfg.clone())
-        .map(ensure_deletion_change)
-        .touched_objects()
-        // svc has no generation so we hash the spec to check for changes
-        .predicate_filter(changed_predicate.combine(spec_predicate_serde));
-
-    let cm_watcher = watcher(cm_api, cfg.clone())
-        .map(ensure_deletion_change)
-        .touched_objects()
-        // cm has no generation so we hash the data to check for changes
-        .predicate_filter(changed_predicate.combine(spec_predicate));
+    let (pvc_store, pvc_reflector) = reflected(pvc_api, cfg.clone());
+    let (ss_store, ss_reflector) = reflected(ss_api, cfg.clone());
+    let ss_reflector =
+        ss_reflector.predicate_filter(changed_predicate.combine(status_predicate_serde));
+    let (np_store, np_watcher) = reflected(np_api, cfg.clone());
+    let np_watcher = np_watcher.predicate_filter(changed_predicate);
+    let (ns_store, ns_watcher) = reflected(ns_api, cfg.clone());
+    let ns_watcher = ns_watcher.predicate_filter(changed_predicate);
+    let (svcacc_store, svcacc_watcher) = reflected(svcacc_api, cfg.clone());
+    let svcacc_watcher = svcacc_watcher.predicate_filter(changed_predicate);
+    let (pdb_store, pdb_watcher) = reflected(pdb_api, cfg.clone());
+    let pdb_watcher = pdb_watcher.predicate_filter(changed_predicate);
+    let (svc_store, svc_watcher) = reflected(svc_api, cfg.clone());
+    // svc has no generation so we hash the spec to check for changes
+    let svc_watcher = svc_watcher.predicate_filter(changed_predicate.combine(spec_predicate_serde));
+    let (cm_store, cm_watcher) = reflected(cm_api, cfg.clone());
+    // cm has no generation so we hash the data to check for changes
+    let cm_watcher = cm_watcher.predicate_filter(changed_predicate.combine(spec_predicate));
 
     let controller = Controller::new(rc_api, rc_cfg.clone())
         .shutdown_on_signal()
-        .owns_stream(svc_watcher)
-        .owns_stream(cm_watcher)
-        .owns_stream(ns_watcher)
-        .owns_stream(svcacc_watcher)
-        .owns_stream(pdb_watcher)
-        .owns_stream(np_watcher)
-        .owns_stream(ss_reflector)
-        .watches_stream(
-            pvc_meta_reflector,
-            |pvc| -> Option<ObjectRef<RestateCluster>> {
-                let name = pvc.labels().get("app.kubernetes.io/name")?.as_str();
-                if name != "restate" {
-                    // should have been caught by the label selector
-                    return None;
-                }
+        .watches_stream(svc_watcher, cluster_scoped_owners)
+        .watches_stream(cm_watcher, cluster_scoped_owners)
+        .watches_stream(ns_watcher, cluster_scoped_owners)
+        .watches_stream(svcacc_watcher, cluster_scoped_owners)
+        .watches_stream(pdb_watcher, cluster_scoped_owners)
+        .watches_stream(np_watcher, cluster_scoped_owners)
+        .watches_stream(ss_reflector, cluster_scoped_owners)
+        .watches_stream(pvc_reflector, |pvc| -> Option<ObjectRef<RestateCluster>> {
+            let name = pvc.labels().get("app.kubernetes.io/name")?.as_str();
+            if name != "restate" {
+                // should have been caught by the label selector
+                return None;
+            }
 
-                let instance = pvc.labels().get("app.kubernetes.io/instance")?.as_str();
+            let instance = pvc.labels().get("app.kubernetes.io/instance")?.as_str();
 
-                Some(ObjectRef::new(instance))
-            },
-        );
+            Some(ObjectRef::new(instance))
+        });
+
+    let mut pod_identity_associations = OwnedObjects::default();
     let controller = if pod_identity_association_installed {
-        let pia_watcher = watcher(pia_api, cfg.clone())
-            .map(ensure_deletion_change)
-            .touched_objects()
-            // avoid apply loops that seem to happen with crds
-            .predicate_filter(changed_predicate.combine(status_predicate));
-
-        let job_api = Api::<Job>::all(client.clone());
-
-        let job_watcher = metadata_watcher(
-            job_api,
-            Config::default().labels("app.kubernetes.io/name=restate-pia-canary"),
+        let (pia_store, pia_watcher) = reflected(pia_api, cfg.clone());
+        pod_identity_associations = OwnedObjects::watched(pia_store);
+        // avoid apply loops that seem to happen with crds
+        controller.watches_stream(
+            pia_watcher.predicate_filter(changed_predicate.combine(status_predicate)),
+            cluster_scoped_owners,
         )
-        .map(ensure_deletion_change)
-        .touched_objects()
-        .predicate_filter(changed_predicate);
-
-        controller.owns_stream(pia_watcher).owns_stream(job_watcher)
     } else {
         controller
     };
+    let watch_iam_policy_members = state.gcp_workload_identity && iam_policy_member_installed;
+    // One cache for both kinds of canary Job
+    let mut jobs = OwnedObjects::default();
+    let controller = if pod_identity_association_installed || watch_iam_policy_members {
+        let (job_store, job_watcher) = reflected(
+            Api::<Job>::all(client.clone()),
+            Config::default()
+                .labels("app.kubernetes.io/name in (restate-pia-canary,restate-wi-canary)"),
+        );
+        jobs = OwnedObjects::watched(job_store);
+        controller.watches_stream(
+            job_watcher.predicate_filter(changed_predicate),
+            cluster_scoped_owners,
+        )
+    } else {
+        controller
+    };
+    let mut security_group_policies = OwnedObjects::default();
     let controller = if security_group_policy_installed {
-        let sgp_watcher = metadata_watcher(sgp_api, cfg.clone())
-            .map(ensure_deletion_change)
-            .touched_objects()
-            // avoid apply loops that seem to happen with crds
-            .predicate_filter(changed_predicate);
-
-        controller.owns_stream(sgp_watcher)
+        let (sgp_store, sgp_watcher) = reflected(sgp_api, cfg.clone());
+        security_group_policies = OwnedObjects::watched(sgp_store);
+        // avoid apply loops that seem to happen with crds
+        controller.watches_stream(
+            sgp_watcher.predicate_filter(changed_predicate),
+            cluster_scoped_owners,
+        )
     } else {
         controller
     };
+    let mut secret_provider_classes = OwnedObjects::default();
     let controller = if secret_provider_class_installed {
-        let spc_watcher = metadata_watcher(spc_api, cfg.clone())
-            .map(ensure_deletion_change)
-            .touched_objects()
-            // avoid apply loops that seem to happen with crds
-            .predicate_filter(changed_predicate);
-
-        controller.owns_stream(spc_watcher)
-    } else {
-        controller
-    };
-    let controller = if state.gcp_workload_identity && iam_policy_member_installed {
-        let ipm_watcher = watcher(ipm_api, cfg.clone())
-            .map(ensure_deletion_change)
-            .touched_objects()
-            .predicate_filter(changed_predicate.combine(status_predicate));
-
-        let wi_job_api = Api::<Job>::all(client.clone());
-        let wi_job_watcher = metadata_watcher(
-            wi_job_api,
-            Config::default().labels("app.kubernetes.io/name=restate-wi-canary"),
+        let (spc_store, spc_watcher) = reflected(spc_api, cfg.clone());
+        secret_provider_classes = OwnedObjects::watched(spc_store);
+        // avoid apply loops that seem to happen with crds
+        controller.watches_stream(
+            spc_watcher.predicate_filter(changed_predicate),
+            cluster_scoped_owners,
         )
-        .map(ensure_deletion_change)
-        .touched_objects()
-        .predicate_filter(changed_predicate);
-
-        controller
-            .owns_stream(ipm_watcher)
-            .owns_stream(wi_job_watcher)
     } else {
         controller
     };
+    let mut iam_policy_members = OwnedObjects::default();
+    let controller = if watch_iam_policy_members {
+        let (ipm_store, ipm_watcher) = reflected(ipm_api, cfg.clone());
+        iam_policy_members = OwnedObjects::watched(ipm_store);
+        controller.watches_stream(
+            ipm_watcher.predicate_filter(changed_predicate.combine(status_predicate)),
+            cluster_scoped_owners,
+        )
+    } else {
+        controller
+    };
+
+    let context = Arc::new(Context {
+        client: client.clone(),
+        recorder: Recorder::new(client, "restate-operator".into()),
+        pvc_store: pvc_store.clone(),
+        namespaces: OwnedObjects::watched(ns_store),
+        network_policies: OwnedObjects::watched(np_store),
+        service_accounts: OwnedObjects::watched(svcacc_store),
+        config_maps: OwnedObjects::watched(cm_store),
+        services: OwnedObjects::watched(svc_store),
+        pod_disruption_budgets: OwnedObjects::watched(pdb_store),
+        stateful_sets: OwnedObjects::watched(ss_store),
+        persistent_volume_claims: OwnedObjects::watched(pvc_store),
+        jobs,
+        pod_identity_associations,
+        security_group_policies,
+        secret_provider_classes,
+        iam_policy_members,
+        aws_pod_identity_association_cluster: state.aws_pod_identity_association_cluster.clone(),
+        operator_namespace: state.operator_namespace.clone(),
+        operator_label_name: state.operator_label_name.clone(),
+        operator_label_value: state.operator_label_value.clone(),
+        security_group_policy_installed,
+        secret_provider_class_installed,
+        gcp_workload_identity: state.gcp_workload_identity,
+        cluster_dns: state.cluster_dns.clone(),
+        canary_image: state.canary_image.clone(),
+        resync: state.resync,
+        diagnostics: state.diagnostics.clone(),
+        metrics,
+    });
+
     controller
-        .run(
-            reconcile,
-            error_policy,
-            Context::new(
-                client,
-                metrics,
-                state,
-                pvc_meta_store,
-                ss_store,
-                security_group_policy_installed,
-                secret_provider_class_installed,
-            ),
-        )
+        .run(reconcile, error_policy, context)
         .filter_map(|x| async move { Result::ok(x) })
         .for_each(|_| futures::future::ready(()))
         .await;
-}
-
-// deletion apparently doesn't lead to any change in metadata otherwise, which means the changed_predicate
-// would drop them.
-fn ensure_deletion_change<K: Resource, E>(
-    mut event: Result<kube::runtime::watcher::Event<K>, E>,
-) -> Result<kube::runtime::watcher::Event<K>, E> {
-    if let Ok(kube::runtime::watcher::Event::Delete(ref mut object)) = event {
-        let meta = object.meta_mut();
-        meta.generation = match meta.generation {
-            Some(val) => Some(val + 1),
-            None => Some(0),
-        }
-    }
-    event
 }
 
 fn changed_predicate<K: Resource>(obj: &K) -> Option<u64> {

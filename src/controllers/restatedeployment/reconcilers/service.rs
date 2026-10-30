@@ -6,17 +6,17 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 
 use kube::Resource;
-use kube::api::{Api, Patch, PatchParams};
-use tracing::*;
+use kube::api::Api;
 
 use crate::Result;
+use crate::controllers::owned_objects::OwnedObjects;
 
 // Default port for Restate services
 const DEFAULT_RESTATE_PORT: i32 = 9080;
 
 /// Create or update a Service for a specific version of the RestateDeployment
 pub async fn reconcile_service(
-    namespace: &str,
+    services: &OwnedObjects<Service>,
     svc_api: &Api<Service>,
     versioned_name: &str,
     selector: BTreeMap<String, String>,
@@ -55,7 +55,7 @@ pub async fn reconcile_service(
     // Create service metadata
     let metadata = ObjectMeta {
         name: Some(versioned_name.to_owned()),
-        namespace: Some(namespace.to_owned()),
+        namespace: svc_api.namespace().map(str::to_owned),
         // propagate labels and annotations from the owning rsd
         labels: Some(labels),
         annotations: Some(annotations),
@@ -70,13 +70,7 @@ pub async fn reconcile_service(
         status: None,
     };
 
-    // Apply the service
-    debug!("Applying Service {versioned_name} in namespace {namespace}",);
-
-    let params: PatchParams = PatchParams::apply("restate-operator").force();
-    svc_api
-        .patch(versioned_name, &params, &Patch::Apply(&service))
-        .await?;
+    services.apply(svc_api, &service).await?;
 
     Ok(service)
 }

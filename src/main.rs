@@ -5,7 +5,9 @@ use clap::Parser;
 use kube::Client;
 use prometheus::{Encoder, TextEncoder};
 
-use restate_operator::controllers::State;
+use std::time::Duration;
+
+use restate_operator::controllers::{ResyncInterval, State};
 pub use restate_operator::{self, telemetry};
 
 #[derive(Debug, clap::Parser)]
@@ -87,6 +89,18 @@ struct Arguments {
         value_name = "POD_UID"
     )]
     operator_pod_uid: Option<String>,
+
+    /// How often a resource that reconciled cleanly is reconciled again with nothing having
+    /// changed. Every object the operator writes is watched, so this is a backstop rather than
+    /// how drift gets repaired.
+    #[arg(
+        long = "resync-interval-seconds",
+        env = "RESYNC_INTERVAL_SECONDS",
+        value_name = "SECONDS",
+        default_value = "1800",
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    resync_interval_seconds: u64,
 }
 
 #[get("/metrics")]
@@ -157,6 +171,7 @@ async fn main() -> anyhow::Result<()> {
         args.canary_image,
         args.operator_pod_name,
         args.operator_pod_uid,
+        ResyncInterval::new(Duration::from_secs(args.resync_interval_seconds)),
     );
 
     let client = Client::try_default()
