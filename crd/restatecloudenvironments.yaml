@@ -61,6 +61,14 @@ spec:
               environmentId:
                 description: The ID of your environment, which begins `env_`
                 type: string
+              proxyBaseUrl:
+                description: |-
+                  Where the environment reaches deployments through the tunnel: the `proxyBaseUrl` that
+                  describing the environment returns. The port defaults to 9080. Defaults to
+                  `https://tunnel.<region>.restate.cloud:9080`; only some BYOC regions need it set.
+                nullable: true
+                pattern: ^https?://[^/?#]+/?$
+                type: string
               region:
                 description: The short region identifier of your environment, eg `us`, `eu`.
                 type: string

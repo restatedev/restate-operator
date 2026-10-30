@@ -236,6 +236,12 @@ pub fn generate_pod_template_hash(
             hasher.write(&(value.len() as u64).to_be_bytes());
             hasher.write(value.as_bytes());
         }
+        // Folded in only when set, so revisions on the default URL keep their hashes.
+        if let Some(proxy_base_url) = params.proxy_base_url.as_deref() {
+            hasher.write(b"proxy_base_url=");
+            hasher.write(&(proxy_base_url.len() as u64).to_be_bytes());
+            hasher.write(proxy_base_url.as_bytes());
+        }
     }
 
     if let Some(collision_count) = rsd.status.as_ref().and_then(|s| s.collision_count) {
@@ -634,6 +640,7 @@ mod tests {
             environment_id: "env_123".into(),
             region: "us".into(),
             signing_public_key: "publickeyv1_abc".into(),
+            proxy_base_url: None,
         }
     }
 
@@ -676,6 +683,13 @@ mod tests {
         moved.region = "eu".into();
         assert_ne!(
             generate_pod_template_hash(&rsd, &template, Some(&moved)),
+            with
+        );
+
+        let mut proxied = test_params();
+        proxied.proxy_base_url = Some("https://proxy.us.restate.cloud:9080".into());
+        assert_ne!(
+            generate_pod_template_hash(&rsd, &template, Some(&proxied)),
             with
         );
 
