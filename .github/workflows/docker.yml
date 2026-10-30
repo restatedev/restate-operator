@@ -7,6 +7,9 @@ on:
 jobs:
   build-docker-image:
     name: Build docker image
+    permissions:
+      contents: read
+      packages: write
     # this workflow is from the restate repo, so we pin the revision to
     # protect ourselves from unexpected changes that might impact CI in
     # this repo.
