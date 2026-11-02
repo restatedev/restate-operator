@@ -24,7 +24,7 @@ use tracing::*;
 use crate::controllers::owned_objects::OwnedObjects;
 use crate::controllers::{
     CrdWait, Diagnostics, RECONCILING_CONDITION, ReadinessGate, ResyncInterval, State,
-    cluster_scoped_owners, log_suspended, reconciliation_suspended, reflected,
+    cluster_scoped_owners, log_suspended, owned_annotations, reconciliation_suspended, reflected,
     state_after_reconcile, status_unchanged, suspended_message, wait_for_crd,
 };
 use crate::metrics::Metrics;
@@ -270,7 +270,7 @@ impl RestateCloudEnvironment {
     async fn reconcile(&self, ctx: Arc<Context>, name: &str) -> Result<Action> {
         let oref = self.controller_owner_ref(&()).unwrap();
 
-        let mut annotations = self.annotations().clone();
+        let mut annotations = owned_annotations(self);
         // if this is set on the rce, don't propagate it
         annotations.remove("kubectl.kubernetes.io/last-applied-configuration");
 

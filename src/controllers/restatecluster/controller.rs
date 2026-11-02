@@ -36,7 +36,7 @@ use tracing::*;
 use crate::controllers::owned_objects::OwnedObjects;
 use crate::controllers::{
     CrdWait, Diagnostics, RECONCILING_CONDITION, ReadinessGate, ResyncInterval, State,
-    cluster_scoped_owners, log_suspended, reconciliation_suspended, reflected,
+    cluster_scoped_owners, log_suspended, owned_annotations, reconciliation_suspended, reflected,
     state_after_reconcile, status_unchanged, suspended_message, wait_for_api_groups, wait_for_crd,
 };
 use crate::resources::ReconciliationState;
@@ -165,7 +165,7 @@ impl RestateCluster {
         let base_metadata = ObjectMeta {
             name: Some(name.into()),
             labels: Some(self.labels().clone()),
-            annotations: Some(self.annotations().clone()),
+            annotations: Some(owned_annotations(self)),
             owner_references: Some(vec![oref.clone()]),
             ..Default::default()
         };

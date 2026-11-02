@@ -1,4 +1,15 @@
 replicaCount: 1
+# The operator has no leader election. The default rolling update (25% surge) keeps the old
+# pod running next to the new one, and two versions that render a resource differently then
+# rewrite it in turn. With maxSurge 0 the old pod gets SIGTERM first and stops taking new work,
+# but the new pod can start while it finishes its in-flight reconciles, so a short overlap
+# remains. Recreate waits for the old pod to exit, but an existing Deployment cannot switch to
+# it through `helm upgrade` with server-side apply (Helm 4): the defaulted rollingUpdate stays.
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 0
+    maxUnavailable: 1
 nameOverride: "restate-operator"
 version: "" # pin a specific version
 
