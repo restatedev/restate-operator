@@ -23,7 +23,7 @@ jobs:
     needs: [build-docker-image] # otherwise you might install a latest helm chart and get image pull error
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v3.7.0
       - name: Write release version
         id: version
         run: |
@@ -31,7 +31,7 @@ jobs:
           echo Version: $VERSION
           echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
       - name: Install Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@v4.3.1
       # Build the restate-operator-crds dependency from source into charts/ so the packaged
       # operator chart is self-contained. The dependency is a local file:// path, so this is
       # offline and deterministic -- we don't commit the built tgz or Chart.lock.
@@ -55,7 +55,7 @@ jobs:
     # Independent of the operator image: the CRD chart carries no runtime image.
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v3.7.0
       - name: Write release version
         id: version
         run: |
@@ -63,7 +63,7 @@ jobs:
           echo Version: $VERSION
           echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
       - name: Install Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@v4.3.1
       - name: Push CRDs helm chart
         uses: appany/helm-oci-chart-releaser@v0.3.0
         with:
@@ -83,7 +83,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v3.7.0
       - name: Create release
         uses: softprops/action-gh-release@v1
         with:
