@@ -10,7 +10,7 @@ jobs:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5.1.0
       # Install the toolchain pinned in rust-toolchain.toml (channel + components), so lint runs
       # on the same version the release image builds with -- not whatever `stable` happens to be.
       - name: Install pinned Rust toolchain
@@ -19,19 +19,19 @@ jobs:
           rustup component add clippy
       - name: Install protoc
         uses: restatedev/restate/.github/actions/install-protoc@main
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.3
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5.1.0
       - name: Install pinned Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - name: Install protoc
         uses: restatedev/restate/.github/actions/install-protoc@main
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.3
       - run: cargo test --all-targets
 
   query-e2e:
@@ -39,12 +39,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5.1.0
       - name: Install pinned Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - name: Install protoc
         uses: restatedev/restate/.github/actions/install-protoc@main
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.3
       # These fixtures use real, digest-pinned Restate servers. Keep the query contract
       # separate from the kind rollback suite: it validates external system-table semantics.
       - name: Run deployment-usage query compatibility tests
@@ -54,11 +54,11 @@ jobs:
     name: Build release Docker image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5.1.0
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@v4.4.1
       - name: Install just
-        uses: extractions/setup-just@v4
+        uses: extractions/setup-just@v4.0.0
       # Build the exact release Dockerfile build-only (--load, no push, no registry secrets).
       # This exercises the dev-tools base image + musl cross-compile at the pinned
       # rust-toolchain.toml, so a toolchain/dev-tools/musl-std mismatch fails the PR instead
@@ -70,7 +70,7 @@ jobs:
       # double PR wall-clock for no extra coverage.
       - name: Export the image for the e2e job
         run: docker save ghcr.io/restatedev/restate-operator:local -o /tmp/operator-image.tar
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4.6.2
         with:
           name: operator-image
           path: /tmp/operator-image.tar
@@ -85,11 +85,11 @@ jobs:
     # margin is so a slow runner reports failures rather than a bare cancellation.
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5.1.0
       - name: Install just
-        uses: extractions/setup-just@v4
+        uses: extractions/setup-just@v4.0.0
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4.3.0
         with:
           name: operator-image
           path: /tmp
@@ -104,7 +104,7 @@ jobs:
       # images can be loaded before the operator starts. The script reuses an
       # existing healthy cluster of this name, so SKIP_BUILD=1 is all it needs.
       - name: Create kind cluster
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.14.0
         with:
           cluster_name: restate-rollback-e2e
 
