@@ -36,8 +36,8 @@ use tracing::*;
 
 use crate::controllers::{
     CrdWait, Diagnostics, RECONCILING_CONDITION, ReadinessGate, State, log_suspended,
-    reconciliation_suspended, state_after_reconcile, suspended_message, wait_for_api_groups,
-    wait_for_crd,
+    owned_annotations, reconciliation_suspended, state_after_reconcile, suspended_message,
+    wait_for_api_groups, wait_for_crd,
 };
 use crate::resources::ReconciliationState;
 use crate::resources::iampolicymembers::IAMPolicyMember;
@@ -185,7 +185,7 @@ impl RestateCluster {
         let base_metadata = ObjectMeta {
             name: Some(name.into()),
             labels: Some(self.labels().clone()),
-            annotations: Some(self.annotations().clone()),
+            annotations: Some(owned_annotations(self)),
             owner_references: Some(vec![oref.clone()]),
             ..Default::default()
         };

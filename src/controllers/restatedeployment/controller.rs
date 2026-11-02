@@ -31,8 +31,8 @@ use tracing::*;
 
 use crate::controllers::{
     CrdWait, Diagnostics, RECONCILING_CONDITION, ReadinessGate, State, log_suspended,
-    prewarmed_reflector, reconciliation_suspended, state_after_reconcile, suspended_message,
-    wait_for_crd,
+    owned_annotations, prewarmed_reflector, reconciliation_suspended, state_after_reconcile,
+    suspended_message, wait_for_crd,
 };
 use crate::metrics::Metrics;
 use crate::resources::ReconciliationState;
@@ -336,7 +336,7 @@ impl RestateDeployment {
         // The rsd's annotations are copied onto the ReplicaSet/Service below; drop
         // the ones the operator manages itself so a user-set value on the rsd can't
         // shadow them on the way through.
-        let mut annotations = self.annotations().clone();
+        let mut annotations = owned_annotations(self);
         // kubectl bookkeeping; meaningful only on the object it was applied to
         annotations.remove("kubectl.kubernetes.io/last-applied-configuration");
         // recorded by the operator on the ReplicaSet at creation (in-process tunnel
