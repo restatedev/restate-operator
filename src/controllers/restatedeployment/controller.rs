@@ -33,7 +33,7 @@ use tokio::sync::RwLock;
 use tracing::*;
 use url::Url;
 
-use crate::controllers::{Diagnostics, State, prewarmed_reflector};
+use crate::controllers::{Diagnostics, State, owned_annotations, prewarmed_reflector};
 use crate::metrics::Metrics;
 use crate::resources::knative::{Configuration, Revision, Route};
 use crate::resources::restatecloudenvironments::{InProcessTunnelParams, RestateCloudEnvironment};
@@ -275,7 +275,7 @@ impl RestateDeployment {
         // The rsd's annotations are copied onto the ReplicaSet/Service below; drop
         // the ones the operator manages itself so a user-set value on the rsd can't
         // shadow them on the way through.
-        let mut annotations = self.annotations().clone();
+        let mut annotations = owned_annotations(self);
         // kubectl bookkeeping; meaningful only on the object it was applied to
         annotations.remove("kubectl.kubernetes.io/last-applied-configuration");
         // recorded by the operator on the ReplicaSet at creation (in-process tunnel

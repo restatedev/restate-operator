@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -13,6 +14,17 @@ use url::Url;
 pub mod restatecloudenvironment;
 pub mod restatecluster;
 pub mod restatedeployment;
+
+/// The 3.x break-glass annotation. 2.x does not act on it, but keeps it off the objects it
+/// creates, so a resource can be paused before the operator moves to 3.x without rolling its pods.
+const RECONCILE_ANNOTATION: &str = "restate.dev/reconcile";
+
+/// The annotations of a resource to copy onto the objects it owns.
+pub fn owned_annotations<K: kube::ResourceExt>(obj: &K) -> BTreeMap<String, String> {
+    let mut annotations = obj.annotations().clone();
+    annotations.remove(RECONCILE_ANNOTATION);
+    annotations
+}
 
 /// Diagnostics to be exposed by the web server
 #[derive(Clone, Serialize)]
@@ -158,4 +170,34 @@ where
     debug!("{} store ready", kind);
 
     stream
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RECONCILE_ANNOTATION, owned_annotations};
+    use crate::resources::restateclusters::{RestateCluster, RestateClusterSpec};
+
+    fn annotated(annotations: &[(&str, &str)]) -> RestateCluster {
+        let mut rc = RestateCluster::new("test", RestateClusterSpec::default());
+        rc.metadata.annotations = Some(
+            annotations
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        );
+        rc
+    }
+
+    /// Pausing a resource for 3.x must not change what 2.x renders for the owned objects.
+    #[test]
+    fn the_break_glass_annotation_is_not_copied_to_owned_objects() {
+        let paused = annotated(&[(RECONCILE_ANNOTATION, "disabled"), ("team", "payments")]);
+        let running = annotated(&[("team", "payments")]);
+
+        assert_eq!(owned_annotations(&paused), owned_annotations(&running));
+        assert_eq!(
+            owned_annotations(&running).get("team").map(String::as_str),
+            Some("payments")
+        );
+    }
 }

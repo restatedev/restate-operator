@@ -18,7 +18,7 @@ use kube::{Resource, ResourceExt};
 use tokio::sync::RwLock;
 use tracing::*;
 
-use crate::controllers::{Diagnostics, State};
+use crate::controllers::{Diagnostics, State, owned_annotations};
 use crate::metrics::Metrics;
 use crate::resources::restatecloudenvironments::{
     RESTATE_CLOUD_ENVIRONMENT_FINALIZER, RestateCloudEnvironment,
@@ -114,7 +114,7 @@ impl RestateCloudEnvironment {
     async fn reconcile(&self, ctx: Arc<Context>, name: &str) -> Result<Action> {
         let oref = self.controller_owner_ref(&()).unwrap();
 
-        let mut annotations = self.annotations().clone();
+        let mut annotations = owned_annotations(self);
         // if this is set on the rce, don't propagate it
         annotations.remove("kubectl.kubernetes.io/last-applied-configuration");
 
