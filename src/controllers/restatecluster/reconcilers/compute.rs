@@ -35,7 +35,7 @@ use crate::resources::podidentityassociations::{
     PodIdentityAssociation, PodIdentityAssociationSpec,
 };
 use crate::resources::restateclusters::{
-    RestateClusterSpec, RestateClusterStatus, RestateClusterStorage, TrustedCACert,
+    ConfigReload, RestateClusterSpec, RestateClusterStatus, RestateClusterStorage, TrustedCACert,
 };
 use crate::resources::securitygrouppolicies::{
     SecurityGroupPolicy, SecurityGroupPolicySecurityGroups, SecurityGroupPolicySpec,
@@ -65,14 +65,26 @@ fn restate_service_account(
     }
 }
 
-fn restate_configmap(base_metadata: &ObjectMeta, config: Option<&str>) -> ConfigMap {
+fn restate_configmap(
+    base_metadata: &ObjectMeta,
+    config: Option<&str>,
+    reload: ConfigReload,
+) -> ConfigMap {
     let config: String = config.unwrap_or_default().into();
 
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(config.as_bytes());
-    let result = u32::from_le_bytes(hasher.finalize()[..4].try_into().unwrap());
+    // A content-hashed name changes the pod template on every edit and so rolls the pods; a
+    // fixed name is updated in place and relies on the kubelet refreshing the mounted file.
+    let name = match reload {
+        ConfigReload::Restart => {
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(config.as_bytes());
+            let result = u32::from_le_bytes(hasher.finalize()[..4].try_into().unwrap());
+            format!("restate-config-{result:x}")
+        }
+        ConfigReload::Live => "restate-config".into(),
+    };
 
-    let metadata = object_meta(base_metadata, format!("restate-config-{result:x}"));
+    let metadata = object_meta(base_metadata, name);
 
     ConfigMap {
         metadata,
@@ -741,7 +753,11 @@ pub async fn reconcile_compute(
     )
     .await?;
 
-    let cm = restate_configmap(base_metadata, spec.config.as_deref());
+    let cm = restate_configmap(
+        base_metadata,
+        spec.config.as_deref(),
+        spec.config_reload.unwrap_or_default(),
+    );
     let cm_name: String = cm.metadata.name.as_ref().unwrap().into();
     apply_configmap(name, &cm_api, cm).await?;
 
@@ -1717,6 +1733,31 @@ mod tests {
 
     fn pod_spec(ss: &StatefulSet) -> &PodSpec {
         ss.spec.as_ref().unwrap().template.spec.as_ref().unwrap()
+    }
+
+    #[test]
+    fn configmap_name_follows_reload_mode() {
+        let base_metadata = ObjectMeta {
+            name: Some("test".into()),
+            namespace: Some("test".into()),
+            ..Default::default()
+        };
+        let name = |config: &str, reload: ConfigReload| {
+            restate_configmap(&base_metadata, Some(config), reload)
+                .metadata
+                .name
+                .unwrap()
+        };
+
+        // restart: the name carries the content hash, so an edit changes the pod template
+        let a = name("a = 1", ConfigReload::Restart);
+        assert!(a.starts_with("restate-config-") && a != "restate-config");
+        assert_eq!(a, name("a = 1", ConfigReload::Restart));
+        assert_ne!(a, name("a = 2", ConfigReload::Restart));
+
+        // live: one fixed name regardless of content, updated in place
+        assert_eq!(name("a = 1", ConfigReload::Live), "restate-config");
+        assert_eq!(name("a = 2", ConfigReload::Live), "restate-config");
     }
 
     #[test]

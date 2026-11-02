@@ -3238,6 +3238,20 @@ spec:
                 description: TOML-encoded Restate config file
                 nullable: true
                 type: string
+              configReload:
+                description: |-
+                  How a change to `config` reaches running pods. Defaults to `restart`.
+                  - `restart`: the config lives in a ConfigMap named after its content hash, so every
+                    change rolls the StatefulSet and all settings take effect.
+                  - `live`: the config lives in a ConfigMap with a fixed name and is updated in place;
+                    the kubelet refreshes the mounted file (typically within a minute) and Restate's
+                    config watcher reloads it without a restart. Only settings Restate reads at runtime
+                    take effect; settings read once at startup wait for the next restart.
+                enum:
+                - restart
+                - live
+                nullable: true
+                type: string
               security:
                 description: Security configuration
                 nullable: true
