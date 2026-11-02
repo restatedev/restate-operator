@@ -19,17 +19,11 @@ workflows:
         - 'appany/helm-oci-chart-releaser@v0.3.0'
         - 'azure/setup-helm@v4.3.1'
         - 'softprops/action-gh-release@v1'
-    '.github/workflows/verify-lockfile.yml':
-        - 'actions/checkout@v4.4.0'
+    '.github/workflows/verify-lockfile.yml': []
 dependencies:
     'actions/checkout@v3.7.0':
         ref: 'v3.7.0'
         commit: 'sha1-a37ce9120846195fa4ece8f58b268e6043cb2f26'
-        owner_id: 44036562
-        repo_id: 197814629
-    'actions/checkout@v4.4.0':
-        ref: 'v4.4.0'
-        commit: 'sha1-11d5960a326750d5838078e36cf38b85af677262'
         owner_id: 44036562
         repo_id: 197814629
     'actions/checkout@v5.1.0':

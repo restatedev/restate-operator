@@ -1,6 +1,7 @@
 # Fails when .github/workflows/actions.lock is out of sync with the
 # workflows or a locked pin no longer verifies upstream.
-# Based on https://github.com/github/gh-actions-lock/blob/main/.github/workflows/verify-lockfile.yml
+# The job lives in restatedev/restate so the gh-actions-lock version is
+# maintained in one place.
 
 name: Verify actions lockfile
 
@@ -19,12 +20,4 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - uses: actions/checkout@v4.4.0
-        with:
-          persist-credentials: false
-      - run: gh extension install github/gh-actions-lock --pin v0.4.0
-      - run: gh actions-lock --verify
+    uses: restatedev/restate/.github/workflows/verify-lockfile.yml@main
