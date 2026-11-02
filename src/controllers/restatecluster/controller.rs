@@ -34,7 +34,7 @@ use serde_json::json;
 use tokio::{sync::RwLock, time::Duration};
 use tracing::*;
 
-use crate::controllers::{Diagnostics, State};
+use crate::controllers::{Diagnostics, State, owned_annotations};
 use crate::resources::iampolicymembers::IAMPolicyMember;
 use crate::resources::podidentityassociations::PodIdentityAssociation;
 use crate::resources::restateclusters::{
@@ -174,7 +174,7 @@ impl RestateCluster {
         let base_metadata = ObjectMeta {
             name: Some(name.into()),
             labels: Some(self.labels().clone()),
-            annotations: Some(self.annotations().clone()),
+            annotations: Some(owned_annotations(self)),
             owner_references: Some(vec![oref.clone()]),
             ..Default::default()
         };
