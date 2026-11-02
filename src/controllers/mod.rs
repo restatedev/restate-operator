@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -48,6 +49,14 @@ pub fn reconciliation_suspended<K: kube::ResourceExt>(obj: &K) -> bool {
             .annotations()
             .get(RECONCILE_ANNOTATION)
             .is_some_and(|value| value == RECONCILE_DISABLED)
+}
+
+/// The annotations of a resource to copy onto the objects it owns. The break-glass annotation
+/// stays behind: on a pod template, setting or removing it would roll the pods.
+pub fn owned_annotations<K: kube::ResourceExt>(obj: &K) -> BTreeMap<String, String> {
+    let mut annotations = obj.annotations().clone();
+    annotations.remove(RECONCILE_ANNOTATION);
+    annotations
 }
 
 /// The `Reconciling` condition message for a suspended resource.
@@ -668,7 +677,7 @@ async fn publish_crd_wait_event(
 #[cfg(test)]
 mod tests {
     use super::{
-        RECONCILE_ANNOTATION, Readiness, ReadinessGate, pending_crds_note,
+        RECONCILE_ANNOTATION, Readiness, ReadinessGate, owned_annotations, pending_crds_note,
         reconciliation_suspended, state_after_reconcile, suspended_message,
     };
     use crate::resources::ReconciliationState;
@@ -702,6 +711,19 @@ mod tests {
                 "{RECONCILE_ANNOTATION}={value} must not suspend reconciliation"
             );
         }
+    }
+
+    /// Pausing or resuming must not change what the operator renders for the owned objects.
+    #[test]
+    fn the_break_glass_annotation_is_not_copied_to_owned_objects() {
+        let paused = annotated(&[(RECONCILE_ANNOTATION, "disabled"), ("team", "payments")]);
+        let running = annotated(&[("team", "payments")]);
+
+        assert_eq!(owned_annotations(&paused), owned_annotations(&running));
+        assert_eq!(
+            owned_annotations(&running).get("team").map(String::as_str),
+            Some("payments")
+        );
     }
 
     /// The suspension has to name the annotation, or there's no way to tell what stopped it.

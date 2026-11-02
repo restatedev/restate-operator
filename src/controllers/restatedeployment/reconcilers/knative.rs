@@ -9,6 +9,7 @@ use serde_json::json;
 use tracing::*;
 use url::Url;
 
+use crate::controllers::owned_annotations;
 use crate::controllers::restatedeployment::cleanup::{
     BlockingVersion, CleanupMode, CleanupOutcome, DeploymentUsageMap,
     RESTATE_REMOVE_VERSION_AT_ANNOTATION, retain_for_rollback, schedule_version_removal,
@@ -354,7 +355,7 @@ fn build_configuration_spec(
     // === Configuration resource metadata ===
     // Propagate RestateDeployment annotations/labels to Configuration (like Knative Service does)
     // Using copy-except pattern like Knative: exclude last-applied-configuration and rollout-duration
-    let mut config_annotations = rsd.annotations().clone();
+    let mut config_annotations = owned_annotations(rsd);
     config_annotations.remove("kubectl.kubernetes.io/last-applied-configuration");
     config_annotations.remove("serving.knative.dev/rollout-duration"); // Route-only annotation
     // the drain deadline; a copy would land under a manager the clear can't give up
@@ -540,7 +541,7 @@ fn build_route_spec(
     let owner_reference = config.controller_owner_ref(&()).unwrap();
 
     // Propagate RestateDeployment annotations to Route (like Knative Service does)
-    let mut route_annotations = rsd.annotations().clone();
+    let mut route_annotations = owned_annotations(rsd);
     route_annotations.remove("kubectl.kubernetes.io/last-applied-configuration");
     // Add operator-managed annotations
     route_annotations.insert(RESTATE_DEPLOYMENT_ANNOTATION.to_string(), rsd.name_any());
