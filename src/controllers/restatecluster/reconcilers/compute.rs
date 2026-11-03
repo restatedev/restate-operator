@@ -4,7 +4,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetSpec, StatefulSetStatus};
+use k8s_openapi::api::apps::v1::{
+    StatefulSet, StatefulSetSpec, StatefulSetStatus, StatefulSetUpdateStrategy,
+};
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
     ConfigMap, ConfigMapVolumeSource, Container, ContainerPort, EmptyDirVolumeSource, EnvVar,
@@ -17,12 +19,13 @@ use k8s_openapi::api::policy::v1::{PodDisruptionBudget, PodDisruptionBudgetSpec}
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
-use kube::api::{DeleteParams, ListParams, Preconditions, PropagationPolicy};
+use kube::api::{DeleteParams, ListParams, Patch, PatchParams, Preconditions, PropagationPolicy};
 use kube::{Api, ResourceExt};
 use sha2::Digest;
 use tracing::{debug, error, trace, warn};
 
 use crate::Error;
+use crate::controllers::UPDATE_STRATEGY_ANNOTATION;
 use crate::controllers::owned_objects::OwnedObjects;
 use crate::controllers::restatecluster::controller::Context;
 use crate::resources::iampolicymembers::{
@@ -32,7 +35,7 @@ use crate::resources::podidentityassociations::{
     PodIdentityAssociation, PodIdentityAssociationSpec,
 };
 use crate::resources::restateclusters::{
-    RestateClusterSpec, RestateClusterStatus, RestateClusterStorage, TrustedCACert,
+    RestateCluster, RestateClusterSpec, RestateClusterStatus, RestateClusterStorage, TrustedCACert,
 };
 use crate::resources::securitygrouppolicies::{
     SecurityGroupPolicy, SecurityGroupPolicySecurityGroups, SecurityGroupPolicySpec,
@@ -710,6 +713,7 @@ pub async fn reconcile_compute(
     // name of the RestateCluster is also the namespace
     name: &str,
     base_metadata: &ObjectMeta,
+    cluster_annotations: &BTreeMap<String, String>,
     spec: &RestateClusterSpec,
     status: Option<&RestateClusterStatus>,
     signing_key: Option<(Volume, PathBuf)>,
@@ -954,7 +958,44 @@ pub async fn reconcile_compute(
         .apply(&pdb_api, &restate_pod_disruption_budget(base_metadata))
         .await?;
 
-    change_statefulset_storage(ctx, name, base_metadata, &ss_api, &pvc_api, &spec.storage).await?;
+    let rc_api: Api<RestateCluster> = Api::all(ctx.client.clone());
+    let recreating = change_statefulset_storage(
+        ctx,
+        name,
+        base_metadata,
+        &ss_api,
+        &rc_api,
+        &pvc_api,
+        &spec.storage,
+    )
+    .await?;
+    if recreating {
+        return Err(Error::NotReady {
+            reason: "StatefulSetRecreating".into(),
+            message: format!(
+                "Waiting for StatefulSet {RESTATE_STATEFULSET_NAME} to be deleted before recreating it with the new storage"
+            ),
+            requeue_after: Some(Duration::from_secs(5)),
+        });
+    }
+    let ss_cached = ctx
+        .stateful_sets
+        .cached(&ss_api, RESTATE_STATEFULSET_NAME)
+        .is_some();
+    // the cached RestateCluster may not show the annotation yet when the delete that triggered
+    // this reconcile was observed first, so a recreate reads it from the API server
+    let remembered_strategy = if ss_cached {
+        cluster_annotations.get(UPDATE_STRATEGY_ANNOTATION).cloned()
+    } else {
+        rc_api
+            .get(name)
+            .await?
+            .annotations()
+            .get(UPDATE_STRATEGY_ANNOTATION)
+            .cloned()
+    }
+    .map(|strategy| serde_json::from_str::<StatefulSetUpdateStrategy>(&strategy))
+    .transpose()?;
 
     let stateful_set = restate_statefulset(
         base_metadata,
@@ -965,7 +1006,19 @@ pub async fn reconcile_compute(
         &ctx.canary_image,
     );
     validate_pod_volumes(&stateful_set)?;
-    let ss = ctx.stateful_sets.apply(&ss_api, &stateful_set).await?;
+    let ss = match remembered_strategy {
+        Some(update_strategy) => {
+            let ss = if ss_cached {
+                ctx.stateful_sets.apply(&ss_api, &stateful_set).await?
+            } else {
+                recreate_stateful_set(&ctx.stateful_sets, &ss_api, stateful_set, update_strategy)
+                    .await?
+            };
+            remember_update_strategy(&rc_api, name, None).await?;
+            ss
+        }
+        None => ctx.stateful_sets.apply(&ss_api, &stateful_set).await?,
+    };
 
     // Handle cluster provisioning if enabled
     // This must happen BEFORE validate_stateful_set_status because pods only become Ready
@@ -1367,14 +1420,16 @@ async fn check_workload_identity(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn change_statefulset_storage(
     ctx: &Context,
     namespace: &str,
     base_metadata: &ObjectMeta,
     ss_api: &Api<StatefulSet>,
+    rc_api: &Api<RestateCluster>,
     pvc_api: &Api<PersistentVolumeClaim>,
     storage: &RestateClusterStorage,
-) -> Result<(), Error> {
+) -> Result<bool, Error> {
     let resources = Some(restate_pvc_resources(storage));
 
     // ensure all existing pvcs have the right size and VAC set
@@ -1435,8 +1490,13 @@ async fn change_statefulset_storage(
         // 1. first run and it hasn't ever been created => do nothing
         // 3. we deleted it in a previous reconciliation, and the cache reflects this => do nothing
         // 2. it has just been created, but cache doesn't have it yet. we'll reconcile again when it enters cache => do nothing
-        None => return Ok(()),
+        None => return Ok(false),
     };
+
+    // still held by the orphan finalizer from an earlier delete
+    if existing.metadata.deletion_timestamp.is_some() {
+        return Ok(true);
+    }
 
     let existing_storage_spec = existing
         .spec
@@ -1459,7 +1519,7 @@ async fn change_statefulset_storage(
             if bytes == storage.storage_request_bytes
                 && existing_vac == storage.volume_attributes_class_name.as_deref() =>
         {
-            return Ok(());
+            return Ok(false);
         }
         _ => {}
     }
@@ -1473,7 +1533,20 @@ async fn change_statefulset_storage(
     // we have already updated the pvcs, we just need to delete and recreate the statefulset
     // we *must* delete with an orphan propagation policy; this means the deletion will *not* cascade down
     // to the pods that this statefulset owns.
-    // recreation will happen later in the reconcile loop
+    // a later reconcile recreates it once the delete has completed, with the update strategy
+    // remembered here
+    remember_update_strategy(
+        rc_api,
+        namespace,
+        Some(
+            &existing
+                .spec
+                .as_ref()
+                .and_then(|spec| spec.update_strategy.clone())
+                .unwrap_or_default(),
+        ),
+    )
+    .await?;
     ss_api
         .delete(
             RESTATE_STATEFULSET_NAME,
@@ -1490,7 +1563,54 @@ async fn change_statefulset_storage(
         )
         .await?;
 
+    Ok(true)
+}
+
+async fn remember_update_strategy(
+    rc_api: &Api<RestateCluster>,
+    name: &str,
+    update_strategy: Option<&StatefulSetUpdateStrategy>,
+) -> Result<(), Error> {
+    let value = update_strategy.map(serde_json::to_string).transpose()?;
+    rc_api
+        .patch(
+            name,
+            &PatchParams::default(),
+            &Patch::Merge(serde_json::json!({
+                "metadata": { "annotations": { (UPDATE_STRATEGY_ANNOTATION): value } }
+            })),
+        )
+        .await?;
     Ok(())
+}
+
+/// Recreates the StatefulSet deleted for a storage change, with the old one's update strategy,
+/// so an OnDelete set for a graceful roll does not become the default RollingUpdate. A second
+/// field manager owns just the strategy: the operator's later applies omit it, and would
+/// otherwise remove it.
+async fn recreate_stateful_set(
+    stateful_sets: &OwnedObjects<StatefulSet>,
+    ss_api: &Api<StatefulSet>,
+    mut ss: StatefulSet,
+    update_strategy: StatefulSetUpdateStrategy,
+) -> Result<Arc<StatefulSet>, Error> {
+    if let Some(spec) = ss.spec.as_mut() {
+        spec.update_strategy = Some(update_strategy.clone());
+    }
+    let ss = stateful_sets.apply(ss_api, &ss).await?;
+    ss_api
+        .patch(
+            RESTATE_STATEFULSET_NAME,
+            &PatchParams::apply("restate-operator-update-strategy"),
+            &Patch::Apply(serde_json::json!({
+                "apiVersion": "apps/v1",
+                "kind": "StatefulSet",
+                "metadata": { "name": RESTATE_STATEFULSET_NAME },
+                "spec": { "updateStrategy": update_strategy },
+            })),
+        )
+        .await?;
+    Ok(ss)
 }
 
 fn validate_stateful_set_status(

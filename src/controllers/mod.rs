@@ -42,6 +42,10 @@ pub const RECONCILE_DISABLED: &str = "disabled";
 /// condition list, so it clears itself on resume.
 pub const RECONCILING_CONDITION: &str = "Reconciling";
 
+/// Remembers a StatefulSet's update strategy on the RestateCluster while the StatefulSet is
+/// deleted and recreated for a storage change, which spans reconciles and operator restarts.
+pub const UPDATE_STRATEGY_ANNOTATION: &str = "restate.dev/recreate-update-strategy";
+
 /// Whether reconciliation of this resource is suspended by [`RECONCILE_ANNOTATION`].
 ///
 /// Deletion is deliberately not covered: the annotation suspends management of the resource,
@@ -54,11 +58,12 @@ pub fn reconciliation_suspended<K: kube::ResourceExt>(obj: &K) -> bool {
             .is_some_and(|value| value == RECONCILE_DISABLED)
 }
 
-/// The annotations of a resource to copy onto the objects it owns. The break-glass annotation
-/// stays behind: on a pod template, setting or removing it would roll the pods.
+/// The annotations of a resource to copy onto the objects it owns. The operator's own
+/// annotations stay behind: on a pod template, setting or removing one would roll the pods.
 pub fn owned_annotations<K: kube::ResourceExt>(obj: &K) -> BTreeMap<String, String> {
     let mut annotations = obj.annotations().clone();
     annotations.remove(RECONCILE_ANNOTATION);
+    annotations.remove(UPDATE_STRATEGY_ANNOTATION);
     annotations
 }
 
@@ -780,8 +785,9 @@ async fn publish_crd_wait_event(
 #[cfg(test)]
 mod tests {
     use super::{
-        RECONCILE_ANNOTATION, Readiness, ReadinessGate, owned_annotations, pending_crds_note,
-        reconciliation_suspended, state_after_reconcile, suspended_message,
+        RECONCILE_ANNOTATION, Readiness, ReadinessGate, UPDATE_STRATEGY_ANNOTATION,
+        owned_annotations, pending_crds_note, reconciliation_suspended, state_after_reconcile,
+        suspended_message,
     };
     use crate::resources::ReconciliationState;
     use crate::resources::restateclusters::{RestateCluster, RestateClusterSpec};
@@ -827,6 +833,19 @@ mod tests {
             owned_annotations(&running).get("team").map(String::as_str),
             Some("payments")
         );
+    }
+
+    /// Remembering the update strategy across a storage-change recreate must not add a
+    /// StatefulSet revision, or the recreate and the cleanup would each roll the pods.
+    #[test]
+    fn the_remembered_update_strategy_is_not_copied_to_owned_objects() {
+        let recreating = annotated(&[
+            (UPDATE_STRATEGY_ANNOTATION, r#"{"type":"OnDelete"}"#),
+            ("team", "payments"),
+        ]);
+        let running = annotated(&[("team", "payments")]);
+
+        assert_eq!(owned_annotations(&recreating), owned_annotations(&running));
     }
 
     /// The suspension has to name the annotation, or there's no way to tell what stopped it.
