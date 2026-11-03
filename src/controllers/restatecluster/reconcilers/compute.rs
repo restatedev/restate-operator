@@ -29,6 +29,7 @@ use sha2::Digest;
 use tracing::{debug, error, trace, warn};
 
 use crate::Error;
+use crate::controllers::UPDATE_STRATEGY_ANNOTATION;
 use crate::controllers::restatecluster::controller::Context;
 use crate::resources::iampolicymembers::{
     IAMPolicyMember, IAMPolicyMemberResourceRef, IAMPolicyMemberSpec,
@@ -1680,10 +1681,6 @@ async fn change_statefulset_storage(
 
     Ok(true)
 }
-
-/// Remembers a StatefulSet's update strategy on the RestateCluster while the StatefulSet is
-/// deleted and recreated for a storage change, which spans reconciles and operator restarts.
-const UPDATE_STRATEGY_ANNOTATION: &str = "restate.dev/recreate-update-strategy";
 
 async fn remember_update_strategy(
     rc_api: &Api<RestateCluster>,
