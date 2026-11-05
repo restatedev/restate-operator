@@ -14,6 +14,11 @@ workflows:
         - 'swatinem/rust-cache@v2.9.3'
     '.github/workflows/cla.yml': []
     '.github/workflows/docker.yml': []
+    '.github/workflows/pullfrog.yml':
+        - 'actions/checkout@v6.1.0'
+        - 'pullfrog/pullfrog@v0.1.110'
+        - 'restatedev/restate@main'
+        - 'swatinem/rust-cache@v2.9.1'
     '.github/workflows/release.yml':
         - 'actions/checkout@v3.7.0'
         - 'appany/helm-oci-chart-releaser@v0.3.0'
@@ -29,6 +34,11 @@ dependencies:
     'actions/checkout@v5.1.0':
         ref: 'v5.1.0'
         commit: 'sha1-fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09'
+        owner_id: 44036562
+        repo_id: 197814629
+    'actions/checkout@v6.1.0':
+        ref: 'v6.1.0'
+        commit: 'sha1-d23441a48e516b6c34aea4fa41551a30e30af803'
         owner_id: 44036562
         repo_id: 197814629
     'actions/download-artifact@v4.3.0':
@@ -73,9 +83,14 @@ dependencies:
         commit: 'sha1-ef37e7f390d99f746eb8b610417061a60e82a6cc'
         owner_id: 15859888
         repo_id: 224289715
+    'pullfrog/pullfrog@v0.1.110':
+        ref: 'v0.1.110'
+        commit: 'sha1-895164fc90f5c493e72693c919c6cf269af158eb'
+        owner_id: 223181266
+        repo_id: 1032749534
     'restatedev/restate@main':
         ref: 'main'
-        commit: 'sha1-c30b4bced95c1934d12628f6438872a1bffb1c26'
+        commit: 'sha1-490533643da922665f22f479dba6dd0cc3ab8f86'
         owner_id: 97341811
         repo_id: 585196214
     'softprops/action-gh-release@v1':
@@ -83,6 +98,11 @@ dependencies:
         commit: 'sha1-de2c0eb89ae2a093876385947365aca7b0e5f844'
         owner_id: 2242
         repo_id: 204253808
+    'swatinem/rust-cache@v2.9.1':
+        ref: 'v2.9.1'
+        commit: 'sha1-c19371144df3bb44fab255c43d04cbc2ab54d1c4'
+        owner_id: 580492
+        repo_id: 298565987
     'swatinem/rust-cache@v2.9.3':
         ref: 'v2.9.3'
         commit: 'sha1-d1527c8f67ef9af357290475d4af4b0fab8f12e0'
