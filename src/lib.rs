@@ -149,6 +149,15 @@ impl Error {
     }
 }
 
+/// Builds an HTTP client for the Restate admin APIs.
+///
+/// reqwest's own rustls provider is aws-lc-rs, a C library. kube already links ring, so this
+/// installs ring as the process default instead; a provider installed earlier wins.
+pub fn http_client() -> reqwest::Client {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    reqwest::Client::new()
+}
+
 pub mod controllers;
 
 /// Log and trace integrations

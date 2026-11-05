@@ -106,13 +106,13 @@ spec:
                 nullable: true
                 properties:
                   maxScale:
-                    description: 'Maximum number of replicas (default: unlimited)'
+                    description: "Maximum number of replicas (default: unlimited)"
                     format: int32
                     minimum: 0.0
                     nullable: true
                     type: integer
                   minScale:
-                    description: 'Minimum number of replicas (default: 0 for scale-to-zero)'
+                    description: "Minimum number of replicas (default: 0 for scale-to-zero)"
                     format: int32
                     minimum: 0.0
                     nullable: true
@@ -145,7 +145,7 @@ spec:
                     pattern: ^[a-z]([-a-z0-9]*[a-z0-9])?$
                     type: string
                   target:
-                    description: 'Target concurrent requests per replica (default: 100)'
+                    description: "Target concurrent requests per replica (default: 100)"
                     format: int32
                     minimum: 0.0
                     nullable: true
@@ -237,13 +237,13 @@ spec:
                         description: A reference to a Service pointing against which to register the deployment. Exactly one of `cluster`, `cloud`, `service` or `url` must be specified
                         properties:
                           name:
-                            description: '`name` is the name of the service. Required'
+                            description: "`name` is the name of the service. Required"
                             type: string
                           namespace:
-                            description: '`namespace` is the namespace of the service. Required'
+                            description: "`namespace` is the namespace of the service. Required"
                             type: string
                           path:
-                            description: '`path` is an optional URL path which will be prepended before admin api paths. Should not end in a /.'
+                            description: "`path` is an optional URL path which will be prepended before admin api paths. Should not end in a /."
                             nullable: true
                             type: string
                           port:
@@ -348,19 +348,19 @@ spec:
                 description: Template describes the pods that will be created.
                 properties:
                   metadata:
-                    description: 'Standard object''s metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata'
+                    description: "Standard object's metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata"
                     nullable: true
                     properties:
                       annotations:
                         additionalProperties:
                           type: string
-                        description: 'Annotations is an unstructured key value map stored with a resource that may be set by external tools to store and retrieve arbitrary metadata. They are not queryable and should be preserved when modifying objects. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations'
+                        description: "Annotations is an unstructured key value map stored with a resource that may be set by external tools to store and retrieve arbitrary metadata. They are not queryable and should be preserved when modifying objects. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations"
                         nullable: true
                         type: object
                       labels:
                         additionalProperties:
                           type: string
-                        description: 'Map of string keys and values that can be used to organize and categorize (scope and select) objects. May match selectors of replication controllers and services. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels'
+                        description: "Map of string keys and values that can be used to organize and categorize (scope and select) objects. May match selectors of replication controllers and services. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels"
                         nullable: true
                         type: object
                     type: object
@@ -381,7 +381,7 @@ spec:
             type: object
             x-kubernetes-validations:
             - message: spec.autoscaling is only supported in replicaset mode (not knative)
-              rule: '!has(self.autoscaling) || !has(self.deploymentMode) || self.deploymentMode != ''knative'''
+              rule: "!has(self.autoscaling) || !has(self.deploymentMode) || self.deploymentMode != 'knative'"
           status:
             description: |-
               Status of the RestateDeployment
@@ -435,7 +435,7 @@ spec:
                 nullable: true
                 properties:
                   deadline:
-                    description: 'When the drain timeout expires. Unset under `deletePolicy: force`'
+                    description: "When the drain timeout expires. Unset under `deletePolicy: force`"
                     format: date-time
                     nullable: true
                     type: string

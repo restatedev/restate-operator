@@ -870,10 +870,7 @@ pub async fn reconcile_compute(
             .await
             {
                 Ok(ipm) => ipm,
-                Err(Error::KubeError(kube::Error::Api(kube::error::ErrorResponse {
-                    code: 404,
-                    ..
-                }))) => {
+                Err(Error::KubeError(kube::Error::Api(status))) if status.code == 404 => {
                     return Err(Error::NotReady {
                         reason: "IAMPolicyMemberCRDNotFound".into(),
                         message: "IAMPolicyMember CRD not found - is Config Connector installed?"
@@ -1211,12 +1208,11 @@ async fn run_canary_job(
 
     let created = match job_api.patch(name, &params, &Patch::Apply(&job)).await {
         Ok(created) => created,
-        Err(kube::Error::Api(kube::error::ErrorResponse {
-            code: 422,
-            reason,
-            message,
-            ..
-        })) if reason == "Invalid" && message.contains("field is immutable") => {
+        Err(kube::Error::Api(status))
+            if status.code == 422
+                && status.reason == "Invalid"
+                && status.message.contains("field is immutable") =>
+        {
             delete_job(namespace, job_api, name).await?;
 
             return Err(Error::NotReady {
@@ -1359,7 +1355,7 @@ async fn delete_pod_identity_association(
         name, namespace
     );
     match pia_api.delete(name, &DeleteParams::default()).await {
-        Err(kube::Error::Api(kube::error::ErrorResponse { code: 404, .. })) => Ok(()),
+        Err(kube::Error::Api(status)) if status.code == 404 => Ok(()),
         Err(err) => Err(err.into()),
         Ok(_) => Ok(()),
     }
@@ -1373,7 +1369,7 @@ async fn delete_job(namespace: &str, job_api: &Api<Job>, name: &str) -> Result<(
     // batch/v1 Jobs default to orphan propagation when deleted through the API, which would leave
     // every canary pod behind as an owner-less object. Cascade so the pods go with the Job.
     match job_api.delete(name, &DeleteParams::background()).await {
-        Err(kube::Error::Api(kube::error::ErrorResponse { code: 404, .. })) => Ok(()),
+        Err(kube::Error::Api(status)) if status.code == 404 => Ok(()),
         Err(err) => Err(err.into()),
         Ok(_) => Ok(()),
     }
@@ -1404,7 +1400,7 @@ async fn delete_security_group_policy(
         name, namespace
     );
     match sgp_api.delete(name, &DeleteParams::default()).await {
-        Err(kube::Error::Api(kube::error::ErrorResponse { code: 404, .. })) => Ok(()),
+        Err(kube::Error::Api(status)) if status.code == 404 => Ok(()),
         Err(err) => Err(err.into()),
         Ok(_) => Ok(()),
     }
@@ -1487,7 +1483,7 @@ async fn delete_iam_policy_member(
         name, namespace
     );
     match ipm_api.delete(name, &DeleteParams::default()).await {
-        Err(kube::Error::Api(kube::error::ErrorResponse { code: 404, .. })) => Ok(()),
+        Err(kube::Error::Api(status)) if status.code == 404 => Ok(()),
         Err(err) => Err(err.into()),
         Ok(_) => Ok(()),
     }

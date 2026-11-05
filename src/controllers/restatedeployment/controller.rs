@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
 use futures::StreamExt;
 
 use k8s_openapi::api::apps::v1::{ReplicaSet, ReplicaSetStatus};
@@ -10,7 +9,9 @@ use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
 use k8s_openapi::api::core::v1::{Secret, Service};
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
-use kube::api::{Api, ObjectMeta, PartialObjectMetaExt, Patch, PatchParams, ResourceExt};
+use kube::api::{
+    Api, ObjectMeta, PartialObjectMeta, PartialObjectMetaExt, Patch, PatchParams, ResourceExt,
+};
 use kube::client::Client;
 use kube::core::Selector;
 use kube::core::subresource::Scale;
@@ -20,7 +21,7 @@ use kube::runtime::finalizer::{Event as Finalizer, finalizer};
 use kube::runtime::reflector::{ObjectRef, Store};
 use kube::runtime::watcher::Config;
 use kube::runtime::{
-    Predicate, WatchStreamExt, controller, metadata_watcher, predicates, reflector, watcher,
+    Predicate, PredicateConfig, WatchStreamExt, controller, predicates, reflector, watcher,
 };
 
 use kube::Resource;
@@ -130,7 +131,7 @@ impl Context {
             cluster_dns: state.cluster_dns,
             metrics,
             diagnostics: state.diagnostics.clone(),
-            http_client: reqwest::Client::new(),
+            http_client: crate::http_client(),
         })
     }
 
@@ -176,7 +177,7 @@ async fn reconcile(rs: Arc<RestateDeployment>, ctx: Arc<Context>) -> Result<Acti
         Span::current().record("trace_id", field::display(&trace_id));
     }
     let _timer = ctx.metrics.count_and_measure::<RestateDeployment>();
-    ctx.diagnostics.write().await.last_event = Utc::now();
+    ctx.diagnostics.write().await.last_event = jiff::Timestamp::now();
 
     let namespace = match rs.metadata.namespace.as_deref() {
         Some("") | None => "default",
@@ -298,7 +299,7 @@ impl RestateDeployment {
         &self,
         ctx: Arc<Context>,
         namespace: &str,
-    ) -> Result<(ReplicaSet, Option<chrono::DateTime<chrono::Utc>>)> {
+    ) -> Result<(ReplicaSet, Option<jiff::Timestamp>)> {
         let rsc_api: Api<RestateCluster> = Api::all(ctx.client.clone());
         let rs_api = Api::<ReplicaSet>::namespaced(ctx.client.clone(), namespace);
         let svc_api = Api::<Service>::namespaced(ctx.client.clone(), namespace);
@@ -720,7 +721,7 @@ impl RestateDeployment {
             .as_ref()
             .and_then(|s| s.conditions.as_ref())
             .and_then(|c| c.iter().find(|cond| cond.r#type == RECONCILING_CONDITION));
-        let now = Time(Utc::now());
+        let now = Time(jiff::Timestamp::now());
 
         let suspended = RestateDeploymentCondition {
             // Only the start of the suspension is a transition.
@@ -781,7 +782,7 @@ impl RestateDeployment {
 
         let rsd_api: Api<RestateDeployment> = Api::namespaced(ctx.client.clone(), namespace);
 
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
 
         let mut rsd_status = self.status.clone().unwrap_or_default();
 
@@ -811,7 +812,7 @@ impl RestateDeployment {
                     let action = match next_removal {
                         Some(next_removal) if next_removal < now => Action::requeue(Duration::ZERO),
                         Some(next_removal) => {
-                            let secs = (next_removal - now).num_seconds() as u64;
+                            let secs = next_removal.duration_since(now).as_secs() as u64;
                             if secs < 5 * 60 {
                                 Action::requeue(Duration::from_secs(secs))
                             } else {
@@ -956,7 +957,7 @@ impl RestateDeployment {
                     let action = match next_removal {
                         Some(next_removal) if next_removal < now => Action::requeue(Duration::ZERO), // immediate requeue
                         Some(next_removal) => {
-                            let secs = (next_removal - now).num_seconds() as u64;
+                            let secs = next_removal.duration_since(now).as_secs() as u64;
                             if secs < 5 * 60 {
                                 Action::requeue(Duration::from_secs(secs))
                             } else {
@@ -1199,7 +1200,9 @@ impl RestateDeployment {
         self.metadata
             .deletion_timestamp
             .as_ref()
-            .and_then(|deleted_at| (chrono::Utc::now() - deleted_at.0).to_std().ok())
+            .and_then(|deleted_at| {
+                Duration::try_from(jiff::Timestamp::now().duration_since(deleted_at.0)).ok()
+            })
             .unwrap_or_default()
     }
 
@@ -1215,7 +1218,7 @@ impl RestateDeployment {
 
         self.spec.restate.delete_policy() == DeletePolicy::Drain
             && self.spec.restate.drain_on_timeout() == OnTimeout::Hold
-            && drain_deadline(self).is_some_and(|deadline| deadline <= chrono::Utc::now())
+            && drain_deadline(self).is_some_and(|deadline| deadline <= jiff::Timestamp::now())
     }
 
     fn deletion_status(
@@ -1361,7 +1364,7 @@ impl RestateDeployment {
     /// How long until the drain gives up waiting, if it hasn't already.
     fn until_drain_deadline(&self) -> Option<Duration> {
         let deadline = drain_deadline(self)?;
-        match (deadline - chrono::Utc::now()).to_std() {
+        match Duration::try_from(deadline.duration_since(jiff::Timestamp::now())) {
             Ok(remaining) => Some(remaining),
             // An `onTimeout: force` drain that crosses its deadline during an awaited
             // operation must get another pass immediately so cleanup can switch to force
@@ -1599,10 +1602,13 @@ impl RestateDeployment {
             )
             .await;
 
-            // Floor at 1s: `num_seconds` truncates, so a deadline under a second away would
+            // Floor at 1s: `as_secs` truncates, so a deadline under a second away would
             // otherwise requeue with no delay and spin the reconciler — each turn of which
             // re-runs the admin query above — until the deadline passes.
-            let secs_until_next_removal = (next_removal - chrono::Utc::now()).num_seconds().max(1);
+            let secs_until_next_removal = next_removal
+                .duration_since(jiff::Timestamp::now())
+                .as_secs()
+                .max(1);
             let mut requeue_after = Duration::from_secs(secs_until_next_removal as u64);
 
             // An `onTimeout: force` deadline can pass while cleanup is awaiting Kubernetes
@@ -1825,7 +1831,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
             .default_backoff()
             // Wake the owner on a managed HPA's spec change, not the controller's frequent
             // status heartbeats. After the reflector write, so `hpa_store` still sees every update.
-            .predicate_filter(predicates::generation);
+            .predicate_filter(predicates::generation, PredicateConfig::default());
 
     let (rce_store, rce_writer) = kube::runtime::reflector::store();
     let rce_reflector = kube::runtime::reflector(
@@ -1857,6 +1863,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
             .combine(predicates::labels)
             .combine(predicates::annotations)
             .combine(predicates::finalizers),
+        PredicateConfig::default(),
     );
 
     // Create a controller for RestateDeployment
@@ -1896,8 +1903,8 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         )
         .await;
 
-        let routes: Api<Route> = Api::all(client.clone());
-        let route_watcher = metadata_watcher(routes, cfg.clone())
+        let routes: Api<PartialObjectMeta<Route>> = Api::all(client.clone());
+        let route_watcher = watcher(routes, cfg.clone())
             .touched_objects()
             .default_backoff();
 
@@ -2032,7 +2039,7 @@ mod tests {
         }))
         .expect("test RestateDeployment deserializes");
 
-        let deleted_at = chrono::Utc::now() - chrono::TimeDelta::seconds(600);
+        let deleted_at = jiff::Timestamp::now() - jiff::SignedDuration::from_secs(600);
         rsd.metadata.deletion_timestamp = Some(Time(deleted_at));
 
         // an `onTimeout: force` drain past its deadline is about to force, not stuck: it never
@@ -2068,7 +2075,7 @@ mod tests {
         assert_eq!(status.started_at, Some(Time(deleted_at)));
         assert_eq!(
             status.deadline,
-            Some(Time(deleted_at + chrono::TimeDelta::seconds(60)))
+            Some(Time(deleted_at + jiff::SignedDuration::from_secs(60)))
         );
         assert_eq!(
             status
@@ -2144,7 +2151,7 @@ mod tests {
         // while it is alive the annotation does what it says
         assert!(reconciliation_suspended(&rsd));
 
-        rsd.metadata.deletion_timestamp = Some(Time(chrono::Utc::now()));
+        rsd.metadata.deletion_timestamp = Some(Time(jiff::Timestamp::now()));
         assert!(
             !reconciliation_suspended(&rsd),
             "a deleted RestateDeployment must reconcile even while paused",
@@ -2158,7 +2165,7 @@ mod tests {
     #[test]
     fn a_deleting_rsd_no_longer_claims_to_be_suspended() {
         let mut rsd = paused_rsd("drain", "hold");
-        rsd.metadata.deletion_timestamp = Some(Time(chrono::Utc::now()));
+        rsd.metadata.deletion_timestamp = Some(Time(jiff::Timestamp::now()));
 
         let ready = RestateDeploymentCondition {
             last_transition_time: None,
@@ -2241,8 +2248,9 @@ mod tests {
             },
         }))
         .expect("test RestateDeployment deserializes");
-        rsd.metadata.deletion_timestamp =
-            Some(Time(chrono::Utc::now() - chrono::TimeDelta::seconds(61)));
+        rsd.metadata.deletion_timestamp = Some(Time(
+            jiff::Timestamp::now() - jiff::SignedDuration::from_secs(61),
+        ));
 
         assert_eq!(rsd.until_drain_deadline(), Some(Duration::ZERO));
 

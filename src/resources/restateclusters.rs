@@ -367,7 +367,9 @@ pub struct SecretProviderSigningKeySource {
 #[derive(Deserialize, Serialize, Clone, Default, Debug, JsonSchema)]
 pub struct RestateClusterStatus {
     pub conditions: Option<Vec<RestateClusterCondition>>,
-    /// What the operator is currently doing with this cluster.
+    /// What the operator is currently doing with this cluster: `Reconciling`, `Disabled`
+    /// (suspended by the `restate.dev/reconcile: disabled` annotation), or
+    /// `ResumingReconciliation` (the annotation has gone but the cluster is not ready yet).
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(default, schema_with = "crate::resources::reconciliation_schema")]
     pub reconciliation: Option<crate::resources::ReconciliationState>,
