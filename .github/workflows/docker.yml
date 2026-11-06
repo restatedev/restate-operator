@@ -13,7 +13,7 @@ jobs:
     # this workflow is from the restate repo, so we pin the revision to
     # protect ourselves from unexpected changes that might impact CI in
     # this repo.
-    uses: restatedev/restate/.github/workflows/docker.yml@f901a8e725cb141e3c1919a837945c978d52fb80
+    uses: restatedev/restate/.github/workflows/docker.yml@ef0d6719db9ebae0c35caaa9855dba6991027443
     with:
       cargoPackage: restate-operator
     secrets: inherit
