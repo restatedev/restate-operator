@@ -14,6 +14,7 @@ use serde_json::json;
 use tracing::{debug, info};
 
 use crate::Result;
+use crate::controllers::restatedeployment::retry::backoff;
 
 use crate::resources::restatedeployments::{DeletePolicy, OnTimeout, RestateDeployment};
 
@@ -225,14 +226,11 @@ pub(crate) fn blocked_deletion_requeue(
     blocked_for: Duration,
     until_deadline: Option<Duration>,
 ) -> Duration {
-    const FLOOR: Duration = Duration::from_secs(30);
-    const CEILING: Duration = Duration::from_secs(300);
-
-    let backoff = (blocked_for / 4).clamp(FLOOR, CEILING);
+    let interval = backoff(blocked_for);
 
     match until_deadline {
-        Some(until_deadline) => backoff.min(until_deadline.max(Duration::from_secs(1))),
-        None => backoff,
+        Some(until_deadline) => interval.min(until_deadline.max(Duration::from_secs(1))),
+        None => interval,
     }
 }
 
