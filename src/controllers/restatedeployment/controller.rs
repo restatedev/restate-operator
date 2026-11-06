@@ -55,6 +55,9 @@ use crate::controllers::restatedeployment::cleanup::{
 };
 use crate::controllers::restatedeployment::reconcilers;
 use crate::controllers::restatedeployment::registration::{self, RegistrationAction};
+use crate::controllers::restatedeployment::retry::{
+    admin_failure_retry_after, admin_retry_after, healthy_requeue_after, other_failure_retry_after,
+};
 
 use super::reconcilers::replicaset::{
     POD_TEMPLATE_HASH_LABEL, RESTATE_POD_TEMPLATE_ANNOTATION, RESTATE_TUNNEL_NAME_ANNOTATION,
@@ -104,6 +107,19 @@ pub(super) struct Context {
     pub http_client: reqwest::Client,
 }
 
+/// The client for the Restate admin API.
+///
+/// Without a timeout, a request to an admin API that stops responding would hold its
+/// reconcile forever. The bound is generous because registering a deployment runs
+/// discovery against it, and the deployment-usage query scans every partition.
+fn admin_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(120))
+        .build()
+        .expect("the admin API client configuration is fixed and valid")
+}
+
 impl Context {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -130,7 +146,7 @@ impl Context {
             cluster_dns: state.cluster_dns,
             metrics,
             diagnostics: state.diagnostics.clone(),
-            http_client: reqwest::Client::new(),
+            http_client: admin_http_client(),
         })
     }
 
@@ -251,9 +267,13 @@ fn root_cause(err: &Error) -> &Error {
     }
 }
 
-fn error_policy<K, C>(_rs: Arc<K>, err: &Error, _ctx: C) -> Action {
+fn error_policy<C>(rsd: Arc<RestateDeployment>, err: &Error, _ctx: C) -> Action {
+    Action::requeue(retry_after_error(&rsd, err))
+}
+
+fn retry_after_error(rsd: &RestateDeployment, err: &Error) -> Duration {
     match root_cause(err) {
-        // A drain knows its own deadline; the blanket interval would make a short
+        // A drain knows its own deadline; the failure backoff would make a short
         // drainDelaySeconds cost up to 30s per version anyway. A deletion blocked on
         // in-flight invocations sets its own interval too, backing off as the wait grows
         // so a long one stops re-running the admin query twice a minute forever.
@@ -267,12 +287,31 @@ fn error_policy<K, C>(_rs: Arc<K>, err: &Error, _ctx: C) -> Action {
         | Error::DeletionDrainOverdue {
             requeue_after: Some(requeue_after),
             ..
-        } => Action::requeue(*requeue_after),
-        _ => Action::requeue(Duration::from_secs(30)),
+        } => *requeue_after,
+        // Cleanup never rewrites `Ready`, so while deleting, the calls have been failing
+        // for at most as long as the deletion has run.
+        Error::AdminCallFailed(_) | Error::AdminCallRejected { .. }
+            if rsd.metadata.deletion_timestamp.is_some() =>
+        {
+            admin_retry_after(rsd.blocked_for())
+        }
+        Error::AdminCallFailed(_) | Error::AdminCallRejected { .. } => {
+            admin_failure_retry_after(rsd.ready_condition(), Utc::now())
+        }
+        // Errors such as a missing Secret fail before any request is sent. Their fix
+        // doesn't trigger a reconcile, so retry them promptly.
+        _ => other_failure_retry_after(),
     }
 }
 
 impl RestateDeployment {
+    fn ready_condition(&self) -> Option<&RestateDeploymentCondition> {
+        self.status
+            .as_ref()
+            .and_then(|s| s.conditions.as_ref())
+            .and_then(|c| c.iter().find(|cond| cond.r#type == "Ready"))
+    }
+
     /// Resolve the RestateCloudEnvironment values a `tunnelMode: in-process`
     /// deployment derives its identity from (None for every other mode). They feed
     /// the revision hash, the env vars injected into the pods, the registered URL,
@@ -786,11 +825,7 @@ impl RestateDeployment {
         let mut rsd_status = self.status.clone().unwrap_or_default();
 
         // Build ready condition based on current state
-        let existing_ready = self
-            .status
-            .as_ref()
-            .and_then(|s| s.conditions.as_ref())
-            .and_then(|c| c.iter().find(|cond| cond.r#type == "Ready"));
+        let existing_ready = self.ready_condition();
 
         let (result, message, reason, status) = if is_knative {
             // Delegate to Knative reconciler
@@ -808,18 +843,7 @@ impl RestateDeployment {
             };
             match knative_result {
                 Ok(next_removal) => {
-                    let action = match next_removal {
-                        Some(next_removal) if next_removal < now => Action::requeue(Duration::ZERO),
-                        Some(next_removal) => {
-                            let secs = (next_removal - now).num_seconds() as u64;
-                            if secs < 5 * 60 {
-                                Action::requeue(Duration::from_secs(secs))
-                            } else {
-                                Action::requeue(Duration::from_secs(5 * 60))
-                            }
-                        }
-                        None => Action::requeue(Duration::from_secs(5 * 60)),
-                    };
+                    let action = Action::requeue(healthy_requeue_after(next_removal, now));
 
                     (
                         Ok(action),
@@ -870,7 +894,7 @@ impl RestateDeployment {
                 }
                 Err(Error::AdminCallFailed(ref err)) => {
                     let message = format!("Failed to make Restate admin API call: {}", err);
-                    let requeue_after = Duration::from_secs(30);
+                    let requeue_after = admin_failure_retry_after(existing_ready, now);
                     warn!(
                         name = %self.metadata.name.as_deref().unwrap_or("unknown"),
                         namespace = %namespace,
@@ -891,7 +915,7 @@ impl RestateDeployment {
                     ref body,
                 }) => {
                     let message = format!("Restate admin API call failed ({status}): {body}");
-                    let requeue_after = Duration::from_secs(30);
+                    let requeue_after = admin_failure_retry_after(existing_ready, now);
                     warn!(
                         name = %self.metadata.name.as_deref().unwrap_or("unknown"),
                         namespace = %namespace,
@@ -953,18 +977,7 @@ impl RestateDeployment {
             // ReplicaSet mode
             match self.reconcile(ctx.clone(), namespace).await {
                 Ok((current_replicaset, next_removal)) => {
-                    let action = match next_removal {
-                        Some(next_removal) if next_removal < now => Action::requeue(Duration::ZERO), // immediate requeue
-                        Some(next_removal) => {
-                            let secs = (next_removal - now).num_seconds() as u64;
-                            if secs < 5 * 60 {
-                                Action::requeue(Duration::from_secs(secs))
-                            } else {
-                                Action::requeue(Duration::from_secs(5 * 60))
-                            }
-                        }
-                        None => Action::requeue(Duration::from_secs(5 * 60)),
-                    };
+                    let action = Action::requeue(healthy_requeue_after(next_removal, now));
 
                     status_from_replica_set(
                         self.spec.replicas,
@@ -1043,7 +1056,7 @@ impl RestateDeployment {
                 }
                 Err(Error::AdminCallFailed(ref err)) => {
                     let message = format!("Failed to make Restate admin API call: {}", err);
-                    let requeue_after = Duration::from_secs(30);
+                    let requeue_after = admin_failure_retry_after(existing_ready, now);
                     warn!(
                         name = %self.metadata.name.as_deref().unwrap_or("unknown"),
                         namespace = %namespace,
@@ -1064,7 +1077,7 @@ impl RestateDeployment {
                     ref body,
                 }) => {
                     let message = format!("Restate admin API call failed ({status}): {body}");
-                    let requeue_after = Duration::from_secs(30);
+                    let requeue_after = admin_failure_retry_after(existing_ready, now);
                     warn!(
                         name = %self.metadata.name.as_deref().unwrap_or("unknown"),
                         namespace = %namespace,
@@ -1684,8 +1697,8 @@ pub fn validate_replica_set_status(
         status
     } else {
         return Err(Error::DeploymentNotReady {
-            message: "ReplicaSetNoStatus".into(),
-            reason: "ReplicaSet has no status set; it may have just been created".into(),
+            message: "ReplicaSet has no status set; it may have just been created".into(),
+            reason: "ReplicaSetNoStatus".into(),
             requeue_after: None,
             replica_set_status: status.cloned().map(Box::new),
         });
@@ -1970,11 +1983,11 @@ mod tests {
         ));
 
         assert_eq!(
-            error_policy(Arc::new(()), &wrapped, ()),
+            error_policy(Arc::new(make_rsd(None, "img")), &wrapped, ()),
             Action::requeue(Duration::from_secs(7))
         );
         assert_eq!(
-            error_policy(Arc::new(()), &draining(), ()),
+            error_policy(Arc::new(make_rsd(None, "img")), &draining(), ()),
             Action::requeue(Duration::from_secs(7))
         );
     }
@@ -1991,7 +2004,7 @@ mod tests {
         ));
 
         assert_eq!(
-            error_policy(Arc::new(()), &wrapped, ()),
+            error_policy(Arc::new(make_rsd(None, "img")), &wrapped, ()),
             Action::requeue(Duration::from_secs(120))
         );
     }
@@ -2008,7 +2021,7 @@ mod tests {
         ));
 
         assert_eq!(
-            error_policy(Arc::new(()), &wrapped, ()),
+            error_policy(Arc::new(make_rsd(None, "img")), &wrapped, ()),
             Action::requeue(Duration::from_secs(300))
         );
     }
@@ -2268,20 +2281,45 @@ mod tests {
         assert_eq!(rsd.until_drain_deadline(), None);
     }
 
+    /// Cleanup never rewrites `Ready`, so a deletion paces failed admin calls by how long
+    /// it has been running, not by whatever `Ready` said before it started.
     #[test]
-    fn unrelated_errors_keep_the_blanket_interval() {
+    fn failed_cleanup_admin_calls_back_off_with_the_deletion_age() {
+        let rejected = || {
+            Error::FinalizerError(Box::new(kube::runtime::finalizer::Error::CleanupFailed(
+                Error::AdminCallRejected {
+                    status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                    url: "http://restate:9070/deployments".into(),
+                    body: String::new(),
+                },
+            )))
+        };
+        let mut rsd = make_rsd(None, "img");
+        rsd.metadata.deletion_timestamp = Some(Time(Utc::now() - chrono::Duration::minutes(20)));
+
+        let retry_after = retry_after_error(&rsd, &rejected());
+        assert!(
+            (Duration::from_secs(300)..=Duration::from_secs(360)).contains(&retry_after),
+            "retried after {retry_after:?}"
+        );
+    }
+
+    /// Errors without an interval of their own back off from the failure-retry floor,
+    /// jittered, whether or not the finalizer wrapped them.
+    #[test]
+    fn unrelated_errors_retry_from_the_backoff_floor() {
         let wrapped = Error::FinalizerError(Box::new(
             kube::runtime::finalizer::Error::CleanupFailed(Error::HashCollision),
         ));
+        let rsd = make_rsd(None, "img");
 
-        assert_eq!(
-            error_policy(Arc::new(()), &wrapped, ()),
-            Action::requeue(Duration::from_secs(30))
-        );
-        assert_eq!(
-            error_policy(Arc::new(()), &Error::HashCollision, ()),
-            Action::requeue(Duration::from_secs(30))
-        );
+        for err in [&wrapped, &Error::HashCollision] {
+            let retry_after = retry_after_error(&rsd, err);
+            assert!(
+                (Duration::from_secs(30)..=Duration::from_secs(36)).contains(&retry_after),
+                "{err:?} retried after {retry_after:?}"
+            );
+        }
     }
 
     /// Build a minimal ReplicaSet-mode RestateDeployment for selector tests.
