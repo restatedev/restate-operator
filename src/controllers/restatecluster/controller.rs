@@ -17,7 +17,7 @@ use kube::core::PartialObjectMeta;
 use kube::core::object::HasStatus;
 use kube::runtime::events::Recorder;
 use kube::runtime::reflector::{ObjectRef, Store};
-use kube::runtime::{Predicate, WatchStreamExt, metadata_watcher, reflector, watcher};
+use kube::runtime::{Predicate, WatchStreamExt, metadata_watcher, predicates, reflector, watcher};
 use kube::{
     Resource,
     api::{Api, Patch, PatchParams, ResourceExt},
@@ -585,7 +585,18 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         // cm has no generation so we hash the data to check for changes
         .predicate_filter(changed_predicate.combine(spec_predicate));
 
-    let controller = Controller::new(rc_api, rc_cfg.clone())
+    // The reconciler writes the RestateCluster's status on every pass, and an unfiltered
+    // watch hands that write straight back as the next trigger. Hash only what the
+    // reconciler reads: spec (generation), the break-glass annotation, and the finalizer
+    // the kube helper adds before its first real pass. The reflector is written before
+    // the filter, so the reconciler still sees the latest status on a requeue.
+    let (rc_store, rc_writer) = reflector::store();
+    let rc_reflector = reflector(rc_writer, watcher(rc_api, rc_cfg.clone()))
+        .touched_objects()
+        .default_backoff()
+        .predicate_filter(restate_cluster_predicate);
+
+    let controller = Controller::for_stream(rc_reflector, rc_store)
         .shutdown_on_signal()
         .owns_stream(svc_watcher)
         .owns_stream(cm_watcher)
@@ -706,6 +717,31 @@ fn ensure_deletion_change<K: Resource, E>(
     event
 }
 
+/// What a RestateCluster change has to touch to be worth a reconcile. Status is left out
+/// on purpose: it is the reconciler's own output.
+fn restate_cluster_predicate(rc: &RestateCluster) -> Option<u64> {
+    predicates::generation
+        .combine(predicates::labels)
+        .combine(predicates::annotations)
+        .combine(predicates::finalizers)
+        .combine(deletion_and_identity_predicate)
+        .hash_property(rc)
+}
+
+/// The apiserver bumps the generation when it sets `deletionTimestamp`, and a recreated
+/// object starts over at generation 1, so neither strictly needs hashing. The filter's cache
+/// is keyed by name though, not uid, so hash both rather than lean on those details.
+fn deletion_and_identity_predicate<K: Resource>(obj: &K) -> Option<u64> {
+    let mut hasher = DefaultHasher::new();
+    obj.meta().uid.hash(&mut hasher);
+    obj.meta()
+        .deletion_timestamp
+        .as_ref()
+        .map(|t| t.0.timestamp_nanos_opt())
+        .hash(&mut hasher);
+    Some(hasher.finish())
+}
+
 fn changed_predicate<K: Resource>(obj: &K) -> Option<u64> {
     let mut hasher = DefaultHasher::new();
     if let Some(g) = obj.meta().generation {
@@ -796,4 +832,107 @@ where
         .expect("serde_hashkey never to return an error")
         .hash(&mut hasher);
     Some(hasher.finish())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::controllers::RECONCILE_ANNOTATION;
+    use crate::resources::restateclusters::RestateClusterSpec;
+    use futures::stream;
+
+    fn rc(generation: i64) -> RestateCluster {
+        let mut rc = RestateCluster::new("test", RestateClusterSpec::default());
+        rc.metadata.generation = Some(generation);
+        rc.metadata.resource_version = Some("1".into());
+        rc
+    }
+
+    async fn passed(events: Vec<RestateCluster>) -> Vec<String> {
+        stream::iter(events.into_iter().map(Ok))
+            .predicate_filter(restate_cluster_predicate)
+            .filter_map(|r| async { r.ok() })
+            .map(|rc| rc.metadata.resource_version.unwrap())
+            .collect()
+            .await
+    }
+
+    /// The operator's own status write, and the resourceVersion bump that comes with it,
+    /// must not trigger the next reconcile.
+    #[tokio::test]
+    async fn status_only_updates_are_filtered() {
+        let first = rc(1);
+        let mut status_written = rc(1);
+        status_written.metadata.resource_version = Some("2".into());
+        status_written.status = Some(RestateClusterStatus {
+            conditions: Some(vec![RestateClusterCondition {
+                r#type: "Ready".into(),
+                status: "True".into(),
+                ..Default::default()
+            }]),
+            provisioned: Some(true),
+            reconciliation: None,
+        });
+        assert_eq!(passed(vec![first, status_written]).await, vec!["1"]);
+    }
+
+    /// Everything the reconciler reads still wakes it: spec, the break-glass annotation,
+    /// labels, and the finalizer the kube helper adds before its first real pass.
+    #[tokio::test]
+    async fn spec_annotation_label_and_finalizer_changes_pass() {
+        let first = rc(1);
+        let mut spec_changed = rc(2);
+        spec_changed.metadata.resource_version = Some("2".into());
+        let mut suspended = rc(2);
+        suspended.metadata.resource_version = Some("3".into());
+        suspended
+            .annotations_mut()
+            .insert(RECONCILE_ANNOTATION.into(), "disabled".into());
+        let mut labelled = suspended.clone();
+        labelled.metadata.resource_version = Some("4".into());
+        labelled.labels_mut().insert("team".into(), "a".into());
+        let mut finalized = labelled.clone();
+        finalized.metadata.resource_version = Some("5".into());
+        finalized
+            .finalizers_mut()
+            .push(RESTATE_CLUSTER_FINALIZER.into());
+        let mut repeated = finalized.clone();
+        repeated.metadata.resource_version = Some("6".into());
+        assert_eq!(
+            passed(vec![
+                first,
+                spec_changed,
+                suspended,
+                labelled,
+                finalized,
+                repeated
+            ])
+            .await,
+            vec!["1", "2", "3", "4", "5"]
+        );
+    }
+
+    /// A delete request only sets `deletionTimestamp`; the finalizer cleanup must run on it.
+    #[tokio::test]
+    async fn a_deletion_timestamp_passes() {
+        let first = rc(1);
+        let mut deleting = rc(1);
+        deleting.metadata.resource_version = Some("2".into());
+        deleting.metadata.deletion_timestamp = Some(
+            k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(Utc::now()),
+        );
+        assert_eq!(passed(vec![first, deleting]).await, vec!["1", "2"]);
+    }
+
+    /// The filter's cache is keyed by name, so a cluster recreated under the same name must
+    /// not be mistaken for the one that was deleted.
+    #[tokio::test]
+    async fn a_recreated_cluster_passes() {
+        let mut first = rc(1);
+        first.metadata.uid = Some("old".into());
+        let mut recreated = rc(1);
+        recreated.metadata.resource_version = Some("2".into());
+        recreated.metadata.uid = Some("new".into());
+        assert_eq!(passed(vec![first, recreated]).await, vec!["1", "2"]);
+    }
 }
