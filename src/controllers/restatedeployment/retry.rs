@@ -10,9 +10,10 @@ use chrono::{DateTime, Utc};
 
 use crate::resources::restatedeployments::RestateDeploymentCondition;
 
-/// The `Ready` reasons a failed reconcile writes. Other `False` reasons, such as pods
-/// that are still starting, mean the deployment is progressing and don't back off.
-const FAILURE_REASONS: &[&str] = &["AdminCallFailed", "AdminCallRejected", "FailedReconcile"];
+/// The `Ready` reasons for a failed admin API call. Other reasons don't back off: pods
+/// that are still starting are progress, and an error raised before any request is sent,
+/// such as a missing Secret, puts no load on the admin API.
+const ADMIN_FAILURE_REASONS: &[&str] = &["AdminCallFailed", "AdminCallRejected"];
 
 /// How often a healthy deployment is re-checked when nothing else triggers a reconcile.
 const HEALTHY_POLL: Duration = Duration::from_secs(5 * 60);
@@ -29,15 +30,20 @@ pub(crate) fn backoff(waited: Duration) -> Duration {
     (waited / 4).clamp(FLOOR, CEILING)
 }
 
-/// When to retry a reconcile that just failed.
+/// When to retry a failed admin API call, given how long the calls have been failing.
+pub(crate) fn admin_retry_after(failing_for: Duration) -> Duration {
+    jitter(backoff(failing_for))
+}
+
+/// When to retry an admin API call that just failed while reconciling a deployment.
 ///
 /// `ready` is the condition the previous reconcile wrote, so the interval grows with how
-/// long the resource has been failing without the operator keeping any state, and it
+/// long the calls have been failing without the operator keeping any state, and it
 /// carries over an operator restart. `lastTransitionTime` moves only when the status
 /// changes, so a deployment that was already `False` for another reason when the
 /// failures began backs off from that earlier time. The 5-minute ceiling bounds that
 /// overestimate.
-pub(crate) fn failure_retry_after(
+pub(crate) fn admin_failure_retry_after(
     ready: Option<&RestateDeploymentCondition>,
     now: DateTime<Utc>,
 ) -> Duration {
@@ -46,13 +52,18 @@ pub(crate) fn failure_retry_after(
             ready
                 .reason
                 .as_deref()
-                .is_some_and(|reason| FAILURE_REASONS.contains(&reason))
+                .is_some_and(|reason| ADMIN_FAILURE_REASONS.contains(&reason))
         })
         .and_then(|ready| ready.last_transition_time.as_ref())
         .and_then(|since| (now - since.0).to_std().ok())
         .unwrap_or_default();
 
-    jitter(backoff(failing_for))
+    admin_retry_after(failing_for)
+}
+
+/// When to retry a reconcile that failed for a reason other than the admin API.
+pub(crate) fn other_failure_retry_after() -> Duration {
+    jitter(backoff(Duration::ZERO))
 }
 
 /// When to re-check a healthy deployment: when its next drained version is due for
@@ -101,11 +112,11 @@ mod tests {
         let now = Utc::now();
         let retry_after = |reason, failing_for_secs| {
             let since = now - chrono::Duration::seconds(failing_for_secs);
-            failure_retry_after(Some(&ready(reason, since)), now)
+            admin_failure_retry_after(Some(&ready(reason, since)), now)
         };
 
         assert!(within_jitter(
-            failure_retry_after(None, now),
+            admin_failure_retry_after(None, now),
             Duration::from_secs(30)
         ));
         assert!(within_jitter(
@@ -117,22 +128,25 @@ mod tests {
             Duration::from_secs(120)
         ));
         assert!(within_jitter(
-            retry_after("FailedReconcile", 86_400),
+            retry_after("AdminCallFailed", 86_400),
             Duration::from_secs(300)
         ));
     }
 
-    /// Pods that take a while to start are progress, not failure: when the admin API
-    /// then fails, retries start at the floor.
+    /// Only time spent failing against the admin API counts. Pods that take a while to
+    /// start are progress, and a reconcile that failed before sending a request (a
+    /// missing Secret, say) put no load on the admin API.
     #[test]
-    fn a_long_rollout_does_not_count_as_failing() {
+    fn other_reasons_do_not_count_as_failing() {
         let now = Utc::now();
         let since = now - chrono::Duration::seconds(3600);
 
-        assert!(within_jitter(
-            failure_retry_after(Some(&ready("ReplicaSetPodNotReady", since)), now),
-            Duration::from_secs(30)
-        ));
+        for reason in ["ReplicaSetPodNotReady", "FailedReconcile"] {
+            assert!(within_jitter(
+                admin_failure_retry_after(Some(&ready(reason, since)), now),
+                Duration::from_secs(30)
+            ));
+        }
     }
 
     #[test]

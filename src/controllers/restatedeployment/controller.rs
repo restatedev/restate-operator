@@ -55,7 +55,9 @@ use crate::controllers::restatedeployment::cleanup::{
 };
 use crate::controllers::restatedeployment::reconcilers;
 use crate::controllers::restatedeployment::registration::{self, RegistrationAction};
-use crate::controllers::restatedeployment::retry::{failure_retry_after, healthy_requeue_after};
+use crate::controllers::restatedeployment::retry::{
+    admin_failure_retry_after, admin_retry_after, healthy_requeue_after, other_failure_retry_after,
+};
 
 use super::reconcilers::replicaset::{
     POD_TEMPLATE_HASH_LABEL, RESTATE_POD_TEMPLATE_ANNOTATION, RESTATE_TUNNEL_NAME_ANNOTATION,
@@ -286,7 +288,19 @@ fn retry_after_error(rsd: &RestateDeployment, err: &Error) -> Duration {
             requeue_after: Some(requeue_after),
             ..
         } => *requeue_after,
-        _ => failure_retry_after(rsd.ready_condition(), Utc::now()),
+        // Cleanup never rewrites `Ready`, so while deleting, the calls have been failing
+        // for at most as long as the deletion has run.
+        Error::AdminCallFailed(_) | Error::AdminCallRejected { .. }
+            if rsd.metadata.deletion_timestamp.is_some() =>
+        {
+            admin_retry_after(rsd.blocked_for())
+        }
+        Error::AdminCallFailed(_) | Error::AdminCallRejected { .. } => {
+            admin_failure_retry_after(rsd.ready_condition(), Utc::now())
+        }
+        // Errors such as a missing Secret fail before any request is sent. Their fix
+        // doesn't trigger a reconcile, so retry them promptly.
+        _ => other_failure_retry_after(),
     }
 }
 
@@ -880,7 +894,7 @@ impl RestateDeployment {
                 }
                 Err(Error::AdminCallFailed(ref err)) => {
                     let message = format!("Failed to make Restate admin API call: {}", err);
-                    let requeue_after = failure_retry_after(existing_ready, now);
+                    let requeue_after = admin_failure_retry_after(existing_ready, now);
                     warn!(
                         name = %self.metadata.name.as_deref().unwrap_or("unknown"),
                         namespace = %namespace,
@@ -901,7 +915,7 @@ impl RestateDeployment {
                     ref body,
                 }) => {
                     let message = format!("Restate admin API call failed ({status}): {body}");
-                    let requeue_after = failure_retry_after(existing_ready, now);
+                    let requeue_after = admin_failure_retry_after(existing_ready, now);
                     warn!(
                         name = %self.metadata.name.as_deref().unwrap_or("unknown"),
                         namespace = %namespace,
@@ -1042,7 +1056,7 @@ impl RestateDeployment {
                 }
                 Err(Error::AdminCallFailed(ref err)) => {
                     let message = format!("Failed to make Restate admin API call: {}", err);
-                    let requeue_after = failure_retry_after(existing_ready, now);
+                    let requeue_after = admin_failure_retry_after(existing_ready, now);
                     warn!(
                         name = %self.metadata.name.as_deref().unwrap_or("unknown"),
                         namespace = %namespace,
@@ -1063,7 +1077,7 @@ impl RestateDeployment {
                     ref body,
                 }) => {
                     let message = format!("Restate admin API call failed ({status}): {body}");
-                    let requeue_after = failure_retry_after(existing_ready, now);
+                    let requeue_after = admin_failure_retry_after(existing_ready, now);
                     warn!(
                         name = %self.metadata.name.as_deref().unwrap_or("unknown"),
                         namespace = %namespace,
@@ -2265,6 +2279,29 @@ mod tests {
             .expect("drain block")
             .on_timeout = Some(crate::resources::restatedeployments::OnTimeout::Force);
         assert_eq!(rsd.until_drain_deadline(), None);
+    }
+
+    /// Cleanup never rewrites `Ready`, so a deletion paces failed admin calls by how long
+    /// it has been running, not by whatever `Ready` said before it started.
+    #[test]
+    fn failed_cleanup_admin_calls_back_off_with_the_deletion_age() {
+        let rejected = || {
+            Error::FinalizerError(Box::new(kube::runtime::finalizer::Error::CleanupFailed(
+                Error::AdminCallRejected {
+                    status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                    url: "http://restate:9070/deployments".into(),
+                    body: String::new(),
+                },
+            )))
+        };
+        let mut rsd = make_rsd(None, "img");
+        rsd.metadata.deletion_timestamp = Some(Time(Utc::now() - chrono::Duration::minutes(20)));
+
+        let retry_after = retry_after_error(&rsd, &rejected());
+        assert!(
+            (Duration::from_secs(300)..=Duration::from_secs(360)).contains(&retry_after),
+            "retried after {retry_after:?}"
+        );
     }
 
     /// Errors without an interval of their own back off from the failure-retry floor,

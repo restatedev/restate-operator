@@ -4,9 +4,10 @@
 
 ### What Changed
 
-- When a RestateDeployment reconcile fails, including a failed or rejected Restate admin
-  API call, the operator now retries after 30 seconds at first and backs off to 5 minutes
-  the longer the failure lasts. It used to retry every 30 seconds indefinitely.
+- When a RestateDeployment's calls to the Restate admin API fail or are rejected, the
+  operator now retries after 30 seconds at first and backs off to 5 minutes the longer
+  the failure lasts. It used to retry every 30 seconds indefinitely. Other reconcile
+  failures, such as a missing Secret, still retry after about 30 seconds.
 - Retry intervals and the routine 5-minute re-check of healthy deployments are jittered
   by up to 20%, so deployments on the same Restate cluster no longer call its admin API
   in lockstep.
@@ -28,4 +29,6 @@ absorb it.
   a reconcile sooner.
 - Pods that are still starting are not treated as failures and keep their existing
   re-check interval.
+- While a RestateDeployment is being deleted, failed admin API calls back off by how
+  long the deletion has been running.
 - No manifest, Helm value, or migration change is required.
