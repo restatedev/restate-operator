@@ -22,6 +22,18 @@ updates:
         patterns:
           - "opentelemetry*"
           - "tracing-opentelemetry"
+      # tonic re-exports a specific prost and the generated code must match it,
+      # so they only interoperate at the versions they were built against.
+      tonic-prost:
+        patterns:
+          - "tonic*"
+          - "prost*"
+      # kube and k8s-openapi are coupled; kube's own notes require upgrading
+      # them together to avoid conflicts.
+      kubernetes:
+        patterns:
+          - "kube*"
+          - "k8s-openapi"
       cargo-nonmajor:
         patterns:
           - "*"
