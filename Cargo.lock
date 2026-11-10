@@ -2800,9 +2800,9 @@ dependencies = [
 
 [[package]]
 name = "restate-sdk"
-version = "0.11.0"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "910c3922d4a937f65bb77e594a1b6a45c844211858b772d7cd02441e03c65381"
+checksum = "32d1aec0c891f86648ad71dc8696c9366b4fe5925570939b8a2558e74810d14b"
 dependencies = [
  "bytes",
  "futures",
@@ -2812,12 +2812,15 @@ dependencies = [
  "hyper",
  "hyper-util",
  "jsonptr",
+ "jsonwebtoken",
+ "percent-encoding",
  "pin-project-lite",
  "prettyplease",
  "rand 0.10.1",
  "regress 0.10.5",
  "restate-sdk-macros",
  "restate-sdk-shared-core",
+ "rustls",
  "serde",
  "serde_json",
  "syn 2.0.117",
@@ -2831,9 +2834,9 @@ dependencies = [
 
 [[package]]
 name = "restate-sdk-macros"
-version = "0.11.0"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6015a7855c77e6bc7358d70fc4c7209fe1a2ac846857074c0ac25fdd8de3a059"
+checksum = "3acd232e32159ca2007d8625c68171cd7b7db42a978c29475b47e3f115bb4db7"
 dependencies = [
  "jiff",
  "proc-macro2",
@@ -2843,9 +2846,9 @@ dependencies = [
 
 [[package]]
 name = "restate-sdk-shared-core"
-version = "7.0.1"
+version = "8.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8bd1f1d1961ac32aea52923f089e668a07630ca9c4edcadf18d38bc24e5f14c0"
+checksum = "bfd8d132e369af9310530b57c3e352a81cfad54e79d8d38fc5d7de9026ad2dfa"
 dependencies = [
  "base64",
  "bs58",
