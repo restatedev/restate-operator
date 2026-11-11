@@ -378,7 +378,13 @@ fn hash_trusted_ca_cert_refs(certs: &[TrustedCACert]) -> String {
         hasher.update(cert.key.as_bytes());
         hasher.update(b",");
     }
-    format!("{:x}", hasher.finalize())
+    use std::fmt::Write as _;
+    let digest = hasher.finalize();
+    let mut hash = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(hash, "{byte:02x}").expect("writing to a String never fails");
+    }
+    hash
 }
 
 const RESTATE_STATEFULSET_NAME: &str = "restate";
