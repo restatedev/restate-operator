@@ -55,6 +55,14 @@ struct Arguments {
     tunnel_client_default_image: String,
 
     #[arg(
+        long = "kafka-integration-default-image",
+        env = "OPERATOR_KAFKA_INTEGRATION_DEFAULT_IMAGE",
+        value_name = "IMAGE",
+        default_value = "ghcr.io/restatedev/ingress-integration-kafka:latest"
+    )]
+    kafka_integration_default_image: String,
+
+    #[arg(
         long = "cluster-dns",
         env = "CLUSTER_DNS",
         value_name = "CLUSTER_DNS",
@@ -153,6 +161,7 @@ async fn main() -> anyhow::Result<()> {
         args.operator_label_name,
         args.operator_label_value,
         args.tunnel_client_default_image,
+        args.kafka_integration_default_image,
         args.cluster_dns,
         args.canary_image,
         args.operator_pod_name,
@@ -180,6 +189,11 @@ async fn main() -> anyhow::Result<()> {
     );
     let deployment_controller = restate_operator::controllers::restatedeployment::run(
         client.clone(),
+        metric.clone(),
+        state.clone(),
+    );
+    let kafka_integration_controller = restate_operator::controllers::restatekafkaintegration::run(
+        client.clone(),
         metric,
         state.clone(),
     );
@@ -191,6 +205,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::pin!(cluster_controller);
     tokio::pin!(cloud_environment_controller);
     tokio::pin!(deployment_controller);
+    tokio::pin!(kafka_integration_controller);
     tokio::pin!(crd_wait_reporter);
 
     // Start web server
@@ -214,10 +229,11 @@ async fn main() -> anyhow::Result<()> {
     tokio::pin!(server);
 
     // Both runtimes implements graceful shutdown, so poll until both are done
-    let (_, _, _, _, server_result) = tokio::join!(
+    let (_, _, _, _, _, server_result) = tokio::join!(
         cluster_controller,
         cloud_environment_controller,
         deployment_controller,
+        kafka_integration_controller,
         crd_wait_reporter,
         server
     );

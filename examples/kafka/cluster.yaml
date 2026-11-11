@@ -1,0 +1,22 @@
+---
+apiVersion: restate.dev/v1
+kind: RestateCluster
+metadata:
+  name: restate
+spec:
+  compute:
+    image: restatedev/restate:1.7
+
+  storage:
+    # 2 GiB storage (sufficient for testing)
+    storageRequestBytes: 2147483648
+
+  security:
+    networkPeers:
+      # The Kafka integration connects in to the cluster's ingress port (8080). Without a
+      # peer here the operator's default deny-all NetworkPolicy drops those connections.
+      ingress:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: restate-kafka-integration

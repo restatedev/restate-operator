@@ -1,0 +1,91 @@
+---
+# Minimal: everything Kafka-side lives in the inline .properties config.
+apiVersion: restate.dev/v1alpha1
+kind: RestateKafkaIntegration
+metadata:
+  name: orders-to-restate
+spec:
+  replicas: 2
+
+  restate:
+    ingress:
+      # A RestateCluster named `restate` serves its ingress at
+      # http://restate.restate.svc.cluster.local:8080. The operator writes that URL into the
+      # first config file it mounts, so you never set restate.ingress.url yourself.
+      cluster: restate
+
+  config: |
+    bootstrap.servers=kafka.kafka.svc.cluster.local:9092
+    group.id=orders-to-restate
+    topics=orders
+
+    # Start from the beginning of the topic on a fresh consumer group, so records produced
+    # before this existed are not skipped.
+    auto.offset.reset=earliest
+
+    # Every record goes to Counter/add; the Kafka key becomes the virtual object key and the
+    # record value becomes the payload.
+    restate.record.mapper.service=Counter
+    restate.record.mapper.handler=add
+
+---
+# Mixing sources: an inline plain-text base, with credentials kept in a Secret referenced from
+# spec.configRefs. Anything sensitive (`sasl.jaas.config`, `sasl.password`, ...) belongs in a
+# ref, because spec.config is part of the custom resource and is stored and displayed in plain
+# text. configRefs are merged on top of config, in order, so the Secret wins on shared keys.
+#
+# The Restate ingress bearer token is different again: it goes in spec.restate.authToken, never
+# in a config file, so it stays a Secret reference and never touches the .properties surface.
+#
+# The operator does not read configRefs objects, so editing them does not restart the pods --
+# run `kubectl rollout restart deployment/orders-to-restate-sasl` after a change.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kafka-credentials
+stringData:
+  config.properties: |
+    security.protocol=SASL_SSL
+    sasl.mechanism=PLAIN
+    sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="user" password="not-a-real-password";
+
+---
+apiVersion: restate.dev/v1alpha1
+kind: RestateKafkaIntegration
+metadata:
+  name: orders-to-restate-sasl
+spec:
+  restate:
+    ingress:
+      cluster: restate
+
+  config: |
+    bootstrap.servers=broker.example:9093
+    group.id=orders-to-restate
+    topics=orders
+    restate.record.mapper.service=Counter
+    restate.record.mapper.handler=add
+
+  configRefs:
+    - secretRef:
+        name: kafka-credentials
+        # `key` defaults to config.properties
+        key: config.properties
+
+  # Overrides merged over the pod template the operator generates. The operator's container
+  # is named `kafka-integration`; anything not mentioned here keeps the generated value.
+  template:
+    spec:
+      containers:
+        - name: kafka-integration
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+          env:
+            - name: JDK_JAVA_OPTIONS
+              value: -XX:MaxRAMPercentage=75
+      nodeSelector:
+        kubernetes.io/arch: arm64
