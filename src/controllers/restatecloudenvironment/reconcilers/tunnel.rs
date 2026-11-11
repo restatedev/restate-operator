@@ -4,10 +4,9 @@ use k8s_openapi::{
     api::{
         apps::v1::{Deployment, DeploymentSpec},
         core::v1::{
-            Container, ContainerPort, EnvVar, HTTPGetAction, KeyToPath, PodSecurityContext,
-            PodSpec, PodTemplateSpec, Probe, ResourceRequirements, SeccompProfile,
-            SecretVolumeSource, SecurityContext, Service, ServicePort, ServiceSpec, Volume,
-            VolumeMount,
+            Container, ContainerPort, EnvVar, HTTPGetAction, KeyToPath, PodSpec, PodTemplateSpec,
+            Probe, ResourceRequirements, SecretVolumeSource, Service, ServicePort, ServiceSpec,
+            Volume, VolumeMount,
         },
     },
     apimachinery::pkg::{api::resource::Quantity, util::intstr::IntOrString},
@@ -20,9 +19,12 @@ use tracing::debug;
 
 use crate::{
     Error,
-    controllers::restatecloudenvironment::{
-        controller::Context,
-        reconcilers::{label_selector, object_meta},
+    controllers::{
+        restatecloudenvironment::{
+            controller::Context,
+            reconcilers::{label_selector, object_meta},
+        },
+        restricted_container_security_context, restricted_pod_security_context,
     },
     resources::restatecloudenvironments::RestateCloudEnvironmentSpec,
 };
@@ -167,11 +169,7 @@ fn tunnel_deployment(
                                 .and_then(|t| t.resources.clone())
                                 .unwrap_or_else(default_resources),
                         ),
-                        security_context: Some(SecurityContext {
-                            read_only_root_filesystem: Some(true),
-                            allow_privilege_escalation: Some(false),
-                            ..Default::default()
-                        }),
+                        security_context: Some(restricted_container_security_context()),
                         volume_mounts: Some(vec![VolumeMount {
                             mount_path: BEARER_TOKEN_MOUNT_PATH.into(),
                             name: "bearer-token".into(),
@@ -181,17 +179,7 @@ fn tunnel_deployment(
                         }]),
                         ..Default::default()
                     }],
-                    security_context: Some(PodSecurityContext {
-                        run_as_user: Some(1000),
-                        run_as_group: Some(3000),
-                        fs_group: Some(2000),
-                        fs_group_change_policy: Some("OnRootMismatch".into()),
-                        seccomp_profile: Some(SeccompProfile {
-                            type_: "RuntimeDefault".into(),
-                            localhost_profile: None,
-                        }),
-                        ..Default::default()
-                    }),
+                    security_context: Some(restricted_pod_security_context()),
                     termination_grace_period_seconds: Some(310),
                     tolerations: tunnel.and_then(|t| t.tolerations.clone()),
                     node_selector: tunnel.and_then(|t| t.node_selector.clone()),
