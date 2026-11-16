@@ -151,6 +151,23 @@ spec:
                     nullable: true
                     type: integer
                 type: object
+              latestService:
+                description: |-
+                  Optional stable Service that routes to the latest version only. ReplicaSet mode only.
+
+                  When enabled, the operator manages a ClusterIP Service named `<name>-latest` that
+                  selects the pods of the version Restate routes new invocations to, exposing every
+                  container port of that version. Its selector moves to a new version only once that
+                  version's ReplicaSet is ready and Restate has confirmed it as the latest deployment,
+                  and moves back on a rollback. Use it to send traffic that does not go through Restate
+                  (e.g. an Ingress) to the newest code while older versions drain.
+                nullable: true
+                properties:
+                  enabled:
+                    default: false
+                    description: Whether to create the `<name>-latest` Service. Disabling it deletes the Service.
+                    type: boolean
+                type: object
               minReadySeconds:
                 description: |-
                   Minimum number of seconds for which a newly created pod should be ready.
@@ -382,6 +399,8 @@ spec:
             x-kubernetes-validations:
             - message: spec.autoscaling is only supported in replicaset mode (not knative)
               rule: '!has(self.autoscaling) || !has(self.deploymentMode) || self.deploymentMode != ''knative'''
+            - message: spec.latestService is only supported in replicaset mode (not knative)
+              rule: '!has(self.latestService) || !has(self.deploymentMode) || self.deploymentMode != ''knative'''
           status:
             description: |-
               Status of the RestateDeployment
