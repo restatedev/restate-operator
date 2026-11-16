@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -734,6 +735,7 @@ async fn register_or_promote_deployment(
         ctx,
         rsd,
         &url,
+        &BTreeMap::new(),
         rsd.spec.restate.use_http11.as_ref().cloned(),
         action.overwrite(),
     )

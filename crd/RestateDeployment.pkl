@@ -125,6 +125,16 @@ class Restate {
   /// Seconds to wait before removing old versions after they are drained. Defaults to 300 (5 minutes).
   drainDelaySeconds: Int(isPositive)?
 
+  /// Override where Restate reaches each version, e.g. an L7 proxy in front of the per-version Services.
+  /// ReplicaSet mode only. The operator still creates the per-version Service, so the proxy can use it
+  /// as a backend.
+  ///
+  /// `url` and header values are templates: `{{ revision }}` (the per-version Service name), `{{ name
+  /// }}` and `{{ namespace }}`. Restate tells deployments apart by URL, so each version must either
+  /// render a distinct URL, or carry `{{ revision }}` in a header listed in the Restate server's
+  /// `admin.deployment-routing-headers`.
+  endpoint: Endpoint?
+
   /// The location of the Restate Admin API to register this deployment against
   register: Register
 
@@ -155,6 +165,26 @@ class Drain {
   /// Seconds to wait for in-flight invocations to finish. Defaults to 3600 (1 hour). Under `onTimeout:
   /// hold` this only sets when the drain reports itself overdue; it never lets the deletion through
   timeoutSeconds: Int(isPositive)?
+}
+
+/// Override where Restate reaches each version, e.g. an L7 proxy in front of the per-version Services.
+/// ReplicaSet mode only. The operator still creates the per-version Service, so the proxy can use it as
+/// a backend.
+///
+/// `url` and header values are templates: `{{ revision }}` (the per-version Service name), `{{ name }}`
+/// and `{{ namespace }}`. Restate tells deployments apart by URL, so each version must either render a
+/// distinct URL, or carry `{{ revision }}` in a header listed in the Restate server's
+/// `admin.deployment-routing-headers`.
+class Endpoint {
+  /// Extra headers Restate sends with every discovery and invocation request to this version (Restate's
+  /// `additional_headers`). Values are templates.
+  headers: Mapping<String, String>?
+
+  /// URL template to register instead of the per-version Service URL, e.g.
+  /// `http://my-gateway.my-namespace.svc:80/` or `http://my-gateway/{{ revision }}/`. When unset, the
+  /// per-version Service URL (plus `servicePath`) is used. When set, it must reference `{{ revision }}`
+  /// in the URL or in a header value, and `servicePath` must not be set.
+  url: String?
 }
 
 /// The location of the Restate Admin API to register this deployment against

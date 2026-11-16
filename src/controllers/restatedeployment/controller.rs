@@ -40,8 +40,9 @@ use crate::resources::knative::{Configuration, Revision, Route};
 use crate::resources::restatecloudenvironments::{InProcessTunnelParams, RestateCloudEnvironment};
 use crate::resources::restateclusters::RestateCluster;
 use crate::resources::restatedeployments::{
-    DeletionPhase, DeletionStatus, PendingInvocations, RESTATE_DEPLOYMENT_FINALIZER,
-    RestateAdminEndpoint, RestateDeployment, RestateDeploymentCondition, RestateDeploymentStatus,
+    DeletionPhase, DeletionStatus, EndpointTemplateVars, PendingInvocations,
+    RESTATE_DEPLOYMENT_FINALIZER, RestateAdminEndpoint, RestateDeployment,
+    RestateDeploymentCondition, RestateDeploymentStatus,
 };
 use crate::telemetry;
 use crate::{Error, Result};
@@ -517,8 +518,30 @@ impl RestateDeployment {
         )
         .await?;
 
-        let service_endpoint = match &in_process_tunnel {
-            Some(params) => {
+        let rendered = match self.spec.restate.endpoint.as_ref() {
+            Some(_) if in_process_tunnel.is_some() => {
+                return Err(Error::InvalidRestateConfig(
+                    "spec.restate.endpoint is not supported with tunnelMode: in-process".into(),
+                ));
+            }
+            Some(endpoint) => Some(endpoint.render(EndpointTemplateVars {
+                revision: &versioned_name,
+                name: &deployment_name,
+                namespace,
+            })?),
+            None => None,
+        };
+        let (custom_url, additional_headers) = rendered
+            .map(|rendered| (rendered.url, rendered.headers))
+            .unwrap_or_default();
+        if custom_url.is_some() && self.spec.restate.service_path.is_some() {
+            return Err(Error::InvalidRestateConfig(
+                "spec.restate.servicePath cannot be combined with spec.restate.endpoint.url".into(),
+            ));
+        }
+
+        let service_endpoint = match (&in_process_tunnel, custom_url) {
+            (Some(params), _) => {
                 // The pods hold their own tunnel connections, registered under the
                 // versioned name; the Service plays no part in routing. Prefer the
                 // name persisted on the ReplicaSet at creation — that is the value
@@ -530,7 +553,12 @@ impl RestateDeployment {
                     .unwrap_or(versioned_name.as_str());
                 params.tunnel_url(tunnel_name, self.spec.restate.service_path.as_deref())?
             }
-            None => self.spec.restate.register.service_url(
+            (None, Some(url)) => self
+                .spec
+                .restate
+                .register
+                .maybe_tunnel_url(&ctx.rce_store, url)?,
+            (None, None) => self.spec.restate.register.service_url(
                 &ctx.rce_store,
                 &versioned_name,
                 namespace,
@@ -638,10 +666,33 @@ impl RestateDeployment {
                 &ctx,
                 self,
                 &service_endpoint,
+                &additional_headers,
                 self.spec.restate.use_http11.as_ref().cloned(),
                 action.overwrite(),
             )
             .await?;
+
+            // With a shared endpoint URL, Restate tells versions apart only by URL path or by
+            // its configured `admin.deployment-routing-headers`. If neither differs, it hands
+            // back another version's deployment instead of creating one. Recording that id
+            // here would make two versions share one deployment, so refuse.
+            if self.spec.restate.endpoint.is_some()
+                && let Some(other) = registration::version_holding_deployment_id(
+                    &ctx.replicasets_store,
+                    namespace,
+                    &my_uid,
+                    &registered.id,
+                    &versioned_name,
+                )
+            {
+                return Err(Error::InvalidRestateConfig(format!(
+                    "Restate returned deployment {} for {versioned_name}, but it is already \
+                     registered for version {other}: the endpoint does not distinguish versions. \
+                     Put {{{{ revision }}}} in spec.restate.endpoint.url, or list the header \
+                     carrying it in the Restate server's admin.deployment-routing-headers.",
+                    registered.id,
+                )));
+            }
 
             // Recorded before the routing is confirmed, because the id is true either way:
             // it is what Restate holds for this endpoint. Deferring the annotation until
@@ -836,6 +887,11 @@ impl RestateDeployment {
                 // condition reflects the misconfiguration.
                 Err(Error::InvalidRestateConfig(
                     "tunnelMode: in-process is not supported in Knative mode".into(),
+                ))
+            } else if self.spec.restate.endpoint.is_some() {
+                // Mirrors the CRD rule, for objects admitted before it existed.
+                Err(Error::InvalidRestateConfig(
+                    "spec.restate.endpoint is not supported in Knative mode".into(),
                 ))
             } else {
                 reconcilers::knative::reconcile_knative(&ctx, self, namespace, &mut rsd_status)

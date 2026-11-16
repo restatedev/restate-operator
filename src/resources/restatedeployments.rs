@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt::Display;
 
 use k8s_openapi::{api::core::v1::Secret, apimachinery::pkg::apis::meta::v1::LabelSelector};
@@ -160,6 +161,17 @@ pub struct KnativeDeploymentSpec {
 #[x_kube(validation = Rule::new(
     "!has(self.autoscaling) || !has(self.deploymentMode) || self.deploymentMode != 'knative'"
 ).message("spec.autoscaling is only supported in replicaset mode (not knative)"))]
+// The endpoint override is only wired into the ReplicaSet path, and an in-process
+// tunnel registers its own per-revision tunnel URL.
+#[x_kube(validation = Rule::new(
+    "!has(self.restate.endpoint) || !has(self.deploymentMode) || self.deploymentMode != 'knative'"
+).message("spec.restate.endpoint is only supported in replicaset mode (not knative)"))]
+#[x_kube(validation = Rule::new(
+    "!has(self.restate.endpoint) || !has(self.restate.tunnelMode) || self.restate.tunnelMode != 'in-process'"
+).message("spec.restate.endpoint is not supported with tunnelMode: in-process"))]
+#[x_kube(validation = Rule::new(
+    "!has(self.restate.endpoint) || !has(self.restate.endpoint.url) || !has(self.restate.servicePath)"
+).message("spec.restate.servicePath cannot be combined with spec.restate.endpoint.url; put the path in the url"))]
 pub struct RestateDeploymentSpec {
     /// Deployment mode: replicaset (default) or knative.
     /// This field is immutable after creation.
@@ -349,6 +361,17 @@ pub struct RestateSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub use_http11: Option<bool>,
 
+    /// Override where Restate reaches each version, e.g. an L7 proxy in front of the
+    /// per-version Services. ReplicaSet mode only. The operator still creates the
+    /// per-version Service, so the proxy can use it as a backend.
+    ///
+    /// `url` and header values are templates: `{{ revision }}` (the per-version Service
+    /// name), `{{ name }}` and `{{ namespace }}`. Restate tells deployments apart by URL,
+    /// so each version must either render a distinct URL, or carry `{{ revision }}` in a
+    /// header listed in the Restate server's `admin.deployment-routing-headers`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<RegistrationEndpoint>,
+
     /// How Restate Cloud reaches this deployment. Only takes effect with
     /// `register.cloud` (`in-process` requires it, and is not supported in Knative
     /// mode).
@@ -411,6 +434,142 @@ impl RestateSpec {
             .and_then(|drain| drain.on_timeout)
             .unwrap_or(OnTimeout::Hold)
     }
+}
+
+/// Where Restate reaches a version of this deployment, and which extra headers it sends.
+///
+/// `url` and the header values are templates. Supported variables:
+/// - `{{ revision }}`: the versioned name, which is also the name of the per-version
+///   Service the operator creates (e.g. `my-service-5b8c7d`)
+/// - `{{ name }}`: the RestateDeployment name
+/// - `{{ namespace }}`: the RestateDeployment namespace
+///
+/// Restate identifies a deployment by its URL (authority and path), so every version
+/// must render to a distinct endpoint. Either put `{{ revision }}` in the URL (host or
+/// path), or put it in a header and list that header in the Restate server's
+/// `admin.deployment-routing-headers`. Without that setting Restate treats every version
+/// as the same deployment; the operator detects this and refuses to record it.
+#[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistrationEndpoint {
+    /// URL template to register instead of the per-version Service URL, e.g.
+    /// `http://my-gateway.my-namespace.svc:80/` or `http://my-gateway/{{ revision }}/`.
+    /// When unset, the per-version Service URL (plus `servicePath`) is used. When set, it
+    /// must reference `{{ revision }}` in the URL or in a header value, and `servicePath`
+    /// must not be set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+
+    /// Extra headers Restate sends with every discovery and invocation request to this
+    /// version (Restate's `additional_headers`). Values are templates.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+}
+
+/// Values available to `RegistrationEndpoint` templates.
+#[derive(Debug, Clone, Copy)]
+pub struct EndpointTemplateVars<'a> {
+    pub revision: &'a str,
+    pub name: &'a str,
+    pub namespace: &'a str,
+}
+
+/// A `RegistrationEndpoint` with its templates filled in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedEndpoint {
+    /// None when `url` is unset, meaning the per-version Service URL is used.
+    pub url: Option<Url>,
+    pub headers: BTreeMap<String, String>,
+}
+
+impl RegistrationEndpoint {
+    pub fn render(&self, vars: EndpointTemplateVars<'_>) -> crate::Result<RenderedEndpoint> {
+        let mut uses_revision = false;
+
+        let url = match self.url.as_deref() {
+            None => None,
+            Some(template) => {
+                let rendered = render_template(template, vars, &mut uses_revision)
+                    .map_err(|err| invalid_endpoint(format!("url: {err}")))?;
+                let url = Url::parse(&rendered).map_err(|err| {
+                    invalid_endpoint(format!("url '{rendered}' is not a valid URL: {err}"))
+                })?;
+                if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+                    return Err(invalid_endpoint(format!(
+                        "url '{rendered}' must be an http(s) URL with a host"
+                    )));
+                }
+                Some(url)
+            }
+        };
+
+        let mut headers = BTreeMap::new();
+        for (name, template) in &self.headers {
+            reqwest::header::HeaderName::from_bytes(name.as_bytes())
+                .map_err(|_| invalid_endpoint(format!("'{name}' is not a valid header name")))?;
+            let value = render_template(template, vars, &mut uses_revision)
+                .map_err(|err| invalid_endpoint(format!("header '{name}': {err}")))?;
+            reqwest::header::HeaderValue::from_str(&value).map_err(|_| {
+                invalid_endpoint(format!("header '{name}' has an invalid value '{value}'"))
+            })?;
+            headers.insert(name.clone(), value);
+        }
+
+        // A shared URL with no revision anywhere would register every version as the
+        // same Restate deployment.
+        if url.is_some() && !uses_revision {
+            return Err(invalid_endpoint(
+                "url must reference {{ revision }} in the URL or in a header value, so each version registers as a distinct deployment".into(),
+            ));
+        }
+
+        Ok(RenderedEndpoint { url, headers })
+    }
+}
+
+fn invalid_endpoint(message: String) -> crate::Error {
+    crate::Error::InvalidRestateConfig(format!("spec.restate.endpoint: {message}"))
+}
+
+/// Replace `{{ var }}` placeholders. Unknown variables and unclosed braces are errors.
+fn render_template(
+    template: &str,
+    vars: EndpointTemplateVars<'_>,
+    uses_revision: &mut bool,
+) -> Result<String, String> {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        let literal = &rest[..start];
+        if literal.contains("}}") {
+            return Err(format!("unmatched '}}}}' in '{template}'"));
+        }
+        out.push_str(literal);
+        let after = &rest[start + 2..];
+        let end = after
+            .find("}}")
+            .ok_or_else(|| format!("unclosed '{{{{' in '{template}'"))?;
+        let value = match after[..end].trim() {
+            "revision" => {
+                *uses_revision = true;
+                vars.revision
+            }
+            "name" => vars.name,
+            "namespace" => vars.namespace,
+            other => {
+                return Err(format!(
+                    "unknown variable '{other}' (supported: revision, name, namespace)"
+                ));
+            }
+        };
+        out.push_str(value);
+        rest = &after[end + 2..];
+    }
+    if rest.contains("}}") {
+        return Err(format!("unmatched '}}}}' in '{template}'"));
+    }
+    out.push_str(rest);
+    Ok(out)
 }
 
 fn tunnel_mode_schema(_g: &mut schemars::SchemaGenerator) -> Schema {
@@ -818,4 +977,116 @@ pub struct RestateDeploymentCondition {
 
     /// Type of condition (Ready, Progressing, Available)
     pub r#type: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const VARS: EndpointTemplateVars<'static> = EndpointTemplateVars {
+        revision: "engine-5b8c7d",
+        name: "engine",
+        namespace: "apps",
+    };
+
+    fn endpoint(url: Option<&str>, headers: &[(&str, &str)]) -> RegistrationEndpoint {
+        RegistrationEndpoint {
+            url: url.map(Into::into),
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    fn err(endpoint: RegistrationEndpoint) -> String {
+        endpoint.render(VARS).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn shared_url_with_revision_header() {
+        let rendered = endpoint(
+            Some("http://engine-gw.{{namespace}}.svc:8080/"),
+            &[("x-restate-revision", "{{ revision }}")],
+        )
+        .render(VARS)
+        .unwrap();
+        assert_eq!(
+            rendered.url.unwrap().as_str(),
+            "http://engine-gw.apps.svc:8080/"
+        );
+        assert_eq!(
+            rendered.headers,
+            BTreeMap::from([("x-restate-revision".into(), "engine-5b8c7d".into())])
+        );
+    }
+
+    #[test]
+    fn revision_in_path() {
+        let rendered = endpoint(
+            Some("http://gw.{{ namespace }}/{{ name }}/{{revision}}/"),
+            &[],
+        )
+        .render(VARS)
+        .unwrap();
+        assert_eq!(
+            rendered.url.unwrap().as_str(),
+            "http://gw.apps/engine/engine-5b8c7d/"
+        );
+        assert!(rendered.headers.is_empty());
+    }
+
+    #[test]
+    fn headers_only_keeps_the_service_url() {
+        let rendered = endpoint(None, &[("authorization", "Bearer abc")])
+            .render(VARS)
+            .unwrap();
+        assert_eq!(rendered.url, None);
+        assert_eq!(rendered.headers["authorization"], "Bearer abc");
+    }
+
+    #[test]
+    fn shared_url_without_revision_is_rejected() {
+        let message = err(endpoint(Some("http://gw/"), &[("x-ns", "{{ namespace }}")]));
+        assert!(message.contains("{{ revision }}"), "{message}");
+    }
+
+    #[test]
+    fn invalid_templates_are_rejected() {
+        assert!(err(endpoint(Some("http://gw/{{ hash }}/"), &[])).contains("unknown variable"));
+        assert!(err(endpoint(Some("http://gw/{{ revision /"), &[])).contains("unclosed"));
+        assert!(err(endpoint(Some("http://gw/}}/{{revision}}"), &[])).contains("unmatched"));
+        assert!(err(endpoint(Some("http://gw/{{revision}}/}}"), &[])).contains("unmatched"));
+    }
+
+    #[test]
+    fn invalid_urls_are_rejected() {
+        assert!(err(endpoint(Some("not a url {{revision}}"), &[])).contains("not a valid URL"));
+        assert!(err(endpoint(Some("ftp://gw/{{revision}}"), &[])).contains("http(s)"));
+    }
+
+    #[test]
+    fn invalid_headers_are_rejected() {
+        assert!(err(endpoint(None, &[("bad header", "x")])).contains("not a valid header name"));
+        assert!(err(endpoint(None, &[("x-a", "line\nbreak")])).contains("invalid value"));
+    }
+
+    #[test]
+    fn deserializes_from_camel_case_spec() {
+        let spec: RestateSpec = serde_json::from_value(serde_json::json!({
+            "register": { "cluster": "restate" },
+            "endpoint": {
+                "url": "http://gw/",
+                "headers": { "x-restate-revision": "{{ revision }}" }
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            spec.endpoint,
+            Some(endpoint(
+                Some("http://gw/"),
+                &[("x-restate-revision", "{{ revision }}")]
+            ))
+        );
+    }
 }
