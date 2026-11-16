@@ -1,11 +1,8 @@
-use kube::CustomResourceExt;
-
 fn main() {
     print!(
         "{}",
-        serde_yaml::to_string(
-            &restate_operator::resources::restatedeployments::RestateDeployment::crd()
-        )
-        .unwrap()
+        restate_operator::resources::crd_yaml::<
+            restate_operator::resources::restatedeployments::RestateDeployment,
+        >()
     )
 }

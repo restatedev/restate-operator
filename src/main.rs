@@ -1,11 +1,14 @@
-use actix_web::{
-    App, HttpRequest, HttpResponse, HttpServer, Responder, get, middleware, web::Data,
+use axum::{
+    Json, Router,
+    extract::State as AxumState,
+    http::{StatusCode, header},
+    response::IntoResponse,
+    routing::get,
 };
 use clap::Parser;
 use kube::Client;
-use prometheus::{Encoder, TextEncoder};
 
-use restate_operator::controllers::State;
+use restate_operator::controllers::{ShutdownSignals, State};
 pub use restate_operator::{self, telemetry};
 
 #[derive(Debug, clap::Parser)]
@@ -89,13 +92,14 @@ struct Arguments {
     operator_pod_uid: Option<String>,
 }
 
-#[get("/metrics")]
-async fn metrics(c: Data<State>, _req: HttpRequest) -> impl Responder {
-    let metrics = c.metrics();
-    let encoder = TextEncoder::new();
-    let mut buffer = vec![];
-    encoder.encode(&metrics, &mut buffer).unwrap();
-    HttpResponse::Ok().body(buffer)
+async fn metrics(AxumState(c): AxumState<State>) -> impl IntoResponse {
+    (
+        [(
+            header::CONTENT_TYPE,
+            "application/openmetrics-text; version=1.0.0; charset=utf-8",
+        )],
+        c.encode_metrics(),
+    )
 }
 
 /// Liveness: the process is up and the web server is serving.
@@ -103,29 +107,26 @@ async fn metrics(c: Data<State>, _req: HttpRequest) -> impl Responder {
 /// Deliberately says nothing about whether the controllers are reconciling — that is what
 /// `/ready` is for. Restarting the operator does not make a missing CRD appear, so a
 /// controller waiting for its CRD must not fail a liveness probe.
-#[get("/health")]
-async fn health(_: HttpRequest) -> impl Responder {
-    HttpResponse::Ok().json("healthy")
+async fn health() -> impl IntoResponse {
+    Json("healthy")
 }
 
 /// Readiness: every controller has its CRD and has started reconciling.
 ///
 /// Returns `503` with the list of controllers still waiting, so that an operator whose CRDs
 /// were never installed shows up as `NotReady` instead of sitting there looking healthy.
-#[get("/ready")]
-async fn ready(c: Data<State>, _req: HttpRequest) -> impl Responder {
+async fn ready(AxumState(c): AxumState<State>) -> impl IntoResponse {
     let report = c.readiness.report().await;
-    if report.ready {
-        HttpResponse::Ok().json(report)
+    let status = if report.ready {
+        StatusCode::OK
     } else {
-        HttpResponse::ServiceUnavailable().json(report)
-    }
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (status, Json(report))
 }
 
-#[get("/")]
-async fn index(c: Data<State>, _req: HttpRequest) -> impl Responder {
-    let d = c.diagnostics().await;
-    HttpResponse::Ok().json(&d)
+async fn index(AxumState(c): AxumState<State>) -> impl IntoResponse {
+    Json(c.diagnostics().await)
 }
 
 #[tokio::main]
@@ -163,9 +164,7 @@ async fn main() -> anyhow::Result<()> {
         .await
         .expect("failed to create kube Client");
 
-    let metric = restate_operator::Metrics::default()
-        .register(&state.registry)
-        .unwrap();
+    let metric = state.metrics.clone();
 
     // Start the controllers
     let cluster_controller = restate_operator::controllers::restatecluster::run(
@@ -194,26 +193,21 @@ async fn main() -> anyhow::Result<()> {
     tokio::pin!(crd_wait_reporter);
 
     // Start web server
-    let server = HttpServer::new(move || {
-        App::new()
-            .app_data(Data::new(state.clone()))
-            .wrap(
-                middleware::Logger::default()
-                    .exclude("/health")
-                    .exclude("/ready"),
-            )
-            .service(index)
-            .service(health)
-            .service(ready)
-            .service(metrics)
-    })
-    .bind("[::]:8080")?
-    .shutdown_timeout(5)
-    .run();
+    let app = Router::new()
+        .route("/", get(index))
+        .route("/health", get(health))
+        .route("/ready", get(ready))
+        .route("/metrics", get(metrics))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("[::]:8080").await?;
+    let mut signals = ShutdownSignals::new();
+    let server = axum::serve(listener, app)
+        .with_graceful_shutdown(async move { signals.recv().await })
+        .into_future();
 
     tokio::pin!(server);
 
-    // Both runtimes implements graceful shutdown, so poll until both are done
+    // The controllers and the web server each shut down gracefully on a signal, so poll until all are done
     let (_, _, _, _, server_result) = tokio::join!(
         cluster_controller,
         cloud_environment_controller,

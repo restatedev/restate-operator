@@ -130,4 +130,8 @@ test:
 test-e2e:
     cargo test --lib controllers::restatedeployment::e2e -- --ignored --nocapture --test-threads=1
 
-check: fmt lint
+# Checks dependencies against deny.toml (advisories, licenses, sources); requires cargo-deny
+deny:
+    cargo deny check
+
+check: fmt lint deny

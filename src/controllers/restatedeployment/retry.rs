@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 
 use crate::resources::restatedeployments::RestateDeploymentCondition;
 
@@ -45,7 +45,7 @@ pub(crate) fn admin_retry_after(failing_for: Duration) -> Duration {
 /// overestimate.
 pub(crate) fn admin_failure_retry_after(
     ready: Option<&RestateDeploymentCondition>,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Duration {
     let failing_for = ready
         .filter(|ready| {
@@ -55,7 +55,7 @@ pub(crate) fn admin_failure_retry_after(
                 .is_some_and(|reason| ADMIN_FAILURE_REASONS.contains(&reason))
         })
         .and_then(|ready| ready.last_transition_time.as_ref())
-        .and_then(|since| (now - since.0).to_std().ok())
+        .and_then(|since| Duration::try_from(now.duration_since(since.0)).ok())
         .unwrap_or_default();
 
     admin_retry_after(failing_for)
@@ -68,15 +68,14 @@ pub(crate) fn other_failure_retry_after() -> Duration {
 
 /// When to re-check a healthy deployment: when its next drained version is due for
 /// removal, or after the routine poll otherwise.
-pub(crate) fn healthy_requeue_after(
-    next_removal: Option<DateTime<Utc>>,
-    now: DateTime<Utc>,
-) -> Duration {
+pub(crate) fn healthy_requeue_after(next_removal: Option<Timestamp>, now: Timestamp) -> Duration {
     let poll = jitter(HEALTHY_POLL);
 
     match next_removal {
-        // A removal already due converts to a negative duration, which `to_std` rejects.
-        Some(due) => (due - now).to_std().unwrap_or_default().min(poll),
+        // A removal already due gives a negative duration, which `Duration` rejects.
+        Some(due) => Duration::try_from(due.duration_since(now))
+            .unwrap_or_default()
+            .min(poll),
         None => poll,
     }
 }
@@ -91,9 +90,10 @@ fn jitter(interval: Duration) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jiff::SignedDuration;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
 
-    fn ready(reason: &str, since: DateTime<Utc>) -> RestateDeploymentCondition {
+    fn ready(reason: &str, since: Timestamp) -> RestateDeploymentCondition {
         RestateDeploymentCondition {
             last_transition_time: Some(Time(since)),
             message: None,
@@ -109,9 +109,9 @@ mod tests {
 
     #[test]
     fn retries_slow_down_the_longer_a_failure_lasts() {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let retry_after = |reason, failing_for_secs| {
-            let since = now - chrono::Duration::seconds(failing_for_secs);
+            let since = now - SignedDuration::from_secs(failing_for_secs);
             admin_failure_retry_after(Some(&ready(reason, since)), now)
         };
 
@@ -138,8 +138,8 @@ mod tests {
     /// missing Secret, say) put no load on the admin API.
     #[test]
     fn other_reasons_do_not_count_as_failing() {
-        let now = Utc::now();
-        let since = now - chrono::Duration::seconds(3600);
+        let now = Timestamp::now();
+        let since = now - SignedDuration::from_secs(3600);
 
         for reason in ["ReplicaSetPodNotReady", "FailedReconcile"] {
             assert!(within_jitter(
@@ -151,9 +151,9 @@ mod tests {
 
     #[test]
     fn healthy_poll_waits_for_the_next_removal_but_no_longer_than_the_poll() {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let removal_in =
-            |secs| healthy_requeue_after(Some(now + chrono::Duration::seconds(secs)), now);
+            |secs| healthy_requeue_after(Some(now + SignedDuration::from_secs(secs)), now);
 
         assert_eq!(removal_in(-10), Duration::ZERO);
         assert_eq!(removal_in(45), Duration::from_secs(45));
