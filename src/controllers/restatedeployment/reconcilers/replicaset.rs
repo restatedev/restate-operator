@@ -222,6 +222,24 @@ pub fn generate_pod_template_hash(
         hasher.write(b"use_http11");
     }
 
+    // The endpoint is part of a Restate deployment's identity, so changing it must mint a
+    // new revision. Folded in only when set, so existing deployments keep their hashes.
+    if let Some(endpoint) = rsd.spec.restate.endpoint.as_ref() {
+        hasher.write(b"endpoint");
+        let url = endpoint.url.as_deref().unwrap_or("");
+        let mut values = vec![url];
+        for (name, value) in &endpoint.headers {
+            values.push(name);
+            values.push(value);
+        }
+        hasher.write(&(endpoint.url.is_some() as u8).to_be_bytes());
+        for value in values {
+            // length-prefixed so distinct tuples can't concatenate identically
+            hasher.write(&(value.len() as u64).to_be_bytes());
+            hasher.write(value.as_bytes());
+        }
+    }
+
     // In-process tunnel mode injects these values into the pods and bakes the versioned
     // name into the registered URL, so changing any of them must mint a new revision.
     // Folded in only when the mode is set, so existing deployments keep their hashes.
@@ -598,7 +616,8 @@ pub async fn cleanup_old_replicasets(
 mod tests {
     use super::*;
     use crate::resources::restatedeployments::{
-        PodTemplateSpec, RestateAdminEndpoint, RestateDeploymentSpec, RestateSpec, TunnelMode,
+        PodTemplateSpec, RegistrationEndpoint, RestateAdminEndpoint, RestateDeploymentSpec,
+        RestateSpec, TunnelMode,
     };
     use serde_json::json;
 
@@ -625,6 +644,7 @@ mod tests {
                     },
                     service_path: None,
                     use_http11: None,
+                    endpoint: None,
                     tunnel_mode,
                     drain_delay_seconds: None,
                     delete_policy: None,
@@ -642,6 +662,48 @@ mod tests {
             signing_public_key: "publickeyv1_abc".into(),
             proxy_base_url: None,
         }
+    }
+
+    #[test]
+    fn hash_unchanged_without_endpoint() {
+        // Pinned: deployments that don't set spec.restate.endpoint must keep their
+        // hashes across operator upgrades.
+        let rsd = test_rsd(None);
+        let template = pod_template_annotation(&rsd);
+        assert_eq!(
+            generate_pod_template_hash(&rsd, &template, None),
+            "df6cbb66f6"
+        );
+    }
+
+    #[test]
+    fn hash_incorporates_endpoint() {
+        let mut rsd = test_rsd(None);
+        let template = pod_template_annotation(&rsd);
+        let without = generate_pod_template_hash(&rsd, &template, None);
+
+        rsd.spec.restate.endpoint = Some(RegistrationEndpoint::default());
+        let empty = generate_pod_template_hash(&rsd, &template, None);
+        assert_ne!(empty, without);
+
+        rsd.spec.restate.endpoint = Some(RegistrationEndpoint {
+            url: Some("http://gw/".into()),
+            headers: [("x-revision".to_string(), "{{ revision }}".to_string())].into(),
+        });
+        let with_url = generate_pod_template_hash(&rsd, &template, None);
+        assert_ne!(with_url, empty);
+
+        rsd.spec.restate.endpoint = Some(RegistrationEndpoint {
+            url: Some("http://other-gw/".into()),
+            headers: [("x-revision".to_string(), "{{ revision }}".to_string())].into(),
+        });
+        assert_ne!(generate_pod_template_hash(&rsd, &template, None), with_url);
+
+        rsd.spec.restate.endpoint = Some(RegistrationEndpoint {
+            url: Some("http://gw/".into()),
+            headers: [("x-version".to_string(), "{{ revision }}".to_string())].into(),
+        });
+        assert_ne!(generate_pod_template_hash(&rsd, &template, None), with_url);
     }
 
     #[test]

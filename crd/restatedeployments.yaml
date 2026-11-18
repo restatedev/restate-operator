@@ -215,6 +215,35 @@ spec:
                     minimum: 0.0
                     nullable: true
                     type: integer
+                  endpoint:
+                    description: |-
+                      Override where Restate reaches each version, e.g. an L7 proxy in front of the
+                      per-version Services. ReplicaSet mode only. The operator still creates the
+                      per-version Service, so the proxy can use it as a backend.
+
+                      `url` and header values are templates: `{{ revision }}` (the per-version Service
+                      name), `{{ name }}` and `{{ namespace }}`. Restate tells deployments apart by URL,
+                      so each version must either render a distinct URL, or carry `{{ revision }}` in a
+                      header listed in the Restate server's `admin.deployment-routing-headers`.
+                    nullable: true
+                    properties:
+                      headers:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          Extra headers Restate sends with every discovery and invocation request to this
+                          version (Restate's `additional_headers`). Values are templates.
+                        type: object
+                      url:
+                        description: |-
+                          URL template to register instead of the per-version Service URL, e.g.
+                          `http://my-gateway.my-namespace.svc:80/` or `http://my-gateway/{{ revision }}/`.
+                          When unset, the per-version Service URL (plus `servicePath`) is used. When set, it
+                          must reference `{{ revision }}` in the URL or in a header value, and `servicePath`
+                          must not be set.
+                        nullable: true
+                        type: string
+                    type: object
                   register:
                     description: The location of the Restate Admin API to register this deployment against
                     oneOf:
@@ -382,6 +411,12 @@ spec:
             x-kubernetes-validations:
             - message: spec.autoscaling is only supported in replicaset mode (not knative)
               rule: '!has(self.autoscaling) || !has(self.deploymentMode) || self.deploymentMode != ''knative'''
+            - message: spec.restate.endpoint is only supported in replicaset mode (not knative)
+              rule: '!has(self.restate.endpoint) || !has(self.deploymentMode) || self.deploymentMode != ''knative'''
+            - message: 'spec.restate.endpoint is not supported with tunnelMode: in-process'
+              rule: '!has(self.restate.endpoint) || !has(self.restate.tunnelMode) || self.restate.tunnelMode != ''in-process'''
+            - message: spec.restate.servicePath cannot be combined with spec.restate.endpoint.url; put the path in the url
+              rule: '!has(self.restate.endpoint) || !has(self.restate.endpoint.url) || !has(self.restate.servicePath)'
           status:
             description: |-
               Status of the RestateDeployment

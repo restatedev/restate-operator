@@ -562,6 +562,7 @@ This field contains Restate-specific configuration.
 | `servicePath` | `string` | Optional path to append to the Service url when registering with Restate. |
 | `useHttp11`  | `boolean` | Force the use of HTTP/1.1 when registering with Restate. Defaults to HTTP/2 if not specified. |
 | `tunnelMode` | `string` | How Restate Cloud reaches this deployment; only takes effect with `register.cloud` (`in-process` requires it, and is not supported in Knative mode). `external` (default): invocations are forwarded to the deployment's Service by the tunnel-client pods managed by the `RestateCloudEnvironment`. `in-process`: the pods hold their own outbound tunnel connections. See [In-process tunnels](#in-process-tunnels). |
+| `endpoint` | `object` | Optional. Register each version at a custom URL and/or with extra headers, e.g. to route through an L7 proxy. ReplicaSet mode only. See [Custom registration endpoint](#custom-registration-endpoint). |
 
 
 The `register` field must specify exactly one of `cluster`, `service`, or `url`.
@@ -581,6 +582,70 @@ The `register` field must specify exactly one of `cluster`, `service`, or `url`.
 | `namespace` | `string` | **Required**. The namespace of the service. |
 | `path` | `string` | An optional URL path to be prepended to admin API paths. Should not end with a `/`. |
 | `port` | `integer` | The port on the service that hosts the admin API. Defaults to 9070. |
+
+---
+
+#### Custom registration endpoint
+
+By default each version is registered at its own Service URL, e.g. `http://my-service-5b8c7d.my-namespace.svc.cluster.local:9080/`. A ClusterIP Service balances per connection, and Restate keeps long-lived HTTP/2 connections, so invocations can pile onto a few pods. `spec.restate.endpoint` lets you register each version through an L7 proxy you run instead (for example Envoy Gateway), which can balance per request. The operator still creates the per-version Service, so the proxy can use it as a backend, and it still handles draining and deregistration.
+
+| Field | Type | Description |
+|---|---|---|
+| `url` | `string` | URL template to register instead of the per-version Service URL. Cannot be combined with `servicePath`. |
+| `headers` | `object` | Extra headers Restate sends with every discovery and invocation request to this version. Values are templates. |
+
+Templates support `{{ revision }}` (the versioned name, which is also the per-version Service name), `{{ name }}` (the RestateDeployment name) and `{{ namespace }}`.
+
+Restate identifies a deployment by its URL, so each version must register at a distinct endpoint. There are two ways to do that:
+
+- Put `{{ revision }}` in the URL, e.g. `http://my-gateway.my-namespace.svc/{{ revision }}/`, and route by path. Needs no Restate configuration.
+- Use one URL and put `{{ revision }}` in a header, then list that header in the Restate server's `admin.deployment-routing-headers`. Without that setting Restate treats every version as the same deployment; the operator detects this and fails the reconcile instead of recording it.
+
+When `url` is set it must reference `{{ revision }}`, either in the URL or in a header. Setting only `headers` keeps the per-version Service URL.
+
+```yaml
+apiVersion: restate.dev/v1beta1
+kind: RestateDeployment
+metadata:
+  name: my-service
+  namespace: my-namespace
+spec:
+  # ...
+  restate:
+    register:
+      cluster: restate
+    endpoint:
+      url: http://my-gateway.my-namespace.svc:80/
+      headers:
+        x-restate-revision: "{{ revision }}"
+---
+# Restate server config (e.g. RestateCluster spec.config):
+# [admin]
+# deployment-routing-headers = ["x-restate-revision"]
+---
+# Envoy Gateway / Gateway API route for one version. One rule per live version, which
+# you (or a controller watching the operator's Services) keep in sync.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: my-service
+  namespace: my-namespace
+spec:
+  parentRefs:
+  - name: my-gateway
+  rules:
+  - matches:
+    - headers:
+      - name: x-restate-revision
+        value: my-service-5b8c7d
+    backendRefs:
+    - name: my-service-5b8c7d
+      port: 9080
+```
+
+Changing `endpoint` creates a new version, as changing `servicePath` does.
+
+The proxy must reach the pods with a protocol the SDK endpoint serves; most SDKs serve HTTP/2 cleartext (h2c) by default, so configure the backend accordingly or set `useHttp11`.
 
 ---
 
