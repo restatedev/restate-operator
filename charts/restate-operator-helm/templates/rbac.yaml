@@ -1,3 +1,5 @@
+{{- $manageNetworkPolicies := eq (include "controller.manageNetworkPolicies" .) "true" }}
+{{- $manageSecretProviderClasses := eq (include "controller.manageSecretProviderClasses" .) "true" }}
 {{- if .Values.serviceAccount.create }}
 ---
 # Scoped service account
@@ -52,13 +54,17 @@ rules:
       - configmaps
       - serviceaccounts
       - poddisruptionbudgets
+      {{- if $manageNetworkPolicies }}
       - networkpolicies
+      {{- end }}
       - statefulsets
       - persistentvolumeclaims
       - pods
       - jobs
       - securitygrouppolicies
+      {{- if $manageSecretProviderClasses }}
       - secretproviderclasses
+      {{- end }}
       - replicasets
       - replicasets/scale
     verbs:
@@ -72,24 +78,36 @@ rules:
       - batch
       - apps
       - policy
+      {{- if $manageNetworkPolicies }}
       - networking.k8s.io
+      {{- end }}
       - vpcresources.k8s.aws
+      {{- if $manageSecretProviderClasses }}
       - secrets-store.csi.x-k8s.io
+      {{- end }}
   - resources:
       - statefulsets
+      {{- if $manageNetworkPolicies }}
       - networkpolicies
+      {{- end }}
       - jobs
       - securitygrouppolicies
+      {{- if $manageSecretProviderClasses }}
       - secretproviderclasses
+      {{- end }}
       - replicasets
     verbs:
       - delete
     apiGroups:
       - batch
       - apps
+      {{- if $manageNetworkPolicies }}
       - networking.k8s.io
+      {{- end }}
       - vpcresources.k8s.aws
+      {{- if $manageSecretProviderClasses }}
       - secrets-store.csi.x-k8s.io
+      {{- end }}
   # Per-version autoscaling: the operator manages one HorizontalPodAutoscaler per
   # draining (non-latest) RestateDeployment version, and watches them (owns).
   - resources:

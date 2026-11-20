@@ -971,6 +971,8 @@ mod tests {
                 State::new(
                     None,
                     false,
+                    true,
+                    true,
                     "restate-operator".into(),
                     None,
                     None,

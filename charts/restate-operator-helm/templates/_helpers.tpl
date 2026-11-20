@@ -20,3 +20,14 @@ app: {{ include "controller.name" . }}
 {{- define "controller.tag" -}}
 {{- .Values.version | default .Chart.Version }}
 {{- end }}
+
+{{/*
+The optional-resource switches: "true" unless the value is explicitly false.
+*/}}
+{{- define "controller.manageNetworkPolicies" -}}
+{{- ne (toString .Values.manageNetworkPolicies) "false" }}
+{{- end }}
+
+{{- define "controller.manageSecretProviderClasses" -}}
+{{- ne (toString .Values.manageSecretProviderClasses) "false" }}
+{{- end }}
