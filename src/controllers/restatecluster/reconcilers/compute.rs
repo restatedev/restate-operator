@@ -10,9 +10,9 @@ use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
     ConfigMap, ConfigMapVolumeSource, Container, ContainerPort, EmptyDirVolumeSource, EnvVar,
     EnvVarSource, HTTPGetAction, KeyToPath, ObjectFieldSelector, PersistentVolumeClaim,
-    PersistentVolumeClaimSpec, Pod, PodSecurityContext, PodSpec, PodTemplateSpec, Probe,
-    SeccompProfile, SecretVolumeSource, SecurityContext, Service, ServiceAccount, ServicePort,
-    ServiceSpec, Toleration, Volume, VolumeMount, VolumeResourceRequirements,
+    PersistentVolumeClaimSpec, Pod, PodSpec, PodTemplateSpec, Probe, SecretVolumeSource, Service,
+    ServiceAccount, ServicePort, ServiceSpec, Toleration, Volume, VolumeMount,
+    VolumeResourceRequirements,
 };
 use k8s_openapi::api::policy::v1::{PodDisruptionBudget, PodDisruptionBudgetSpec};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
@@ -31,6 +31,7 @@ use tracing::{debug, error, trace, warn};
 use crate::Error;
 use crate::controllers::UPDATE_STRATEGY_ANNOTATION;
 use crate::controllers::restatecluster::controller::Context;
+use crate::controllers::{restricted_container_security_context, restricted_pod_security_context};
 use crate::resources::iampolicymembers::{
     IAMPolicyMember, IAMPolicyMemberResourceRef, IAMPolicyMemberSpec,
 };
@@ -359,10 +360,7 @@ fn trusted_ca_init_container(
         image: Some(canary_image.into()),
         command: Some(vec!["sh".into(), "-c".into(), cat_command]),
         volume_mounts: Some(init_volume_mounts),
-        security_context: Some(SecurityContext {
-            allow_privilege_escalation: Some(false),
-            ..Default::default()
-        }),
+        security_context: Some(restricted_container_security_context()),
         ..Default::default()
     };
 
@@ -593,25 +591,11 @@ fn restate_statefulset(
                             ..Default::default()
                         }),
                         resources: spec.compute.resources.clone(),
-                        security_context: Some(SecurityContext {
-                            read_only_root_filesystem: Some(true),
-                            allow_privilege_escalation: Some(false),
-                            ..Default::default()
-                        }),
+                        security_context: Some(restricted_container_security_context()),
                         volume_mounts: Some(volume_mounts),
                         ..Default::default()
                     }],
-                    security_context: Some(PodSecurityContext {
-                        run_as_user: Some(1000),
-                        run_as_group: Some(3000),
-                        fs_group: Some(2000),
-                        fs_group_change_policy: Some("OnRootMismatch".into()),
-                        seccomp_profile: Some(SeccompProfile {
-                            type_: "RuntimeDefault".into(),
-                            localhost_profile: None,
-                        }),
-                        ..Default::default()
-                    }),
+                    security_context: Some(restricted_pod_security_context()),
                     service_account_name: Some("restate".into()),
                     termination_grace_period_seconds: Some(
                         spec.compute.termination_grace_period_seconds.unwrap_or(60),
@@ -1157,8 +1141,10 @@ fn canary_job_spec(
                         name: "canary".into(),
                         image: Some(config.image.clone()),
                         command: Some(config.command.clone()),
+                        security_context: Some(restricted_container_security_context()),
                         ..Default::default()
                     }],
+                    security_context: Some(restricted_pod_security_context()),
                     tolerations: tolerations.cloned(),
                     restart_policy: Some("Never".into()),
                     ..Default::default()
@@ -1227,8 +1213,7 @@ async fn run_canary_job(
 
             return Err(Error::NotReady {
                 reason: format!("{}CanaryPending", config.reason_prefix),
-                message: "Canary Job has not yet succeeded; recreated Job after tolerations change"
-                    .into(),
+                message: "Canary Job has not yet succeeded; recreated Job after spec change".into(),
                 requeue_after: None,
             });
         }
@@ -1838,6 +1823,29 @@ mod tests {
 
     fn pod_spec(ss: &StatefulSet) -> &PodSpec {
         ss.spec.as_ref().unwrap().template.spec.as_ref().unwrap()
+    }
+
+    #[test]
+    fn pod_satisfies_restricted_pod_security() {
+        let ss = statefulset_for_compute(RestateClusterCompute {
+            image: "restate".into(),
+            ..Default::default()
+        });
+        let pod = pod_spec(&ss);
+
+        let pod_sc = pod.security_context.as_ref().unwrap();
+        assert_eq!(pod_sc.run_as_non_root, Some(true));
+        assert_eq!(
+            pod_sc.seccomp_profile.as_ref().unwrap().type_,
+            "RuntimeDefault"
+        );
+
+        let sc = pod.containers[0].security_context.as_ref().unwrap();
+        assert_eq!(sc.allow_privilege_escalation, Some(false));
+        assert_eq!(
+            sc.capabilities.as_ref().unwrap().drop,
+            Some(vec!["ALL".to_string()])
+        );
     }
 
     #[test]
@@ -2533,6 +2541,21 @@ mod tests {
         assert_eq!(
             container.command.as_ref().unwrap(),
             &vec!["echo".to_string(), "hello".to_string()]
+        );
+
+        let pod_sc = pod_spec.security_context.as_ref().unwrap();
+        assert_eq!(pod_sc.run_as_non_root, Some(true));
+        assert_eq!(pod_sc.run_as_user, Some(1000));
+        assert_eq!(
+            pod_sc.seccomp_profile.as_ref().unwrap().type_,
+            "RuntimeDefault"
+        );
+
+        let sc = container.security_context.as_ref().unwrap();
+        assert_eq!(sc.allow_privilege_escalation, Some(false));
+        assert_eq!(
+            sc.capabilities.as_ref().unwrap().drop,
+            Some(vec!["ALL".to_string()])
         );
     }
 
