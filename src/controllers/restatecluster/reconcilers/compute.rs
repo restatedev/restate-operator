@@ -9,10 +9,11 @@ use k8s_openapi::api::apps::v1::{
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
     ConfigMap, ConfigMapVolumeSource, Container, ContainerPort, EmptyDirVolumeSource, EnvVar,
-    EnvVarSource, HTTPGetAction, KeyToPath, ObjectFieldSelector, PersistentVolumeClaim,
-    PersistentVolumeClaimSpec, Pod, PodSecurityContext, PodSpec, PodTemplateSpec, Probe,
-    SeccompProfile, SecretVolumeSource, SecurityContext, Service, ServiceAccount, ServicePort,
-    ServiceSpec, Toleration, Volume, VolumeMount, VolumeResourceRequirements,
+    EnvVarSource, HTTPGetAction, KeyToPath, LocalObjectReference, ObjectFieldSelector,
+    PersistentVolumeClaim, PersistentVolumeClaimSpec, Pod, PodSecurityContext, PodSpec,
+    PodTemplateSpec, Probe, SeccompProfile, SecretVolumeSource, SecurityContext, Service,
+    ServiceAccount, ServicePort, ServiceSpec, Toleration, Volume, VolumeMount,
+    VolumeResourceRequirements,
 };
 use k8s_openapi::api::policy::v1::{PodDisruptionBudget, PodDisruptionBudgetSpec};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
@@ -787,6 +788,7 @@ pub async fn reconcile_compute(
                 name,
                 base_metadata,
                 spec.compute.tolerations.as_ref(),
+                spec.compute.image_pull_secrets.as_ref(),
                 &job_api,
                 &pod_api,
                 &ctx.canary_image,
@@ -904,6 +906,7 @@ pub async fn reconcile_compute(
                 name,
                 base_metadata,
                 spec.compute.tolerations.as_ref(),
+                spec.compute.image_pull_secrets.as_ref(),
                 &job_api,
                 &ctx.canary_image,
             )
@@ -1133,6 +1136,7 @@ struct CanaryConfig {
 fn canary_job_spec(
     base_metadata: &ObjectMeta,
     tolerations: Option<&Vec<Toleration>>,
+    image_pull_secrets: Option<&Vec<LocalObjectReference>>,
     config: &CanaryConfig,
 ) -> Job {
     let mut metadata = object_meta(base_metadata, config.name);
@@ -1160,6 +1164,7 @@ fn canary_job_spec(
                         ..Default::default()
                     }],
                     tolerations: tolerations.cloned(),
+                    image_pull_secrets: image_pull_secrets.cloned(),
                     restart_policy: Some("Never".into()),
                     ..Default::default()
                 }),
@@ -1206,12 +1211,13 @@ async fn run_canary_job(
     namespace: &str,
     base_metadata: &ObjectMeta,
     tolerations: Option<&Vec<Toleration>>,
+    image_pull_secrets: Option<&Vec<LocalObjectReference>>,
     job_api: &Api<Job>,
     config: &CanaryConfig,
 ) -> Result<(CanaryResult, Job), Error> {
     let name = config.name;
     let params: PatchParams = PatchParams::apply("restate-operator").force();
-    let job = canary_job_spec(base_metadata, tolerations, config);
+    let job = canary_job_spec(base_metadata, tolerations, image_pull_secrets, config);
 
     debug!("Applying canary Job {name} in namespace {namespace}");
 
@@ -1227,8 +1233,9 @@ async fn run_canary_job(
 
             return Err(Error::NotReady {
                 reason: format!("{}CanaryPending", config.reason_prefix),
-                message: "Canary Job has not yet succeeded; recreated Job after tolerations change"
-                    .into(),
+                message:
+                    "Canary Job has not yet succeeded; recreated Job after its pod template changed"
+                        .into(),
                 requeue_after: None,
             });
         }
@@ -1261,6 +1268,7 @@ async fn check_pia(
     namespace: &str,
     base_metadata: &ObjectMeta,
     tolerations: Option<&Vec<Toleration>>,
+    image_pull_secrets: Option<&Vec<LocalObjectReference>>,
     job_api: &Api<Job>,
     pod_api: &Api<Pod>,
     canary_image: &str,
@@ -1279,8 +1287,15 @@ async fn check_pia(
         pending_message: "Canary Job has not yet succeeded; PIA webhook may need to catch up",
     };
 
-    let (result, job) =
-        run_canary_job(namespace, base_metadata, tolerations, job_api, &config).await?;
+    let (result, job) = run_canary_job(
+        namespace,
+        base_metadata,
+        tolerations,
+        image_pull_secrets,
+        job_api,
+        &config,
+    )
+    .await?;
     match result {
         CanaryResult::Complete => return Ok(()),
         CanaryResult::Failed => unreachable!("run_canary_job returns Err for Failed"),
@@ -1503,6 +1518,7 @@ async fn check_workload_identity(
     namespace: &str,
     base_metadata: &ObjectMeta,
     tolerations: Option<&Vec<Toleration>>,
+    image_pull_secrets: Option<&Vec<LocalObjectReference>>,
     job_api: &Api<Job>,
     canary_image: &str,
 ) -> Result<(), Error> {
@@ -1523,8 +1539,15 @@ async fn check_workload_identity(
         pending_message: "Canary Job has not yet succeeded; Workload Identity may need to propagate",
     };
 
-    let (result, _) =
-        run_canary_job(namespace, base_metadata, tolerations, job_api, &config).await?;
+    let (result, _) = run_canary_job(
+        namespace,
+        base_metadata,
+        tolerations,
+        image_pull_secrets,
+        job_api,
+        &config,
+    )
+    .await?;
     match result {
         CanaryResult::Complete => Ok(()),
         CanaryResult::Failed => unreachable!("run_canary_job returns Err for Failed"),
@@ -2484,6 +2507,7 @@ mod tests {
                 "default",
                 &test_base_metadata(),
                 None,
+                None,
                 &Api::namespaced(client.clone(), "default"),
                 &Api::namespaced(client, "default"),
                 "alpine:3.21",
@@ -2512,7 +2536,7 @@ mod tests {
             failure_message: "test failed",
             pending_message: "test pending",
         };
-        let job = canary_job_spec(&test_base_metadata(), None, &config);
+        let job = canary_job_spec(&test_base_metadata(), None, None, &config);
 
         let spec = job.spec.unwrap();
         assert_eq!(spec.backoff_limit, Some(1));
@@ -2546,7 +2570,7 @@ mod tests {
             failure_message: "",
             pending_message: "",
         };
-        let job = canary_job_spec(&test_base_metadata(), None, &config);
+        let job = canary_job_spec(&test_base_metadata(), None, None, &config);
 
         assert_eq!(
             job.metadata
@@ -2573,10 +2597,38 @@ mod tests {
             failure_message: "",
             pending_message: "",
         };
-        let job = canary_job_spec(&test_base_metadata(), Some(&tolerations), &config);
+        let job = canary_job_spec(&test_base_metadata(), Some(&tolerations), None, &config);
 
         let pod_spec = job.spec.unwrap().template.spec.unwrap();
         assert_eq!(pod_spec.tolerations.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_canary_job_spec_image_pull_secrets() {
+        let config = CanaryConfig {
+            name: "test-canary",
+            image: "private-registry/alpine:3.21".into(),
+            command: vec!["true".into()],
+            reason_prefix: "Test",
+            failure_message: "",
+            pending_message: "",
+        };
+        let secrets = vec![
+            LocalObjectReference {
+                name: "registry-creds".into(),
+            },
+            LocalObjectReference {
+                name: "mirror-creds".into(),
+            },
+        ];
+
+        let job = canary_job_spec(&test_base_metadata(), None, Some(&secrets), &config);
+        let pod_spec = job.spec.unwrap().template.spec.unwrap();
+        assert_eq!(pod_spec.image_pull_secrets, Some(secrets));
+
+        let job = canary_job_spec(&test_base_metadata(), None, None, &config);
+        let pod_spec = job.spec.unwrap().template.spec.unwrap();
+        assert_eq!(pod_spec.image_pull_secrets, None);
     }
 
     #[test]
