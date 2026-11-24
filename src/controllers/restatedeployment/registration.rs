@@ -8,7 +8,7 @@
 //! rollback onto a version that still held a pinned invocation read as "already handled"
 //! and leave the newer version serving traffic.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use kube::runtime::reflector::Store;
 use kube::{Resource, ResourceExt};
@@ -162,6 +162,43 @@ where
         .collect()
 }
 
+/// The name of a versioned object owned by this RestateDeployment, other than `except_name`,
+/// that has `deployment_id` recorded. Used to catch Restate returning another version's
+/// deployment for an endpoint that does not distinguish versions.
+pub(super) fn version_holding_deployment_id<K>(
+    store: &Store<K>,
+    namespace: &str,
+    rsd_uid: &str,
+    deployment_id: &str,
+    except_name: &str,
+) -> Option<String>
+where
+    K: Resource + Clone + 'static,
+    K::DynamicType: std::hash::Hash + Eq + Clone + Default,
+{
+    store
+        .state()
+        .into_iter()
+        .filter(|obj| {
+            let obj_namespace = match obj.meta().namespace.as_deref() {
+                Some("") | None => "default",
+                Some(ns) => ns,
+            };
+            obj_namespace == namespace
+                && obj.name_any() != except_name
+                && obj.owner_references().iter().any(|reference| {
+                    reference.uid == rsd_uid
+                        && reference.kind == <RestateDeployment as Resource>::kind(&())
+                })
+                && obj
+                    .annotations()
+                    .get(RESTATE_DEPLOYMENT_ID_ANNOTATION)
+                    .is_some_and(|id| id == deployment_id)
+        })
+        .map(|obj| obj.name_any())
+        .min()
+}
+
 /// Whether this RestateDeployment owns any versioned object other than `except_name` in the
 /// namespace — i.e. whether a previous version exists that cleanup might still need to drain.
 /// Read from the already-synced reflector cache, so it costs no admin call and mirrors the
@@ -228,6 +265,7 @@ pub(super) async fn register_deployment(
     ctx: &Context,
     rsd: &RestateDeployment,
     service_endpoint: &url::Url,
+    additional_headers: &BTreeMap<String, String>,
     use_http11: Option<bool>,
     overwrite: Overwrite,
 ) -> Result<RegisteredDeployment> {
@@ -249,6 +287,11 @@ pub(super) async fn register_deployment(
 
     if let Some(use_http11) = use_http11 {
         payload["use_http_11"] = serde_json::Value::Bool(use_http11);
+    }
+
+    // Only sent when configured, so the default request body is unchanged.
+    if !additional_headers.is_empty() {
+        payload["additional_headers"] = serde_json::json!(additional_headers);
     }
 
     let resp = ctx
@@ -589,6 +632,42 @@ mod tests {
             }
             writer.apply_watcher_event(&watcher::Event::InitDone);
             (reader, Box::new(writer))
+        }
+
+        fn annotated(mut rs: ReplicaSet, deployment_id: &str) -> ReplicaSet {
+            rs.metadata.annotations = Some(
+                [(
+                    super::super::RESTATE_DEPLOYMENT_ID_ANNOTATION.to_string(),
+                    deployment_id.to_string(),
+                )]
+                .into(),
+            );
+            rs
+        }
+
+        #[test]
+        fn finds_the_other_version_holding_a_deployment_id() {
+            use super::super::version_holding_deployment_id;
+            let (store, _writer) = store_of(vec![
+                annotated(replica_set("rd-current", NS, Some(UID)), "dp_new"),
+                annotated(replica_set("rd-old", NS, Some(UID)), "dp_old"),
+                // same id, but not ours or not in this namespace
+                annotated(replica_set("foreign", NS, Some("other-uid")), "dp_new"),
+                annotated(replica_set("rd-elsewhere", "other-ns", Some(UID)), "dp_new"),
+            ]);
+            assert_eq!(
+                version_holding_deployment_id(&store, NS, UID, "dp_old", "rd-current"),
+                Some("rd-old".into())
+            );
+            // the current version re-registering its own id (a promotion) is not a clash
+            assert_eq!(
+                version_holding_deployment_id(&store, NS, UID, "dp_new", "rd-current"),
+                None
+            );
+            assert_eq!(
+                version_holding_deployment_id(&store, NS, UID, "dp_unknown", "rd-current"),
+                None
+            );
         }
 
         #[test]
