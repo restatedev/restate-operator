@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
 
+pub mod azure;
 pub mod compute;
 pub mod network_policies;
 pub mod provisioning;

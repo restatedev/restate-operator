@@ -197,6 +197,7 @@ This feature is particularly useful for Raft-based metadata clusters where manua
 | `serviceAccountAnnotations` | `object` | Annotations to add to the `ServiceAccount`. |
 | `serviceAnnotations`| `object` | Annotations to add to the `Service`. |
 | `awsPodIdentityAssociationRoleArn` | `string` | **Use this to grant your Restate cluster fine-grained access to other AWS resources (like S3) without managing static credentials.** Creates a `PodIdentityAssociation` to grant the cluster an IAM role. Requires the ACK EKS controller. |
+| `azureWorkloadIdentity` | `boolean` | **Use this on AKS to give your Restate cluster its own Azure managed identity with access to its own prefix of a snapshot container.** Creates a `UserAssignedIdentity`, a `FederatedIdentityCredential` and a `RoleAssignment` through Azure Service Operator, and sets the `azure.workload.identity/client-id` annotation and the `azure.workload.identity/use` pod label. Requires the operator to be configured with `azureWorkloadIdentity` in the Helm chart. |
 | `awsPodSecurityGroups` | `array` | **Use this to isolate your Restate cluster within specific AWS Security Groups for enhanced network control and auditing.** Creates a `SecurityGroupPolicy` to place pods into these security groups. Requires the Security Groups for Pods CRD. |
 | `requestSigningPrivateKey` | `object` | Configures a private key to sign outbound requests from this cluster. Can be sourced from a `secret` or a CSI `secretProvider`. See details below. |
 | `trustedCaCerts` | `array` | Optional list of Secrets containing trusted CA certificates. Each cert is appended to the system CA bundle via an init container. See details below. |
@@ -829,13 +830,50 @@ cluster name, by setting `awsPodIdentityAssociationCluster` in the helm chart. I
 be installed or the operator will fail to start. Then, you may provide `awsPodIdentityAssociationRoleArn` in
 the `RestateCluster` spec.
 
+### Azure Workload Identity
+
+On AKS, the operator can give each `RestateCluster` its own
+[Azure managed identity](https://learn.microsoft.com/en-us/entra/identity/managed-identities-azure-resources/overview)
+through [Azure Service Operator](https://azure.github.io/azure-service-operator/) (ASO). A managed identity accepts at
+most 20 federated credentials, so one identity per cluster avoids a shared identity running out, and it lets each cluster
+reach only its own blobs.
+
+To enable it, install ASO (with the `managedidentity` and `authorization` resources) and the AKS Workload Identity
+webhook, then set all four values of `azureWorkloadIdentity` in the Helm chart:
+
+```yaml
+azureWorkloadIdentity:
+  identityResourceGroupId: /subscriptions/<id>/resourceGroups/<name>
+  location: swedencentral
+  oidcIssuer: https://<region>.oic.prod-aks.azure.com/<tenant>/<cluster>/
+  storageContainerId: /subscriptions/<id>/resourceGroups/<name>/providers/Microsoft.Storage/storageAccounts/<account>/blobServices/default/containers/<container>
+```
+
+The resource group must hold only the identities of the clusters, because the rights ASO needs there allow adding a
+credential to any identity in it. Then set `azureWorkloadIdentity: true` under `spec.security` of a `RestateCluster`.
+The operator creates these objects in the cluster's namespace:
+
+| Object | Name | Purpose |
+|---|---|---|
+| `UserAssignedIdentity` | `restate` | The identity, named `<namespace>-restate` in Azure. ASO writes its client ID and principal ID to the ConfigMap `restate-azure-identity`. |
+| `FederatedIdentityCredential` | `restate` | Trusts the `restate` ServiceAccount of the namespace for the AKS OIDC issuer. |
+| `RoleAssignment` | `restate-snapshots` | Storage Blob Data Contributor on the container, with a condition that limits reads, writes, deletes and listings to blobs under `<namespace>/`. |
+
+Once the three objects are Ready, the operator sets the client ID on the ServiceAccount, labels the pods, and runs a
+canary Job that exchanges the federated token and lists the cluster's prefix. A new role assignment can take up to about
+ten minutes to take effect, so the canary retries for about eleven minutes. The cluster stays `NotReady` with the reason
+`AzureIdentityNotReady` or `AzureWorkloadIdentityCanaryPending` until then, and the StatefulSet is only applied after the
+canary succeeds. Your pods need `AZURE_STORAGE_ACCOUNT_NAME` and, for snapshots, a destination such as
+`az://<container>/<namespace>/snapshots`. Deleting the `RestateCluster`, or removing the field, deletes the three
+objects and ASO removes the identity from Azure.
+
 ### Canary Image
 
-Both EKS Pod Identity and GCP Workload Identity use a canary job to validate that credentials are available before
+EKS Pod Identity, GCP Workload Identity and Azure Workload Identity use a canary job to validate that credentials are available before
 starting the Restate cluster. The trusted CA certs feature also uses this image for its init container.
 By default, this uses the `alpine:3.21` image from Docker Hub. The image must include a
 CA certificate bundle at `/etc/ssl/certs/ca-certificates.crt` (required by the trusted CA
-certs init container) and provide `cat`, `grep` and `wget`. In environments where nodes
+certs init container) and provide `cat`, `grep` and `wget`, plus `sed`, `date` and `sleep` for the Azure canary. In environments where nodes
 cannot pull from Docker Hub (e.g. air-gapped or restricted registries), you can override
 this with the `canaryImage` Helm value:
 

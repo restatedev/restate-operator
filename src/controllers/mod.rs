@@ -17,6 +17,7 @@ use tracing::{debug, info, warn};
 use url::Url;
 
 use crate::Metrics;
+use crate::controllers::restatecluster::AzureWorkloadIdentityConfig;
 use crate::resources::ReconciliationState;
 
 pub mod restatecloudenvironment;
@@ -244,6 +245,8 @@ pub struct State {
     aws_pod_identity_association_cluster: Option<String>,
     /// If true, manage GCP Workload Identity via Config Connector IAMPolicyMember
     gcp_workload_identity: bool,
+    /// If set, manage Azure Workload Identity through Azure Service Operator
+    azure_workload_identity: Option<AzureWorkloadIdentityConfig>,
 
     /// Our namespace, needed for network policies and reading secrets
     operator_namespace: String,
@@ -273,6 +276,7 @@ impl State {
     pub fn new(
         aws_pod_identity_association_cluster: Option<String>,
         gcp_workload_identity: bool,
+        azure_workload_identity: Option<AzureWorkloadIdentityConfig>,
         operator_namespace: String,
         operator_label_name: Option<String>,
         operator_label_value: Option<String>,
@@ -297,6 +301,7 @@ impl State {
             registry: prometheus::Registry::default(),
             aws_pod_identity_association_cluster,
             gcp_workload_identity,
+            azure_workload_identity,
             operator_namespace,
             operator_label_name,
             operator_label_value,

@@ -3262,6 +3262,14 @@ spec:
                       type: string
                     nullable: true
                     type: array
+                  azureWorkloadIdentity:
+                    description: |-
+                      If true, and the operator is configured for Azure Workload Identity, create a managed identity for this
+                      cluster through Azure Service Operator (a UserAssignedIdentity, a FederatedIdentityCredential and a
+                      RoleAssignment limited to this cluster's prefix of the snapshot container) and give the Restate pod access to it.
+                      The operator sets the `azure.workload.identity/client-id` annotation on the ServiceAccount itself.
+                    nullable: true
+                    type: boolean
                   disableNetworkPolicies:
                     description: |-
                       If set, the operator will not create any network policies for this cluster.
@@ -3896,10 +3904,7 @@ spec:
                 nullable: true
                 type: boolean
               reconciliation:
-                description: |-
-                  What the operator is currently doing with this cluster: `Reconciling`, `Disabled`
-                  (suspended by the `restate.dev/reconcile: disabled` annotation), or
-                  `ResumingReconciliation` (the annotation has gone but the cluster is not ready yet).
+                description: What the operator is currently doing with this cluster.
                 enum:
                 - Reconciling
                 - Disabled

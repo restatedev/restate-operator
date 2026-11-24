@@ -213,6 +213,11 @@ pub struct RestateClusterSecurity {
     /// If set, create an AWS PodIdentityAssociation using the ACK CRD in order to give the Restate pod access to this role and
     /// allow the cluster to reach the Pod Identity agent.
     pub aws_pod_identity_association_role_arn: Option<String>,
+    /// If true, and the operator is configured for Azure Workload Identity, create a managed identity for this
+    /// cluster through Azure Service Operator (a UserAssignedIdentity, a FederatedIdentityCredential and a
+    /// RoleAssignment limited to this cluster's prefix of the snapshot container) and give the Restate pod access to it.
+    /// The operator sets the `azure.workload.identity/client-id` annotation on the ServiceAccount itself.
+    pub azure_workload_identity: Option<bool>,
     /// If set, create an AWS SecurityGroupPolicy CRD object to place the Restate pod into these security groups
     pub aws_pod_security_groups: Option<Vec<String>>,
     /// If set, the operator will not create any network policies for this cluster.

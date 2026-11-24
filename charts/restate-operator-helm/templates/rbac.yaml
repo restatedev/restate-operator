@@ -129,6 +129,31 @@ rules:
     apiGroups:
       - iam.cnrm.cloud.google.com
   {{- end }}
+  {{- if .Values.azureWorkloadIdentity }}
+  - resources:
+      - userassignedidentities
+      - federatedidentitycredentials
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - patch
+      - delete
+    apiGroups:
+      - managedidentity.azure.com
+  - resources:
+      - roleassignments
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - patch
+      - delete
+    apiGroups:
+      - authorization.azure.com
+  {{- end }}
   - resources:
       - configurations
       - routes

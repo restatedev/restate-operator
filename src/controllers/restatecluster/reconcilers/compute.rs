@@ -45,6 +45,7 @@ use crate::resources::securitygrouppolicies::{
     SecurityGroupPolicy, SecurityGroupPolicySecurityGroups, SecurityGroupPolicySpec,
 };
 
+use super::azure;
 use super::provisioning;
 use super::quantity_parser::QuantityParser;
 use super::{label_selector, mandatory_labels, object_meta};
@@ -52,6 +53,7 @@ use super::{label_selector, mandatory_labels, object_meta};
 fn restate_service_account(
     base_metadata: &ObjectMeta,
     annotations: Option<&BTreeMap<String, String>>,
+    azure_client_id: Option<&str>,
 ) -> ServiceAccount {
     let mut metadata = object_meta(base_metadata, "restate");
     if let Some(annotations) = annotations {
@@ -61,6 +63,13 @@ fn restate_service_account(
             }
             None => metadata.annotations = Some(annotations.clone()),
         }
+    }
+    // The operator's identity wins over a client id supplied in serviceAccountAnnotations
+    if let Some(client_id) = azure_client_id {
+        metadata
+            .annotations
+            .get_or_insert_with(Default::default)
+            .insert(azure::CLIENT_ID_ANNOTATION.into(), client_id.into());
     }
 
     ServiceAccount {
@@ -740,6 +749,33 @@ pub async fn reconcile_compute(
     let ipm_api: Api<IAMPolicyMember> = Api::namespaced(ctx.client.clone(), name);
     let pdb_api: Api<PodDisruptionBudget> = Api::namespaced(ctx.client.clone(), name);
 
+    // Azure Workload Identity through Azure Service Operator. The client id is needed on the
+    // ServiceAccount before any pod that uses it is created, so this runs before the
+    // ServiceAccount is applied.
+    let azure_client_id = match (
+        ctx.azure_workload_identity.as_ref(),
+        spec.security
+            .as_ref()
+            .and_then(|s| s.azure_workload_identity)
+            .unwrap_or(false),
+    ) {
+        (Some(azure_config), true) => {
+            Some(azure::reconcile_identity(&ctx.client, name, base_metadata, azure_config).await?)
+        }
+        (Some(_), false) => {
+            azure::delete_identity(&ctx.client, name).await?;
+            delete_job(name, &job_api, azure::CANARY_JOB_NAME).await?;
+            None
+        }
+        (None, true) => {
+            warn!(
+                "Ignoring azureWorkloadIdentity as the operator is not configured with the AZURE_WI_* settings"
+            );
+            None
+        }
+        (None, false) => None,
+    };
+
     apply_service_account(
         name,
         &svcacc_api,
@@ -748,6 +784,7 @@ pub async fn reconcile_compute(
             spec.security
                 .as_ref()
                 .and_then(|s| s.service_account_annotations.as_ref()),
+            azure_client_id.as_deref(),
         ),
     )
     .await?;
@@ -930,6 +967,28 @@ pub async fn reconcile_compute(
         (false, None) => {}
     }
 
+    if let (Some(azure_config), Some(azure_client_id)) = (
+        ctx.azure_workload_identity.as_ref(),
+        azure_client_id.as_ref(),
+    ) {
+        check_azure_workload_identity(
+            name,
+            base_metadata,
+            spec.compute.tolerations.as_ref(),
+            spec.compute.image_pull_secrets.as_ref(),
+            &job_api,
+            &ctx.canary_image,
+            azure_config,
+        )
+        .await?;
+
+        let pod_annotations = pod_annotations.get_or_insert_with(Default::default);
+        pod_annotations.insert(
+            "restate.dev/azure-workload-identity-client-id".into(),
+            azure_client_id.clone(),
+        );
+    }
+
     // Add pod annotation for trusted CA certs to trigger rollout on change
     if let Some(certs) = spec
         .security
@@ -998,7 +1057,7 @@ pub async fn reconcile_compute(
     .map(|strategy| serde_json::from_str::<StatefulSetUpdateStrategy>(&strategy))
     .transpose()?;
 
-    let stateful_set = restate_statefulset(
+    let mut stateful_set = restate_statefulset(
         base_metadata,
         spec,
         pod_annotations,
@@ -1006,6 +1065,9 @@ pub async fn reconcile_compute(
         cm_name,
         &ctx.canary_image,
     );
+    if azure_client_id.is_some() {
+        azure::use_workload_identity(&mut stateful_set);
+    }
     validate_pod_volumes(&stateful_set)?;
     let ss = match remembered_strategy {
         Some(update_strategy) => {
@@ -1130,6 +1192,11 @@ struct CanaryConfig {
     failure_message: &'static str,
     /// Human-readable description for pending state
     pending_message: &'static str,
+    /// Bounds scheduling, image pulls and the credential checks together; a canary that has to
+    /// wait for cloud-side propagation needs a longer budget than one that only reads a token
+    active_deadline_seconds: i64,
+    /// Labels for the canary pod, for example the one that makes a workload identity webhook act
+    pod_labels: Option<BTreeMap<String, String>>,
 }
 
 /// Build a canary Job spec for cloud credential validation.
@@ -1152,9 +1219,12 @@ fn canary_job_spec(
         spec: Some(JobSpec {
             backoff_limit: Some(1),
             // Bound scheduling, image pulls, and credential checks as well as failed attempts.
-            active_deadline_seconds: Some(300),
+            active_deadline_seconds: Some(config.active_deadline_seconds),
             template: PodTemplateSpec {
-                metadata: None,
+                metadata: config.pod_labels.clone().map(|labels| ObjectMeta {
+                    labels: Some(labels),
+                    ..Default::default()
+                }),
                 spec: Some(PodSpec {
                     service_account_name: Some("restate".into()),
                     containers: vec![Container {
@@ -1285,6 +1355,8 @@ async fn check_pia(
         reason_prefix: "PodIdentityAssociation",
         failure_message: "Canary pod did not receive Pod Identity credentials; PIA webhook may need to catch up",
         pending_message: "Canary Job has not yet succeeded; PIA webhook may need to catch up",
+        active_deadline_seconds: 300,
+        pod_labels: None,
     };
 
     let (result, job) = run_canary_job(
@@ -1537,6 +1609,8 @@ async fn check_workload_identity(
         reason_prefix: "WorkloadIdentity",
         failure_message: "Canary pod could not obtain a Workload Identity token from the GKE metadata server; check that Workload Identity is enabled and the IAM binding is correct",
         pending_message: "Canary Job has not yet succeeded; Workload Identity may need to propagate",
+        active_deadline_seconds: 300,
+        pod_labels: None,
     };
 
     let (result, _) = run_canary_job(
@@ -1555,6 +1629,46 @@ async fn check_workload_identity(
             reason: "WorkloadIdentityCanaryPending".into(),
             message: config.pending_message.into(),
             requeue_after: None,
+        }),
+    }
+}
+
+async fn check_azure_workload_identity(
+    namespace: &str,
+    base_metadata: &ObjectMeta,
+    tolerations: Option<&Vec<Toleration>>,
+    image_pull_secrets: Option<&Vec<LocalObjectReference>>,
+    job_api: &Api<Job>,
+    canary_image: &str,
+    azure_config: &azure::AzureWorkloadIdentityConfig,
+) -> Result<(), Error> {
+    let config = CanaryConfig {
+        name: azure::CANARY_JOB_NAME,
+        image: canary_image.into(),
+        command: azure::canary_command(namespace, &azure_config.storage_container),
+        reason_prefix: "AzureWorkloadIdentity",
+        failure_message: "Canary pod could not use its Azure Workload Identity to list its snapshot prefix after retrying for several minutes; check that the AKS Workload Identity webhook is installed, that the federated credential matches the cluster's OIDC issuer, and that the role assignment exists",
+        pending_message: "Canary Job has not yet succeeded; the federated token exchange or the new role assignment may still be taking effect in Azure, which can take up to about 10 minutes",
+        active_deadline_seconds: azure::CANARY_ACTIVE_DEADLINE_SECONDS,
+        pod_labels: Some(BTreeMap::from([(azure::USE_LABEL.into(), "true".into())])),
+    };
+
+    let (result, _) = run_canary_job(
+        namespace,
+        base_metadata,
+        tolerations,
+        image_pull_secrets,
+        job_api,
+        &config,
+    )
+    .await?;
+    match result {
+        CanaryResult::Complete => Ok(()),
+        CanaryResult::Failed => unreachable!("run_canary_job returns Err for Failed"),
+        CanaryResult::Pending => Err(Error::NotReady {
+            reason: "AzureWorkloadIdentityCanaryPending".into(),
+            message: config.pending_message.into(),
+            requeue_after: Some(Duration::from_secs(10)),
         }),
     }
 }
@@ -2535,6 +2649,8 @@ mod tests {
             reason_prefix: "Test",
             failure_message: "test failed",
             pending_message: "test pending",
+            active_deadline_seconds: 300,
+            pod_labels: None,
         };
         let job = canary_job_spec(&test_base_metadata(), None, None, &config);
 
@@ -2569,6 +2685,8 @@ mod tests {
             reason_prefix: "Test",
             failure_message: "",
             pending_message: "",
+            active_deadline_seconds: 300,
+            pod_labels: None,
         };
         let job = canary_job_spec(&test_base_metadata(), None, None, &config);
 
@@ -2596,6 +2714,8 @@ mod tests {
             reason_prefix: "Test",
             failure_message: "",
             pending_message: "",
+            active_deadline_seconds: 300,
+            pod_labels: None,
         };
         let job = canary_job_spec(&test_base_metadata(), Some(&tolerations), None, &config);
 
@@ -2612,6 +2732,8 @@ mod tests {
             reason_prefix: "Test",
             failure_message: "",
             pending_message: "",
+            active_deadline_seconds: 300,
+            pod_labels: None,
         };
         let secrets = vec![
             LocalObjectReference {
@@ -2800,5 +2922,65 @@ mod tests {
         assert!(tmpl.labels.unwrap().contains_key("app.kubernetes.io/name"));
         // Annotations should be None (no user, no base, no internal)
         assert!(tmpl.annotations.is_none());
+    }
+
+    #[test]
+    fn test_azure_workload_identity_wiring() {
+        // The operator's client id replaces one a user put in the annotations
+        let user = BTreeMap::from([
+            (
+                azure::CLIENT_ID_ANNOTATION.to_owned(),
+                "user-supplied".to_owned(),
+            ),
+            ("other".to_owned(), "kept".to_owned()),
+        ]);
+        let sa = restate_service_account(&test_base_metadata(), Some(&user), Some("operator-id"));
+        let annotations = sa.metadata.annotations.unwrap();
+        assert_eq!(annotations[azure::CLIENT_ID_ANNOTATION], "operator-id");
+        assert_eq!(annotations["other"], "kept");
+
+        // Without the feature a user's own annotation is left alone
+        let sa = restate_service_account(&test_base_metadata(), Some(&user), None);
+        assert_eq!(
+            sa.metadata.annotations.unwrap()[azure::CLIENT_ID_ANNOTATION],
+            "user-supplied"
+        );
+
+        // The webhook label reaches the StatefulSet's pods and the canary's pod, and the
+        // canary gets enough time to outlast role assignment propagation
+        let mut ss = statefulset_for_compute(RestateClusterCompute {
+            image: "restate".into(),
+            ..Default::default()
+        });
+        azure::use_workload_identity(&mut ss);
+        let labels = ss.spec.unwrap().template.metadata.unwrap().labels.unwrap();
+        assert_eq!(labels[azure::USE_LABEL], "true");
+        assert!(labels.contains_key("app.kubernetes.io/name"));
+
+        let config = CanaryConfig {
+            name: azure::CANARY_JOB_NAME,
+            image: "alpine:3.21".into(),
+            command: vec![],
+            reason_prefix: "AzureWorkloadIdentity",
+            failure_message: "",
+            pending_message: "",
+            active_deadline_seconds: azure::CANARY_ACTIVE_DEADLINE_SECONDS,
+            pod_labels: Some(BTreeMap::from([(azure::USE_LABEL.into(), "true".into())])),
+        };
+        let spec = canary_job_spec(&test_base_metadata(), None, None, &config)
+            .spec
+            .unwrap();
+        assert_eq!(
+            spec.active_deadline_seconds,
+            Some(azure::CANARY_ACTIVE_DEADLINE_SECONDS)
+        );
+        assert_eq!(
+            spec.template.metadata.unwrap().labels.unwrap()[azure::USE_LABEL],
+            "true"
+        );
+        assert_eq!(
+            spec.template.spec.unwrap().service_account_name.as_deref(),
+            Some("restate")
+        );
     }
 }
