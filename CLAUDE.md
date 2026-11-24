@@ -266,7 +266,7 @@ kubectl delete pod -n restate-operator -l app=restate-operator
 - `awsPodIdentityAssociationCluster` - Enables EKS Pod Identity support
 - `gcpWorkloadIdentity` - Enables GCP Workload Identity via Config Connector
 - `azureWorkloadIdentity` - Enables Azure Workload Identity via Azure Service Operator; takes `identityResourceGroupId`, `location`, `oidcIssuer`, `storageContainerId` and `roleDefinitionId`, all required
-- `canaryImage` - Container image for canary jobs and the trusted CA certs init container (default: `alpine:3.21`); must provide `sh`, `cat`, `grep`, `sed`, `date`, `sleep`, `wget` and a CA bundle at `/etc/ssl/certs/ca-certificates.crt`; the Azure canary also needs `curl` and runs `apk add curl` when it is missing
+- `canaryImage` - Container image for canary jobs and the trusted CA certs init container (default: `alpine:3.21`); must provide `sh`, `cat`, `grep`, `sed`, `date`, `sleep`, `wget` and a CA bundle at `/etc/ssl/certs/ca-certificates.crt`; the Azure canary also needs `curl`, which alpine does not include
 - `operatorNamespace` - Namespace where operator runs
 - `operatorLabelName/Value` - Labels for network policy selectors
 

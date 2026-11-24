@@ -320,8 +320,8 @@ pub fn role_assignment_condition(ns: &str) -> String {
 /// each one needs proving. It retries, because a new role assignment can take several minutes to
 /// take effect, and it fails closed: every step must return the status it expects.
 ///
-/// busybox wget cannot send PUT or DELETE, so the script uses curl, and installs it with apk
-/// when the image lacks it. Every value interpolated into the script is validated at startup or
+/// busybox wget cannot send PUT or DELETE, so the script needs curl in the canary image. It
+/// installs nothing at run time, because a cluster may have no route to a package mirror. Every value interpolated into the script is validated at startup or
 /// is a Kubernetes name, a GUID or a storage name, so none of them can carry shell syntax.
 pub fn canary_command(
     ns: &str,
@@ -332,7 +332,8 @@ pub fn canary_command(
     const SCRIPT: &str = r##"
 # identity @CLIENT_ID@, role definition @ROLE@
 if ! command -v curl >/dev/null 2>&1; then
-  apk add -q --no-cache curl >/dev/null 2>&1 || { echo "the canary image needs curl, and installing it with apk failed" >&2; exit 1; }
+  echo "the canary image has no curl; set canaryImage to an image that provides it" >&2
+  exit 1
 fi
 if [ "$AZURE_CLIENT_ID" != "@CLIENT_ID@" ]; then
   echo "the pod's AZURE_CLIENT_ID is '$AZURE_CLIENT_ID', expected @CLIENT_ID@; the ServiceAccount annotation or the Workload Identity webhook is not applied" >&2

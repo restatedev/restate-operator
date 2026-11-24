@@ -872,8 +872,8 @@ in the cluster's namespace:
 
 Once the three objects are Ready for their current spec, the operator sets the client ID on the ServiceAccount, labels
 the pods, and runs a canary Job. The canary exchanges the federated token, lists the cluster's prefix, and writes and
-deletes a probe blob under it, so it proves every clause of the condition. It uses `curl`, and installs it with `apk` if
-the canary image has none. A new role assignment can take up to about ten minutes to take effect, so the canary retries
+deletes a probe blob under it, so it proves every clause of the condition. It uses `curl`, so on Azure the canary image
+must provide it, and the default `alpine:3.21` does not. A new role assignment can take up to about ten minutes to take effect, so the canary retries
 for about eleven minutes, and a failed attempt prints the Azure error in the canary pod's log. The cluster stays
 `NotReady` with the reason `AzureIdentityNotReady` or `AzureWorkloadIdentityCanaryPending` until then, and the
 StatefulSet is only applied after the canary succeeds. A cluster that is already running keeps its known identity
@@ -899,7 +899,7 @@ EKS Pod Identity, GCP Workload Identity and Azure Workload Identity use a canary
 starting the Restate cluster. The trusted CA certs feature also uses this image for its init container.
 By default, this uses the `alpine:3.21` image from Docker Hub. The image must include a
 CA certificate bundle at `/etc/ssl/certs/ca-certificates.crt` (required by the trusted CA
-certs init container) and provide `sh`, `cat`, `grep` and `wget`, plus `sed`, `date` and `sleep` for the Azure canary, which also needs `curl` and installs it with `apk` if it is missing. In environments where nodes
+certs init container) and provide `sh`, `cat`, `grep` and `wget`, plus `sed`, `date` and `sleep` for the Azure canary, which also needs `curl`. In environments where nodes
 cannot pull from Docker Hub (e.g. air-gapped or restricted registries), you can override
 this with the `canaryImage` Helm value:
 

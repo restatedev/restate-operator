@@ -41,7 +41,7 @@ gcpWorkloadIdentity: null
 #     used: it can delete the container, which the per-environment condition cannot prevent.
 azureWorkloadIdentity: null
 clusterDns: null # defaults to "cluster.local" in the operator binary
-canaryImage: null # defaults to "alpine:3.21"; image must provide sh, cat, grep, sed, date, sleep, wget and a CA bundle at /etc/ssl/certs/ca-certificates.crt (the Azure canary also needs curl, which it installs with apk if the image lacks it)
+canaryImage: null # defaults to "alpine:3.21"; image must provide sh, cat, grep, sed, date, sleep, wget and a CA bundle at /etc/ssl/certs/ca-certificates.crt (the Azure canary also needs curl, which alpine does not include)
 
 podSecurityContext:
   fsGroup: 2000
