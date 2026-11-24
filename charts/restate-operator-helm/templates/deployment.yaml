@@ -82,6 +82,18 @@ spec:
             - name: GCP_WORKLOAD_IDENTITY
               value: "true"
           {{- end }}
+          {{- with .Values.azureWorkloadIdentity }}
+            - name: AZURE_WI_IDENTITY_RESOURCE_GROUP_ID
+              value: {{ required "azureWorkloadIdentity.identityResourceGroupId is required" .identityResourceGroupId | quote }}
+            - name: AZURE_WI_LOCATION
+              value: {{ required "azureWorkloadIdentity.location is required" .location | quote }}
+            - name: AZURE_WI_OIDC_ISSUER
+              value: {{ required "azureWorkloadIdentity.oidcIssuer is required" .oidcIssuer | quote }}
+            - name: AZURE_WI_STORAGE_CONTAINER_ID
+              value: {{ required "azureWorkloadIdentity.storageContainerId is required" .storageContainerId | quote }}
+            - name: AZURE_WI_ROLE_DEFINITION_ID
+              value: {{ required "azureWorkloadIdentity.roleDefinitionId is required" .roleDefinitionId | quote }}
+          {{- end }}
           {{- if .Values.canaryImage }}
             - name: CANARY_IMAGE
               value: {{ .Values.canaryImage }}

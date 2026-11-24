@@ -40,6 +40,9 @@ use crate::controllers::{
     wait_for_api_groups, wait_for_crd,
 };
 use crate::resources::ReconciliationState;
+use crate::resources::azureidentities::{
+    FederatedIdentityCredential, RoleAssignment, UserAssignedIdentity,
+};
 use crate::resources::iampolicymembers::IAMPolicyMember;
 use crate::resources::podidentityassociations::PodIdentityAssociation;
 use crate::resources::restateclusters::{
@@ -49,6 +52,9 @@ use crate::resources::secretproviderclasses::SecretProviderClass;
 use crate::resources::securitygrouppolicies::SecurityGroupPolicy;
 use crate::{Error, Metrics, Result, telemetry};
 
+use super::reconcilers::azure::{
+    AzureWorkloadIdentityConfig, CANARY_JOB_NAME as AZURE_CANARY_JOB_NAME,
+};
 use super::reconcilers::compute::reconcile_compute;
 use super::reconcilers::network_policies::reconcile_network_policies;
 use super::reconcilers::object_meta;
@@ -79,6 +85,8 @@ pub(super) struct Context {
     pub secret_provider_class_installed: bool,
     // Whether GCP Workload Identity management is enabled
     pub gcp_workload_identity: bool,
+    // Azure Workload Identity configuration, if the operator manages it
+    pub azure_workload_identity: Option<AzureWorkloadIdentityConfig>,
     /// The cluster DNS suffix (e.g. "cluster.local")
     pub cluster_dns: String,
     /// The container image to use for canary jobs
@@ -114,6 +122,7 @@ impl Context {
             security_group_policy_installed,
             secret_provider_class_installed,
             gcp_workload_identity: state.gcp_workload_identity,
+            azure_workload_identity: state.azure_workload_identity.clone(),
             cluster_dns: state.cluster_dns.clone(),
             canary_image: state.canary_image.clone(),
             diagnostics: state.diagnostics.clone(),
@@ -504,6 +513,25 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         },
     );
 
+    // ASO groups are installed per resource, so check the exact group and version of each kind
+    let azure_identity_crds_installed = {
+        fn group_has<R: Resource<DynamicType = ()>>(groups: &[APIGroup]) -> bool {
+            groups.iter().any(|group| {
+                group.name == R::group(&())
+                    && group.versions.iter().any(|v| v.version == R::version(&()))
+            })
+        }
+        group_has::<UserAssignedIdentity>(&api_groups.groups)
+            && group_has::<FederatedIdentityCredential>(&api_groups.groups)
+            && group_has::<RoleAssignment>(&api_groups.groups)
+    };
+
+    if state.azure_workload_identity.is_some() && !azure_identity_crds_installed {
+        warn!(
+            "Azure Workload Identity is configured, but the Azure Service Operator CRDs (managedidentity.azure.com UserAssignedIdentity and FederatedIdentityCredential, authorization.azure.com RoleAssignment) are not all available on the apiserver; clusters that ask for it stay NotReady, and the operator must be restarted after the CRDs are installed because the watches are decided at startup"
+        );
+    }
+
     let rc_api = Api::<RestateCluster>::all(client.clone());
     let ns_api = Api::<Namespace>::all(client.clone());
     let ss_api = Api::<StatefulSet>::all(client.clone());
@@ -680,6 +708,43 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         controller
             .owns_stream(ipm_watcher)
             .owns_stream(wi_job_watcher)
+    } else {
+        controller
+    };
+    let controller = if state.azure_workload_identity.is_some() && azure_identity_crds_installed {
+        let watch = Config::default().labels("app.kubernetes.io/name=restate");
+        let uai_watcher = watcher(
+            Api::<UserAssignedIdentity>::all(client.clone()),
+            watch.clone(),
+        )
+        .map(ensure_deletion_change)
+        .touched_objects()
+        .predicate_filter(changed_predicate.combine(status_predicate));
+        let fic_watcher = watcher(
+            Api::<FederatedIdentityCredential>::all(client.clone()),
+            watch.clone(),
+        )
+        .map(ensure_deletion_change)
+        .touched_objects()
+        .predicate_filter(changed_predicate.combine(status_predicate));
+        let ra_watcher = watcher(Api::<RoleAssignment>::all(client.clone()), watch)
+            .map(ensure_deletion_change)
+            .touched_objects()
+            .predicate_filter(changed_predicate.combine(status_predicate));
+
+        let azure_job_watcher = metadata_watcher(
+            Api::<Job>::all(client.clone()),
+            Config::default().labels(&format!("app.kubernetes.io/name={AZURE_CANARY_JOB_NAME}")),
+        )
+        .map(ensure_deletion_change)
+        .touched_objects()
+        .predicate_filter(changed_predicate);
+
+        controller
+            .owns_stream(uai_watcher)
+            .owns_stream(fic_watcher)
+            .owns_stream(ra_watcher)
+            .owns_stream(azure_job_watcher)
     } else {
         controller
     };

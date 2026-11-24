@@ -1,3 +1,4 @@
+pub mod azureidentities;
 pub mod iampolicymembers;
 pub mod knative;
 pub mod podidentityassociations;

@@ -37,6 +37,11 @@ class Spec {
   /// The ID of your environment, which begins `env_`
   environmentId: String
 
+  /// Where the environment reaches deployments through the tunnel: the `proxyBaseUrl` that describing
+  /// the environment returns. The port defaults to 9080. Defaults to
+  /// `https://tunnel.<region>.restate.cloud:9080`; only some BYOC regions need it set.
+  proxyBaseUrl: String(matches(Regex("^https?://[^/?#]+/?$")))?
+
   /// The short region identifier of your environment, eg `us`, `eu`.
   region: String
 

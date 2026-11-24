@@ -6,6 +6,7 @@ use kube::Client;
 use prometheus::{Encoder, TextEncoder};
 
 use restate_operator::controllers::State;
+use restate_operator::controllers::restatecluster::AzureWorkloadIdentityConfig;
 pub use restate_operator::{self, telemetry};
 
 #[derive(Debug, clap::Parser)]
@@ -24,6 +25,48 @@ struct Arguments {
         default_value = "false"
     )]
     gcp_workload_identity: bool,
+
+    /// ARM id of the resource group that holds only environment identities, for Azure Workload
+    /// Identity through Azure Service Operator. All five AZURE_WI_* settings go together.
+    #[arg(
+        long = "azure-wi-identity-resource-group-id",
+        env = "AZURE_WI_IDENTITY_RESOURCE_GROUP_ID",
+        value_name = "ARM_ID"
+    )]
+    azure_wi_identity_resource_group_id: Option<String>,
+
+    /// The Azure region environment identities are created in
+    #[arg(
+        long = "azure-wi-location",
+        env = "AZURE_WI_LOCATION",
+        value_name = "LOCATION"
+    )]
+    azure_wi_location: Option<String>,
+
+    /// The OIDC issuer URL of the AKS cluster
+    #[arg(
+        long = "azure-wi-oidc-issuer",
+        env = "AZURE_WI_OIDC_ISSUER",
+        value_name = "URL"
+    )]
+    azure_wi_oidc_issuer: Option<String>,
+
+    /// ARM id of the blob container that holds the environments' snapshots
+    #[arg(
+        long = "azure-wi-storage-container-id",
+        env = "AZURE_WI_STORAGE_CONTAINER_ID",
+        value_name = "ARM_ID"
+    )]
+    azure_wi_storage_container_id: Option<String>,
+
+    /// ARM id of the custom role, with only the blob data actions, that environment identities
+    /// are assigned on the snapshot container
+    #[arg(
+        long = "azure-wi-role-definition-id",
+        env = "AZURE_WI_ROLE_DEFINITION_ID",
+        value_name = "ARM_ID"
+    )]
+    azure_wi_role_definition_id: Option<String>,
 
     #[arg(
         long = "operator-namespace",
@@ -145,10 +188,19 @@ async fn main() -> anyhow::Result<()> {
         args.cluster_dns
     );
 
+    let azure_workload_identity = AzureWorkloadIdentityConfig::from_parts(
+        args.azure_wi_identity_resource_group_id,
+        args.azure_wi_location,
+        args.azure_wi_oidc_issuer,
+        args.azure_wi_storage_container_id,
+        args.azure_wi_role_definition_id,
+    )?;
+
     // Initialize Kubernetes controller state
     let state = State::new(
         args.aws_pod_identity_association_cluster,
         args.gcp_workload_identity,
+        azure_workload_identity,
         args.operator_namespace,
         args.operator_label_name,
         args.operator_label_value,
