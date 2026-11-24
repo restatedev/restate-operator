@@ -55,6 +55,15 @@ class Spec {
   /// Knative-specific configuration. When specified, enables Knative Serving mode.
   knative: Knative?
 
+  /// Optional stable Service that routes to the latest version only. ReplicaSet mode only.
+  ///
+  /// When enabled, the operator manages a ClusterIP Service named `<name>-latest` that selects the pods
+  /// of the version Restate routes new invocations to, exposing every container port of that version.
+  /// Its selector moves to a new version only once that version's ReplicaSet is ready and Restate has
+  /// confirmed it as the latest deployment, and moves back on a rollback. Use it to send traffic that
+  /// does not go through Restate (e.g. an Ingress) to the newest code while older versions drain.
+  latestService: LatestService?
+
   /// Minimum number of seconds for which a newly created pod should be ready. Only used in ReplicaSet
   /// mode.
   minReadySeconds: Int(isPositive)?
@@ -109,6 +118,20 @@ class Knative {
 
   /// Target concurrent requests per replica (default: 100)
   target: Int(isPositive)?
+}
+
+/// Optional stable Service that routes to the latest version only. ReplicaSet mode only.
+///
+/// When enabled, the operator manages a ClusterIP Service named `<name>-latest` that selects the pods of
+/// the version Restate routes new invocations to, exposing every container port of that version. Its
+/// selector moves to a new version only once that version's ReplicaSet is ready and Restate has
+/// confirmed it as the latest deployment, and moves back on a rollback. Use it to send traffic that does
+/// not go through Restate (e.g. an Ingress) to the newest code while older versions drain.
+class LatestService {
+  /// Whether to create the `<name>-latest` Service. Disabling it deletes the Service.
+  ///
+  /// Default if undefined: `false`
+  enabled: Boolean?
 }
 
 /// Restate specific configuration

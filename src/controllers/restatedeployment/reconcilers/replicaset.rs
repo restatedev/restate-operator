@@ -631,6 +631,7 @@ mod tests {
                     drain: None,
                 },
                 autoscaling: None,
+                latest_service: None,
             },
         )
     }
@@ -958,6 +959,7 @@ mod tests {
             let (secret_store, secret_writer) = store_of(vec![]);
             let (revision_store, revision_writer) = store_of(vec![]);
             let (configuration_store, configuration_writer) = store_of(vec![]);
+            let (services_store, services_writer) = store_of(vec![]);
 
             let ctx = Context::new(
                 client.clone(),
@@ -967,6 +969,7 @@ mod tests {
                 revision_store,
                 configuration_store,
                 hpa_store,
+                services_store,
                 Metrics::default(),
                 State::new(
                     None,
@@ -994,6 +997,7 @@ mod tests {
                     secret_writer,
                     revision_writer,
                     configuration_writer,
+                    services_writer,
                 ],
             }
         }

@@ -531,6 +531,7 @@ For the full schema as a [Pkl](https://pkl-lang.org/) template see [`crd/Restate
 | `minReadySeconds` | `integer` | Minimum seconds a new pod should be ready before it's considered available. Defaults to 0. |
 | `revisionHistoryLimit`| `integer` | Number of old ReplicaSets to retain for rollbacks. Defaults to 10. |
 | `autoscaling` | `object` | Optional. Per-version `HorizontalPodAutoscaler` template for draining (non-latest) versions. ReplicaSet mode only. See details below. |
+| `latestService` | `object` | Optional. A stable `<name>-latest` Service that routes to the latest version only. ReplicaSet mode only. See details below. |
 
 ---
 
@@ -637,6 +638,45 @@ spec:
             requests:
               cpu: 100m
 ```
+
+#### `spec.latestService`
+
+Optional. ReplicaSet mode only. Restate routes invocations itself, so service calls should go through the Restate ingress. Some applications also serve other traffic from the same pods (for example, HTTP endpoints called by a frontend through an Ingress). The operator keeps old versions running while they drain, so a Service selecting all of the application's pods keeps sending that traffic to old code.
+
+With `latestService.enabled: true`, the operator manages a `ClusterIP` Service named `<name>-latest` that selects only the pods of the latest version:
+
+- Its selector moves to a new version in a single update, once that version's ReplicaSet is ready and Restate has confirmed it as the latest deployment. Until then it keeps selecting the previous version.
+- A rollback moves it back to the older version once Restate confirms that version again.
+- It exposes every container port of the latest version's pod template (`port` and `targetPort` are the `containerPort`; unnamed ports are named `<protocol>-<port>`, e.g. `tcp-8080`). With no declared ports it exposes 9080 as `restate`.
+- It is owned by the `RestateDeployment`: deleted with it, recreated if deleted, and deleted when `enabled` is set back to `false`.
+- If a Service named `<name>-latest` that the operator does not own already exists, the operator leaves it alone and reports a `LatestServiceFailed` event.
+- If you run the operator with your own RBAC (not the bundled Helm chart), grant it `delete` on `services` so it can remove the Service when the feature is disabled.
+
+Old versions keep their per-version Services, which Restate uses to reach them while they drain.
+
+```yaml
+spec:
+  latestService:
+    enabled: true
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: greeter
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: greeter-latest
+                port:
+                  name: http
+```
+
+In Knative mode the field is rejected: Knative's own Route already sends new requests to the latest revision.
 
 ### `RestateCloudEnvironment`
 

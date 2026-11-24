@@ -160,6 +160,10 @@ pub struct KnativeDeploymentSpec {
 #[x_kube(validation = Rule::new(
     "!has(self.autoscaling) || !has(self.deploymentMode) || self.deploymentMode != 'knative'"
 ).message("spec.autoscaling is only supported in replicaset mode (not knative)"))]
+// Knative routes requests to the latest revision through its own Route.
+#[x_kube(validation = Rule::new(
+    "!has(self.latestService) || !has(self.deploymentMode) || self.deploymentMode != 'knative'"
+).message("spec.latestService is only supported in replicaset mode (not knative)"))]
 pub struct RestateDeploymentSpec {
     /// Deployment mode: replicaset (default) or knative.
     /// This field is immutable after creation.
@@ -223,6 +227,26 @@ pub struct RestateDeploymentSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "autoscaling_schema")]
     pub autoscaling: Option<serde_json::Value>,
+
+    /// Optional stable Service that routes to the latest version only. ReplicaSet mode only.
+    ///
+    /// When enabled, the operator manages a ClusterIP Service named `<name>-latest` that
+    /// selects the pods of the version Restate routes new invocations to, exposing every
+    /// container port of that version. Its selector moves to a new version only once that
+    /// version's ReplicaSet is ready and Restate has confirmed it as the latest deployment,
+    /// and moves back on a rollback. Use it to send traffic that does not go through Restate
+    /// (e.g. an Ingress) to the newest code while older versions drain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_service: Option<LatestServiceSpec>,
+}
+
+/// Configuration of the operator-managed `<name>-latest` Service.
+#[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LatestServiceSpec {
+    /// Whether to create the `<name>-latest` Service. Disabling it deletes the Service.
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 fn default_replicas() -> i32 {

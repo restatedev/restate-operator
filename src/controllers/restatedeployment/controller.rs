@@ -95,6 +95,8 @@ pub(super) struct Context {
     pub configuration_store: Store<Configuration>,
     /// Store for operator-managed per-version HorizontalPodAutoscalers
     pub hpa_store: Store<HorizontalPodAutoscaler>,
+    /// Store for operator-managed Services
+    pub services_store: Store<Service>,
     /// The namespace in which this operator runs
     pub operator_namespace: String,
     /// The cluster DNS suffix (e.g. "cluster.local")
@@ -130,6 +132,7 @@ impl Context {
         revision_store: Store<Revision>,
         configuration_store: Store<Configuration>,
         hpa_store: Store<HorizontalPodAutoscaler>,
+        services_store: Store<Service>,
         metrics: Metrics,
         state: State,
     ) -> Arc<Context> {
@@ -142,6 +145,7 @@ impl Context {
             revision_store,
             configuration_store,
             hpa_store,
+            services_store,
             operator_namespace: state.operator_namespace,
             cluster_dns: state.cluster_dns,
             metrics,
@@ -505,14 +509,16 @@ impl RestateDeployment {
         );
         service_labels.insert(OWNED_BY_LABEL.to_string(), deployment_name.clone());
 
+        let latest_service_labels = service_labels.clone();
+
         // Create/update the Service for this version
         reconcilers::service::reconcile_service(
             namespace,
             &svc_api,
             &versioned_name,
-            replicaset_selector,
+            replicaset_selector.clone(),
             service_labels,
-            annotations,
+            annotations.clone(),
             &replicaset,
         )
         .await?;
@@ -557,6 +563,16 @@ impl RestateDeployment {
             let latest_ids =
                 registration::latest_deployment_ids(&ctx, &self.spec.restate.register).await?;
             if latest_ids.contains(recorded_id) {
+                reconcilers::service::reconcile_latest_service(
+                    &ctx,
+                    self,
+                    namespace,
+                    &replicaset,
+                    &replicaset_selector,
+                    &latest_service_labels,
+                    &annotations,
+                )
+                .await?;
                 return Ok((replicaset, None));
             }
         }
@@ -727,6 +743,19 @@ impl RestateDeployment {
                 },
             );
         }
+
+        // Restate has confirmed this version as latest: either it already was
+        // (`AlreadyLatest`), or `confirm_latest` above succeeded.
+        reconcilers::service::reconcile_latest_service(
+            &ctx,
+            self,
+            namespace,
+            &replicaset,
+            &replicaset_selector,
+            &latest_service_labels,
+            &annotations,
+        )
+        .await?;
 
         // Clean up old ReplicaSets that are no longer needed
 
@@ -1840,6 +1869,16 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
             // status heartbeats. After the reflector write, so `hpa_store` still sees every update.
             .predicate_filter(predicates::generation);
 
+    // A reflector (rather than `.owns(...)`) so the `<name>-latest` Service can be read
+    // from the cache instead of fetched every reconcile.
+    let (services_store, services_writer) = kube::runtime::reflector::store();
+    let services_reflector = kube::runtime::reflector(
+        services_writer,
+        kube::runtime::watcher(services, cfg.clone()),
+    )
+    .touched_objects()
+    .default_backoff();
+
     let (rce_store, rce_writer) = kube::runtime::reflector::store();
     let rce_reflector = kube::runtime::reflector(
         rce_writer,
@@ -1942,7 +1981,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
         // just so that these get polled; we have no way to figure out which rsd may use the updated rce or secret
         .watches_stream(rce_reflector, |_| std::iter::empty())
         .watches_stream(secret_reflector, |_| std::iter::empty())
-        .owns(services, cfg.clone())
+        .owns_stream(services_reflector)
         .owns_stream(hpa_reflector)
         .run(
             reconcile,
@@ -1955,6 +1994,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
                 revision_store,
                 configuration_store,
                 hpa_store,
+                services_store,
                 metrics,
                 state,
             ),
