@@ -13,5 +13,5 @@ When the canary image (`--canary-image`) is served by a registry that needs cred
 ### Impact on Users
 
 - Clusters that name pull secrets and use Pod Identity or Workload Identity with a canary image from an authenticated registry now get past the canary.
-- A canary Job that is stuck from an earlier operator version is deleted and recreated with the pull secrets on the next reconcile.
+- On clusters that set `imagePullSecrets`, the existing canary Job, stuck or already completed, is deleted and recreated with the pull secrets on the first reconcile after the upgrade. The cluster reports `NotReady` until the new canary succeeds.
 - Clusters without `imagePullSecrets` see no change.
