@@ -838,8 +838,10 @@ through [Azure Service Operator](https://azure.github.io/azure-service-operator/
 most 20 federated credentials, so one identity per cluster avoids a shared identity running out, and it lets each cluster
 reach only its own blobs.
 
-To enable it, install ASO (with the `managedidentity` and `authorization` resources) and the AKS Workload Identity
-webhook, then set all four values of `azureWorkloadIdentity` in the Helm chart:
+**Prerequisites.** Install ASO (with the `managedidentity` and `authorization` resources) and the AKS Workload Identity
+webhook before the operator starts. The operator decides at startup which ASO kinds to watch, so if you install ASO
+later, restart the operator. Create a custom role for the environments and set all five values of
+`azureWorkloadIdentity` in the Helm chart:
 
 ```yaml
 azureWorkloadIdentity:
@@ -847,25 +849,49 @@ azureWorkloadIdentity:
   location: swedencentral
   oidcIssuer: https://<region>.oic.prod-aks.azure.com/<tenant>/<cluster>/
   storageContainerId: /subscriptions/<id>/resourceGroups/<name>/providers/Microsoft.Storage/storageAccounts/<account>/blobServices/default/containers/<container>
+  roleDefinitionId: /subscriptions/<id>/providers/Microsoft.Authorization/roleDefinitions/<guid>
 ```
 
-The resource group must hold only the identities of the clusters, because the rights ASO needs there allow adding a
-credential to any identity in it. Then set `azureWorkloadIdentity: true` under `spec.security` of a `RestateCluster`.
-The operator creates these objects in the cluster's namespace:
+- **The resource group** must hold only the identities of the clusters, because the rights ASO needs there allow adding a
+  credential to any identity in it.
+- **The custom role** must grant only these data actions, and no management actions:
+  `Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read`, `.../blobs/write`, `.../blobs/add/action` and
+  `.../blobs/delete`. Do not use the built-in Storage Blob Data Contributor role. It also carries the actions
+  `containers/delete`, `containers/write`, `containers/read` and `generateUserDelegationKey`, which the per-cluster
+  condition cannot limit, so any cluster could delete the shared container. The delegation condition on the role
+  assignment rights you give ASO should allow only this custom role and only the `ServicePrincipal` principal type.
+
+Then set `azureWorkloadIdentity: true` under `spec.security` of a `RestateCluster`. The operator creates these objects
+in the cluster's namespace:
 
 | Object | Name | Purpose |
 |---|---|---|
 | `UserAssignedIdentity` | `restate` | The identity, named `<namespace>-restate` in Azure. ASO writes its client ID and principal ID to the ConfigMap `restate-azure-identity`. |
 | `FederatedIdentityCredential` | `restate` | Trusts the `restate` ServiceAccount of the namespace for the AKS OIDC issuer. |
-| `RoleAssignment` | `restate-snapshots` | Storage Blob Data Contributor on the container, with a condition that limits reads, writes, deletes and listings to blobs under `<namespace>/`. |
+| `RoleAssignment` | `restate-snapshots` | The custom role on the container, with a condition that limits reads, writes, deletes and listings to blobs under `<namespace>/`. |
 
-Once the three objects are Ready, the operator sets the client ID on the ServiceAccount, labels the pods, and runs a
-canary Job that exchanges the federated token and lists the cluster's prefix. A new role assignment can take up to about
-ten minutes to take effect, so the canary retries for about eleven minutes. The cluster stays `NotReady` with the reason
-`AzureIdentityNotReady` or `AzureWorkloadIdentityCanaryPending` until then, and the StatefulSet is only applied after the
-canary succeeds. Your pods need `AZURE_STORAGE_ACCOUNT_NAME` and, for snapshots, a destination such as
+Once the three objects are Ready for their current spec, the operator sets the client ID on the ServiceAccount, labels
+the pods, and runs a canary Job. The canary exchanges the federated token, lists the cluster's prefix, and writes and
+deletes a probe blob under it, so it proves every clause of the condition. It uses `curl`, and installs it with `apk` if
+the canary image has none. A new role assignment can take up to about ten minutes to take effect, so the canary retries
+for about eleven minutes, and a failed attempt prints the Azure error in the canary pod's log. The cluster stays
+`NotReady` with the reason `AzureIdentityNotReady` or `AzureWorkloadIdentityCanaryPending` until then, and the
+StatefulSet is only applied after the canary succeeds. A cluster that is already running keeps its known identity
+through a short ASO outage, and only a first enable or a changed client ID waits for ASO.
+
+Your pods need `AZURE_STORAGE_ACCOUNT_NAME` and, for snapshots, a destination such as
 `az://<container>/<namespace>/snapshots`. Deleting the `RestateCluster`, or removing the field, deletes the three
-objects and ASO removes the identity from Azure.
+objects and ASO removes the identity from Azure. The operator only deletes or replaces objects that carry an owner
+reference to the `RestateCluster`, and reports `AzureIdentityConflict` if an object with one of these names already
+exists and belongs to somebody else.
+
+A few things to know:
+
+- **Namespace deletion hangs without ASO.** ASO puts finalizers on its objects, so if ASO is uninstalled or unhealthy
+  while a cluster is deleted, its namespace stays in `Terminating` until ASO runs again.
+- **Private endpoints need egress rules.** The default egress rules of the Restate pod exclude the private ranges, so
+  reaching a storage account through a private endpoint needs a rule in `networkEgressRules`. The canary pod has no
+  network policy.
 
 ### Canary Image
 
@@ -873,7 +899,7 @@ EKS Pod Identity, GCP Workload Identity and Azure Workload Identity use a canary
 starting the Restate cluster. The trusted CA certs feature also uses this image for its init container.
 By default, this uses the `alpine:3.21` image from Docker Hub. The image must include a
 CA certificate bundle at `/etc/ssl/certs/ca-certificates.crt` (required by the trusted CA
-certs init container) and provide `cat`, `grep` and `wget`, plus `sed`, `date` and `sleep` for the Azure canary. In environments where nodes
+certs init container) and provide `sh`, `cat`, `grep` and `wget`, plus `sed`, `date` and `sleep` for the Azure canary, which also needs `curl` and installs it with `apk` if it is missing. In environments where nodes
 cannot pull from Docker Hub (e.g. air-gapped or restricted registries), you can override
 this with the `canaryImage` Helm value:
 

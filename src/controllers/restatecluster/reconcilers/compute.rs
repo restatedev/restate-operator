@@ -760,11 +760,42 @@ pub async fn reconcile_compute(
             .unwrap_or(false),
     ) {
         (Some(azure_config), true) => {
-            Some(azure::reconcile_identity(&ctx.client, name, base_metadata, azure_config).await?)
+            match azure::reconcile_identity(&ctx.client, name, base_metadata, azure_config).await? {
+                azure::IdentityState::Ready { client_id } => Some(client_id),
+                azure::IdentityState::Pending { message } => {
+                    // A running cluster keeps its identity through a transient ASO state; only
+                    // the first enable, or a changed client id, waits for ASO
+                    let stateful_set = ctx
+                        .ss_store
+                        .get(&ObjectRef::new(RESTATE_STATEFULSET_NAME).within(name));
+                    let service_account = svcacc_api.get_opt("restate").await?;
+                    match azure::known_client_id(stateful_set.as_deref(), service_account.as_ref())
+                    {
+                        Some(client_id) => {
+                            azure::warn_continuing_with(&client_id, name, &message);
+                            Some(client_id)
+                        }
+                        None => {
+                            return Err(Error::NotReady {
+                                reason: "AzureIdentityNotReady".into(),
+                                message,
+                                requeue_after: Some(Duration::from_secs(10)),
+                            });
+                        }
+                    }
+                }
+            }
         }
         (Some(_), false) => {
-            azure::delete_identity(&ctx.client, name).await?;
-            delete_job(name, &job_api, azure::CANARY_JOB_NAME).await?;
+            azure::delete_identity(&ctx.client, name, base_metadata).await?;
+            azure::delete_owned(
+                name,
+                &job_api,
+                azure::CANARY_JOB_NAME,
+                azure::cluster_uid(base_metadata),
+                &DeleteParams::background(),
+            )
+            .await?;
             None
         }
         (None, true) => {
@@ -979,12 +1010,13 @@ pub async fn reconcile_compute(
             &job_api,
             &ctx.canary_image,
             azure_config,
+            azure_client_id,
         )
         .await?;
 
         let pod_annotations = pod_annotations.get_or_insert_with(Default::default);
         pod_annotations.insert(
-            "restate.dev/azure-workload-identity-client-id".into(),
+            azure::POD_CLIENT_ID_ANNOTATION.into(),
             azure_client_id.clone(),
         );
     }
@@ -1633,6 +1665,7 @@ async fn check_workload_identity(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn check_azure_workload_identity(
     namespace: &str,
     base_metadata: &ObjectMeta,
@@ -1641,13 +1674,19 @@ async fn check_azure_workload_identity(
     job_api: &Api<Job>,
     canary_image: &str,
     azure_config: &azure::AzureWorkloadIdentityConfig,
+    client_id: &str,
 ) -> Result<(), Error> {
     let config = CanaryConfig {
         name: azure::CANARY_JOB_NAME,
         image: canary_image.into(),
-        command: azure::canary_command(namespace, &azure_config.storage_container),
+        command: azure::canary_command(
+            namespace,
+            &azure_config.storage_container,
+            client_id,
+            &azure_config.role_definition_id,
+        ),
         reason_prefix: "AzureWorkloadIdentity",
-        failure_message: "Canary pod could not use its Azure Workload Identity to list its snapshot prefix after retrying for several minutes; check that the AKS Workload Identity webhook is installed, that the federated credential matches the cluster's OIDC issuer, and that the role assignment exists",
+        failure_message: "Canary pod could not use its Azure Workload Identity to list, write and delete under its snapshot prefix after retrying for several minutes (see the canary pod's logs for the Azure error); check that the AKS Workload Identity webhook is installed, that the federated credential matches the cluster's OIDC issuer, and that the role assignment exists",
         pending_message: "Canary Job has not yet succeeded; the federated token exchange or the new role assignment may still be taking effect in Azure, which can take up to about 10 minutes",
         active_deadline_seconds: azure::CANARY_ACTIVE_DEADLINE_SECONDS,
         pod_labels: Some(BTreeMap::from([(azure::USE_LABEL.into(), "true".into())])),
@@ -2952,6 +2991,38 @@ mod tests {
             image: "restate".into(),
             ..Default::default()
         });
+        // Disabled: nothing of the feature is rendered, so applying the StatefulSet and the
+        // ServiceAccount removes the label and the annotation again
+        let plain = ss
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .metadata
+            .as_ref()
+            .unwrap();
+        assert!(
+            !plain
+                .labels
+                .as_ref()
+                .unwrap()
+                .contains_key(azure::USE_LABEL)
+        );
+        assert!(
+            !plain
+                .annotations
+                .iter()
+                .flatten()
+                .any(|(k, _)| k == azure::POD_CLIENT_ID_ANNOTATION)
+        );
+        let sa = restate_service_account(&test_base_metadata(), None, None);
+        assert!(
+            !sa.metadata
+                .annotations
+                .iter()
+                .flatten()
+                .any(|(k, _)| k == azure::CLIENT_ID_ANNOTATION)
+        );
         azure::use_workload_identity(&mut ss);
         let labels = ss.spec.unwrap().template.metadata.unwrap().labels.unwrap();
         assert_eq!(labels[azure::USE_LABEL], "true");

@@ -91,6 +91,8 @@ spec:
               value: {{ required "azureWorkloadIdentity.oidcIssuer is required" .oidcIssuer | quote }}
             - name: AZURE_WI_STORAGE_CONTAINER_ID
               value: {{ required "azureWorkloadIdentity.storageContainerId is required" .storageContainerId | quote }}
+            - name: AZURE_WI_ROLE_DEFINITION_ID
+              value: {{ required "azureWorkloadIdentity.roleDefinitionId is required" .roleDefinitionId | quote }}
           {{- end }}
           {{- if .Values.canaryImage }}
             - name: CANARY_IMAGE

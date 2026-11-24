@@ -144,16 +144,11 @@ pub struct AzureResourceCondition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 
+    /// The generation of the object this condition was computed for
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_generation: Option<i64>,
+
     /// Last time the condition transitioned from one status to another
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_transition_time: Option<String>,
-}
-
-impl AzureResourceStatus {
-    pub fn is_ready(&self) -> bool {
-        self.conditions
-            .iter()
-            .flatten()
-            .any(|c| c.r#type == "Ready" && c.status == "True")
-    }
 }

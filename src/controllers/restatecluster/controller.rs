@@ -528,7 +528,7 @@ pub async fn run(client: Client, metrics: Metrics, state: State) {
 
     if state.azure_workload_identity.is_some() && !azure_identity_crds_installed {
         warn!(
-            "Azure Workload Identity is configured, but the Azure Service Operator CRDs (managedidentity.azure.com UserAssignedIdentity and FederatedIdentityCredential, authorization.azure.com RoleAssignment) are not all available on the apiserver; clusters that ask for it will stay NotReady until they are installed"
+            "Azure Workload Identity is configured, but the Azure Service Operator CRDs (managedidentity.azure.com UserAssignedIdentity and FederatedIdentityCredential, authorization.azure.com RoleAssignment) are not all available on the apiserver; clusters that ask for it stay NotReady, and the operator must be restarted after the CRDs are installed because the watches are decided at startup"
         );
     }
 

@@ -27,7 +27,7 @@ struct Arguments {
     gcp_workload_identity: bool,
 
     /// ARM id of the resource group that holds only environment identities, for Azure Workload
-    /// Identity through Azure Service Operator. All four AZURE_WI_* settings go together.
+    /// Identity through Azure Service Operator. All five AZURE_WI_* settings go together.
     #[arg(
         long = "azure-wi-identity-resource-group-id",
         env = "AZURE_WI_IDENTITY_RESOURCE_GROUP_ID",
@@ -58,6 +58,15 @@ struct Arguments {
         value_name = "ARM_ID"
     )]
     azure_wi_storage_container_id: Option<String>,
+
+    /// ARM id of the custom role, with only the blob data actions, that environment identities
+    /// are assigned on the snapshot container
+    #[arg(
+        long = "azure-wi-role-definition-id",
+        env = "AZURE_WI_ROLE_DEFINITION_ID",
+        value_name = "ARM_ID"
+    )]
+    azure_wi_role_definition_id: Option<String>,
 
     #[arg(
         long = "operator-namespace",
@@ -184,6 +193,7 @@ async fn main() -> anyhow::Result<()> {
         args.azure_wi_location,
         args.azure_wi_oidc_issuer,
         args.azure_wi_storage_container_id,
+        args.azure_wi_role_definition_id,
     )?;
 
     // Initialize Kubernetes controller state

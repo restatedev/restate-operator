@@ -29,16 +29,19 @@ podAnnotations: {}
 
 awsPodIdentityAssociationCluster: null
 gcpWorkloadIdentity: null
-# Azure Workload Identity through Azure Service Operator (ASO), which must be installed. Each RestateCluster that sets
+# Azure Workload Identity through Azure Service Operator (ASO), which must be installed before the operator starts. Each RestateCluster that sets
 # spec.security.azureWorkloadIdentity gets its own managed identity with access to its own prefix of the snapshot container.
-# All four settings are required:
+# All five settings are required:
 #   identityResourceGroupId: /subscriptions/<id>/resourceGroups/<name>, a resource group that holds only environment identities
 #   location: the Azure region the identities are created in, for example swedencentral
 #   oidcIssuer: the OIDC issuer URL of the AKS cluster
 #   storageContainerId: ARM id of the snapshot container, /subscriptions/<id>/resourceGroups/<name>/providers/Microsoft.Storage/storageAccounts/<account>/blobServices/default/containers/<container>
+#   roleDefinitionId: ARM id of a custom role with only the blob data actions (blobs/read, blobs/write, blobs/add/action, blobs/delete) and no
+#     management actions, /subscriptions/<id>/providers/Microsoft.Authorization/roleDefinitions/<guid>. Storage Blob Data Contributor must not be
+#     used: it can delete the container, which the per-environment condition cannot prevent.
 azureWorkloadIdentity: null
 clusterDns: null # defaults to "cluster.local" in the operator binary
-canaryImage: null # defaults to "alpine:3.21"; image must provide cat, grep, wget and a CA bundle at /etc/ssl/certs/ca-certificates.crt
+canaryImage: null # defaults to "alpine:3.21"; image must provide sh, cat, grep, sed, date, sleep, wget and a CA bundle at /etc/ssl/certs/ca-certificates.crt (the Azure canary also needs curl, which it installs with apk if the image lacks it)
 
 podSecurityContext:
   fsGroup: 2000
