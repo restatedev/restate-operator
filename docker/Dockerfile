@@ -1,8 +1,8 @@
-FROM --platform=$BUILDPLATFORM ghcr.io/restatedev/dev-tools:1.19.0 AS planner
+FROM --platform=$BUILDPLATFORM ghcr.io/restatedev/dev-tools:1.20.0 AS planner
 COPY .. .
 RUN just chef-prepare
 
-FROM --platform=$BUILDPLATFORM ghcr.io/restatedev/dev-tools:1.19.0 AS base
+FROM --platform=$BUILDPLATFORM ghcr.io/restatedev/dev-tools:1.20.0 AS base
 COPY --from=planner /restate/recipe.json recipe.json
 COPY ../justfile justfile
 
@@ -26,6 +26,6 @@ RUN just arch=$TARGETARCH libc=musl chef-cook --release --bin restate-operator
 COPY .. .
 RUN just arch=$TARGETARCH libc=musl build --release --bin restate-operator && mv target/$(just arch=$TARGETARCH libc=musl print-target)/release/restate-operator target/restate-operator
 
-FROM gcr.io/distroless/static:nonroot@sha256:aafe993665bf6200db38a02c11a9351e782a84b6a45e7f33b6695638c88e3931
+FROM gcr.io/distroless/static:nonroot@sha256:8ce6dd87e9823c5b48dcfb2c8604714ccb351ce59607327bcc4957448da279b5
 COPY --from=builder --chown=nonroot:nonroot /restate/target/restate-operator /app/restate-operator
 ENTRYPOINT ["/app/restate-operator"]
