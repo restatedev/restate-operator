@@ -12,8 +12,8 @@ use url::Url;
 use crate::controllers::owned_annotations;
 use crate::controllers::restatedeployment::cleanup::{
     BlockingVersion, CleanupMode, CleanupOutcome, DeploymentUsageMap,
-    RESTATE_REMOVE_VERSION_AT_ANNOTATION, retain_for_rollback, schedule_version_removal,
-    unschedule_version_removal,
+    RESTATE_REMOVE_VERSION_AT_ANNOTATION, STALE_ANSWER_POLL_SECONDS, VersionAction, VersionFacts,
+    answer_was_stale, planned_pass, schedule_version_removal, unschedule_version_removal,
 };
 use crate::controllers::restatedeployment::controller::{
     Context, RESTATE_DEPLOYMENT_ID_ANNOTATION, propagated_labels,
@@ -227,6 +227,10 @@ pub async fn reconcile_knative(
 
     // Registers, promotes, or leaves alone as Restate's routing requires, annotating the
     // Configuration with the resulting deployment id.
+    let recorded_id = config
+        .annotations()
+        .get(RESTATE_DEPLOYMENT_ID_ANNOTATION)
+        .cloned();
     let deployment_id = register_or_promote_deployment(
         ctx,
         rsd,
@@ -239,7 +243,42 @@ pub async fn reconcile_knative(
     .await?;
     trace!(deployment_id = %deployment_id, "Deployment registered/looked up");
 
-    status.deployment_id = Some(deployment_id);
+    status.deployment_id = Some(deployment_id.clone());
+
+    // The answer left out a deployment we had recorded, and registering found the same id
+    // again: Restate had it all along, so the answer was stale. Old versions it also left
+    // out cannot be told apart from ones Restate really dropped.
+    let stale_answer = answer_was_stale(recorded_id.as_deref(), &deployment_id, &deployments);
+
+    if stale_answer {
+        warn!(
+            "Restate's deployment usage answer omits deployment {deployment_id}, which is still registered; holding cleanup of old Configurations of RestateDeployment {} in namespace {namespace}",
+            rsd.name_any(),
+        );
+
+        let _ = ctx
+            .recorder
+            .publish(
+                &Event {
+                    type_: EventType::Warning,
+                    reason: "StaleDeploymentUsage".into(),
+                    note: Some(format!(
+                        "Restate's deployment usage answer omits deployment {deployment_id}, which re-registering returned again: it was stale. Holding cleanup of old versions of {} instead of removing versions it may simply have failed to list.",
+                        rsd.name_any(),
+                    )),
+                    action: "Reconcile".into(),
+                    secondary: None,
+                },
+                &rsd.object_ref(&()),
+            )
+            .await;
+
+        return Ok(Some(
+            chrono::Utc::now()
+                .checked_add_signed(chrono::TimeDelta::seconds(STALE_ANSWER_POLL_SECONDS))
+                .expect("next_removal in bounds"),
+        ));
+    }
 
     // Cleanup old Configurations (mirrors ReplicaSet cleanup pattern)
     let outcome = cleanup_old_configurations(
@@ -250,6 +289,7 @@ pub async fn reconcile_knative(
         CleanupMode::Rollout,
         &deployments,
         Some(&tag),
+        || async { rsd.list_deployments(ctx, CleanupMode::Rollout).await },
     )
     .await?;
 
@@ -826,9 +866,8 @@ async fn annotate_configuration(
 }
 
 /// Delete Configurations that are no longer needed
-/// Mirrors the pattern from cleanup_old_replicasets() in replicaset.rs:156-399
 #[allow(clippy::too_many_arguments)]
-pub async fn cleanup_old_configurations(
+pub async fn cleanup_old_configurations<F, Fut>(
     namespace: &str,
     ctx: &Context,
     rsd_uid: &str,
@@ -836,7 +875,12 @@ pub async fn cleanup_old_configurations(
     mode: CleanupMode,
     deployments: &DeploymentUsageMap,
     active_tag: Option<&str>,
-) -> Result<CleanupOutcome> {
+    confirm: F,
+) -> Result<CleanupOutcome>
+where
+    F: FnOnce() -> Fut + Send,
+    Fut: std::future::Future<Output = Result<DeploymentUsageMap>> + Send,
+{
     // Use reflector cache instead of API list() call
     let configurations_cell = std::cell::Cell::new(Vec::new());
 
@@ -852,6 +896,7 @@ pub async fn cleanup_old_configurations(
         }
 
         // Skip if no tag annotation
+        // a Configuration the operator did not tag is none of its business
         let Some(tag) = get_configuration_tag(config) else {
             return false;
         };
@@ -895,82 +940,113 @@ pub async fn cleanup_old_configurations(
     let mut blocking = Vec::new();
     // versions a force deletion tore down with invocations still running
     let mut abandoned = Vec::new();
-    // Keep track of how many zero-scaled configurations there are (for revision history limit)
-    let mut historic_count = 0;
-    let mut next_removal = None;
+    let mut next_removal: Option<chrono::DateTime<chrono::Utc>> = None;
+    /// Everything the planner needs to know about one version.
+    fn facts(config: &Configuration) -> VersionFacts<'_> {
+        VersionFacts {
+            recorded_id: config
+                .metadata
+                .annotations
+                .as_ref()
+                .and_then(|a| a.get(RESTATE_DEPLOYMENT_ID_ANNOTATION))
+                .map(String::as_str),
+            remove_at: config
+                .metadata
+                .annotations
+                .as_ref()
+                .and_then(|a| a.get(RESTATE_REMOVE_VERSION_AT_ANNOTATION))
+                .and_then(|remove_at| {
+                    chrono::DateTime::parse_from_rfc3339(remove_at)
+                        .map(|t| t.to_utc())
+                        .ok()
+                }),
+            // a Configuration has no replicas to scale down, and no HPA
+            replicas: 0,
+            has_hpa: false,
+        }
+    }
 
-    let now = chrono::Utc::now();
+    let facts: Vec<VersionFacts<'_>> = configurations.iter().map(facts).collect();
 
-    for config in configurations {
+    // Nothing in this pass may act on a single answer that leaves a registered id out: a
+    // node that has not loaded its schema answers with no rows at all (restate#6063), and
+    // any answer is a snapshot that omits whatever was registered after it.
+    let (plan, deployments) = planned_pass(
+        &facts,
+        deployments,
+        mode,
+        rsd.spec.revision_history_limit,
+        confirm,
+    )
+    .await?;
+
+    for (config, planned) in configurations.into_iter().zip(plan) {
         let config_name = config.name_any();
 
         let config_deployment_id = config
             .metadata
             .annotations
             .as_ref()
-            .and_then(|a| a.get(RESTATE_DEPLOYMENT_ID_ANNOTATION));
-
-        // Skip active deployments
-        let deployment = config_deployment_id
+            .and_then(|a| a.get(RESTATE_DEPLOYMENT_ID_ANNOTATION))
+            .cloned();
+        let usage = config_deployment_id
+            .as_deref()
             .and_then(|config_deployment_id| deployments.get(config_deployment_id).copied());
-        let deployment_exists = deployment.is_some();
+        // what the planner already decided; the executor re-derives nothing
+        let action = planned.action;
 
-        if let Some(usage) = deployment.filter(|usage| usage.is_active(mode)) {
-            blocking.push(BlockingVersion {
-                deployment_id: config_deployment_id.cloned(),
-                name: config_name.clone(),
-                usage,
-            });
+        let config_api: Api<Configuration> = Api::namespaced(ctx.client.clone(), namespace);
 
-            // it was scheduled for removal but looks active again, so reset the timer
-            let config_api: Api<Configuration> = Api::namespaced(ctx.client.clone(), namespace);
-            unschedule_version_removal(&config_api, &config).await?;
+        match action {
+            VersionAction::Keep => {
+                blocking.push(BlockingVersion {
+                    deployment_id: config_deployment_id,
+                    name: config_name.clone(),
+                    usage: usage.expect("an active version has a row in the answer"),
+                });
 
-            continue;
-        }
+                // it was scheduled for removal but looks active again, so reset the timer
+                unschedule_version_removal(&config_api, &config).await?;
 
-        let current_remove_at = config
-            .metadata
-            .annotations
-            .as_ref()
-            .and_then(|a| a.get(RESTATE_REMOVE_VERSION_AT_ANNOTATION))
-            .and_then(|remove_at| {
-                chrono::DateTime::parse_from_rfc3339(remove_at)
-                    .map(|t| t.to_utc())
-                    .ok()
-            });
+                continue;
+            }
+            VersionAction::Schedule => {
+                let remove_at = schedule_version_removal(
+                    &config_api,
+                    namespace,
+                    &config_name,
+                    rsd.spec.restate.drain_delay_seconds(),
+                )
+                .await?;
 
-        // a force deletion doesn't wait out the drain delay, so every version it gets
-        // this far with is due for removal now
-        let current_remove_at_in_past =
-            current_remove_at.is_some_and(|c| c < now) || mode.skips_drain_delay();
+                next_removal =
+                    Some(next_removal.map_or(remove_at, |soonest| soonest.min(remove_at)));
 
-        match (
-            current_remove_at,
-            current_remove_at_in_past,
-            deployment_exists,
-        ) {
-            (_, true, _) | (_, _, false) => {
-                // we are past the remove-at time, or the endpoint was removed by other means; can now delete it (subject to the history limit)
-                if retain_for_rollback(mode, historic_count, rsd.spec.revision_history_limit) {
-                    historic_count += 1;
-                    trace!(
-                        "Keeping old Configuration {} in namespace {namespace} (within revision history limit: {}/{})",
-                        config_name, historic_count, rsd.spec.revision_history_limit
-                    );
-                    continue;
-                }
+                continue;
+            }
+            VersionAction::Wait(remove_at) => {
+                next_removal =
+                    Some(next_removal.map_or(remove_at, |soonest| soonest.min(remove_at)));
 
-                if let Some(usage) = deployment.filter(|usage| usage.in_flight_invocations() > 0) {
+                continue;
+            }
+            VersionAction::Retain => {
+                // kept for rollback by the planner; nothing to do
+                continue;
+            }
+            VersionAction::Remove { .. } => {
+                if let Some(usage) = usage.filter(|usage| usage.in_flight_invocations() > 0) {
                     abandoned.push(BlockingVersion {
-                        deployment_id: config_deployment_id.cloned(),
+                        deployment_id: config_deployment_id.clone(),
                         name: config_name.clone(),
                         usage,
                     });
                 }
 
-                if deployment_exists {
-                    let config_deployment_id = config_deployment_id.unwrap();
+                if let VersionAction::Remove { deregister: true } = action {
+                    let config_deployment_id = config_deployment_id
+                        .as_deref()
+                        .expect("only a listed deployment can be deregistered");
 
                     debug!(
                         "Force-deleting Restate deployment {config_deployment_id} as its associated with old Configuration {config_name} in namespace {namespace}"
@@ -996,36 +1072,6 @@ pub async fn cleanup_old_configurations(
 
                 debug!("Deleting old Configuration {config_name} in namespace {namespace}");
                 delete_configuration(ctx, namespace, &config_name).await?;
-
-                continue;
-            }
-            (Some(remove_at), false, true) => {
-                // endpoint exists and remove at time is in the future, ensure we keep track of the soonest such time
-                next_removal = match next_removal {
-                    None => Some(remove_at),
-                    Some(next_removal) if next_removal > remove_at => Some(remove_at),
-                    els => els,
-                };
-
-                continue;
-            }
-            (None, _, true) => {
-                // endpoint exists and there's no valid remove_version_at annotation, create one
-                let config_api: Api<Configuration> = Api::namespaced(ctx.client.clone(), namespace);
-                let remove_at = schedule_version_removal(
-                    &config_api,
-                    namespace,
-                    &config_name,
-                    rsd.spec.restate.drain_delay_seconds(),
-                )
-                .await?;
-
-                // ensure we keep track of the soonest remove_at
-                next_removal = match next_removal {
-                    None => Some(remove_at),
-                    Some(next_removal) if next_removal > remove_at => Some(remove_at),
-                    els => els,
-                };
 
                 continue;
             }

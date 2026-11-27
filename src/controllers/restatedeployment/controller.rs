@@ -49,9 +49,10 @@ use crate::{Error, Result};
 // Import our reconcilers
 use crate::controllers::restatedeployment::cleanup::{
     BlockingVersion, CleanupMode, CleanupOutcome, DeploymentUsage, DeploymentUsageMap,
-    DeploymentUsageRows, RESTATE_REMOVE_VERSION_AT_ANNOTATION, blocked_deletion_requeue,
-    deployment_usage_query, describe_abandoned_versions, describe_blocking_versions,
-    drain_deadline, unschedule_version_removal,
+    DeploymentUsageRows, RESTATE_REMOVE_VERSION_AT_ANNOTATION, STALE_ANSWER_POLL_SECONDS,
+    answer_was_stale, blocked_deletion_requeue, deployment_usage_query,
+    describe_abandoned_versions, describe_blocking_versions, drain_deadline,
+    unschedule_version_removal,
 };
 use crate::controllers::restatedeployment::reconcilers;
 use crate::controllers::restatedeployment::registration::{self, RegistrationAction};
@@ -615,6 +616,7 @@ impl RestateDeployment {
                         CleanupMode::Rollout,
                         &deployments,
                         Some(&versioned_name), // exclude the replicaset which may not be registered
+                        || async { self.list_deployments(&ctx, CleanupMode::Rollout).await },
                     )
                     .await
                     {
@@ -688,6 +690,53 @@ impl RestateDeployment {
             // would go on meaning "the pods are up" rather than "new work lands here".
             registration::confirm_latest(&ctx, &self.spec.restate.register, &registered).await?;
 
+            // `Register` means the answer left out the id we had recorded, and registering
+            // returned that same id: Restate had the deployment all along, so the answer was
+            // a stale snapshot. It cannot be used to decide that other versions are gone,
+            // which is what a node that has not loaded its schema would have us conclude.
+            let stale_answer = answer_was_stale(
+                existing_deployment_id.as_deref(),
+                &registered.id,
+                &deployments,
+            );
+
+            if stale_answer {
+                warn!(
+                    "Restate's deployment usage answer omits deployment {}, which is still registered; holding cleanup of old versions of RestateDeployment {} in namespace {namespace}",
+                    registered.id,
+                    self.name_any(),
+                );
+
+                let _ = ctx
+                    .recorder
+                    .publish(
+                        &Event {
+                            type_: EventType::Warning,
+                            reason: "StaleDeploymentUsage".into(),
+                            note: Some(format!(
+                                "Restate's deployment usage answer omits deployment {}, which re-registering returned again: it was stale. Holding cleanup of old versions of {} instead of removing versions it may simply have failed to list.",
+                                registered.id,
+                                self.name_any(),
+                            )),
+                            action: "Reconcile".into(),
+                            secondary: None,
+                        },
+                        &self.object_ref(&()),
+                    )
+                    .await;
+
+                return Ok((
+                    replicaset,
+                    Some(
+                        chrono::Utc::now()
+                            .checked_add_signed(chrono::TimeDelta::seconds(
+                                STALE_ANSWER_POLL_SECONDS,
+                            ))
+                            .expect("next_removal in bounds"),
+                    ),
+                ));
+            }
+
             if let RegistrationAction::Promote { superseded_by } = &action {
                 ctx.recorder
                     .publish(
@@ -739,6 +788,7 @@ impl RestateDeployment {
             CleanupMode::Rollout,
             &deployments,
             Some(&versioned_name),
+            || async { self.list_deployments(&ctx, CleanupMode::Rollout).await },
         )
         .await?;
 
@@ -1490,6 +1540,7 @@ impl RestateDeployment {
                 mode,
                 &deployments,
                 None,
+                || async { self.list_deployments(&ctx, query_mode).await },
             )
             .await?
         } else {
@@ -1503,6 +1554,7 @@ impl RestateDeployment {
                 mode,
                 &deployments,
                 None,
+                || async { self.list_deployments(&ctx, query_mode).await },
             )
             .await?
         };

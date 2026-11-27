@@ -303,6 +303,222 @@ pub(crate) fn retain_for_rollback(
     !mode.is_deleting() && historic_count < revision_history_limit
 }
 
+/// How soon to ask Restate again when its answer could not be trusted to date the
+/// registrations this RestateDeployment made. Long enough for a node that has just started
+/// to load its schema, short enough that a real deregistration is not delayed by much.
+pub(crate) const STALE_ANSWER_POLL_SECONDS: i64 = 10;
+
+/// How long to wait before taking the second answer that confirms an absence.
+pub(crate) const CONFIRM_ABSENCE_DELAY: Duration = Duration::from_secs(3);
+
+/// What cleanup does with one owned version, decided from Restate's answer and the version's
+/// own state alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VersionAction {
+    /// Restate still needs it: leave it running, and drop any pending deadline.
+    Keep,
+    /// Nothing needs it and no deadline is stamped: stamp one, `drainDelaySeconds` from the
+    /// moment the annotation is written.
+    Schedule,
+    /// Nothing needs it, and the deadline already stamped is still ahead.
+    Wait(chrono::DateTime<chrono::Utc>),
+    /// Nothing needs it, and it is kept for rollback: scale it down if it is still running,
+    /// and count it against the revision history limit.
+    Retain,
+    /// Tear it down now. `deregister` is set only for a deployment the answer still lists:
+    /// there is nothing to deregister for one it leaves out, or never had.
+    Remove { deregister: bool },
+}
+
+/// One owned version, in the order cleanup walks them (newest first).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct VersionFacts<'a> {
+    /// The Restate deployment id recorded on the version, if it was ever registered.
+    pub recorded_id: Option<&'a str>,
+    pub remove_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Pods this version runs. A ReplicaSet at 0 has nothing left to scale down. Always 0 in
+    /// Knative mode, which has no scale step.
+    pub replicas: i32,
+    /// Whether an operator HPA still targets this version: executing a retained slot deletes
+    /// it, which is a write an absence alone would explain.
+    pub has_hpa: bool,
+}
+
+/// One version's slot in a planned pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PlannedAction {
+    pub action: VersionAction,
+    /// Restate's answer saying nothing about this version's recorded id is what causes the
+    /// action — which is what a second answer has to confirm before it is executed.
+    pub caused_by_absence: bool,
+}
+
+/// Plan the whole pass: every owned version, newest first, with the revision history counted
+/// as it goes and each action flagged when only an absence explains it.
+///
+/// The reconcilers execute this verbatim, so what gets confirmed and what gets done cannot
+/// come from two different readings of the same answer.
+pub(crate) fn plan_pass<'a>(
+    versions: impl IntoIterator<Item = VersionFacts<'a>>,
+    deployments: &DeploymentUsageMap,
+    mode: CleanupMode,
+    revision_history_limit: i32,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<PlannedAction> {
+    let mut planned = Vec::new();
+    let mut historic_count = 0;
+
+    for facts in versions {
+        let usage = facts
+            .recorded_id
+            .and_then(|id| deployments.get(id))
+            .copied();
+
+        let action = plan_version(facts, usage, mode, now);
+        let action = match action {
+            VersionAction::Remove { .. }
+                if retain_for_rollback(mode, historic_count, revision_history_limit) =>
+            {
+                historic_count += 1;
+                VersionAction::Retain
+            }
+            action => action,
+        };
+
+        // A version that was never registered is not an absence any answer could be wrong
+        // about, and a force deletion was told to wait for nothing.
+        let caused_by_absence = facts.recorded_id.is_some()
+            && usage.is_none()
+            && !mode.skips_drain_delay()
+            && match action {
+                VersionAction::Schedule | VersionAction::Remove { .. } => true,
+                // its scale-down, and its HPA deletion, are ours to explain; anything else
+                // about it is not
+                VersionAction::Retain => facts.replicas > 0 || facts.has_hpa,
+                VersionAction::Keep | VersionAction::Wait(_) => false,
+            };
+
+        planned.push(PlannedAction {
+            action,
+            caused_by_absence,
+        });
+    }
+
+    planned
+}
+
+/// Decide what to do with one version, before the revision history has its say.
+fn plan_version(
+    facts: VersionFacts<'_>,
+    usage: Option<DeploymentUsage>,
+    mode: CleanupMode,
+    now: chrono::DateTime<chrono::Utc>,
+) -> VersionAction {
+    if facts.recorded_id.is_none() {
+        // Never registered, so no drain can be waiting on it. The out-of-capacity path
+        // depends on these going immediately.
+        return VersionAction::Remove { deregister: false };
+    }
+
+    let Some(usage) = usage else {
+        return plan_unneeded(facts, mode, now, false);
+    };
+
+    if usage.is_active(mode) {
+        return VersionAction::Keep;
+    }
+
+    plan_unneeded(facts, mode, now, true)
+}
+
+/// A version Restate no longer needs: gone once the drain delay is behind it.
+fn plan_unneeded(
+    facts: VersionFacts<'_>,
+    mode: CleanupMode,
+    now: chrono::DateTime<chrono::Utc>,
+    deregister: bool,
+) -> VersionAction {
+    if mode.skips_drain_delay() {
+        return VersionAction::Remove { deregister };
+    }
+
+    match facts.remove_at {
+        Some(remove_at) if remove_at < now => VersionAction::Remove { deregister },
+        Some(remove_at) => VersionAction::Wait(remove_at),
+        None => VersionAction::Schedule,
+    }
+}
+
+/// Plan the pass from one answer, and — if anything it plans would act on an absence — take
+/// the confirming answer after the delay and plan again from the merge. The plan that comes
+/// back, and the answer it was made from, are what the caller executes.
+pub(crate) async fn planned_pass<'a, F, Fut>(
+    versions: &[VersionFacts<'a>],
+    deployments: &DeploymentUsageMap,
+    mode: CleanupMode,
+    revision_history_limit: i32,
+    confirm: F,
+) -> Result<(Vec<PlannedAction>, DeploymentUsageMap)>
+where
+    F: FnOnce() -> Fut + Send,
+    Fut: std::future::Future<Output = Result<DeploymentUsageMap>> + Send,
+{
+    let plan = plan_pass(
+        versions.iter().copied(),
+        deployments,
+        mode,
+        revision_history_limit,
+        chrono::Utc::now(),
+    );
+
+    if !plan.iter().any(|planned| planned.caused_by_absence) {
+        return Ok((plan, deployments.clone()));
+    }
+
+    // The delay lives here, so no caller can forget it.
+    tokio::time::sleep(CONFIRM_ABSENCE_DELAY).await;
+    let merged = merge_answers(deployments, confirm().await?);
+    let plan = plan_pass(
+        versions.iter().copied(),
+        &merged,
+        mode,
+        revision_history_limit,
+        chrono::Utc::now(),
+    );
+
+    Ok((plan, merged))
+}
+
+/// Merge a second answer into the first: an id is absent only if both lack it, rows come
+/// from the second answer, and an id present only in the first keeps its first-answer row.
+pub(crate) fn merge_answers(
+    first: &DeploymentUsageMap,
+    second: DeploymentUsageMap,
+) -> DeploymentUsageMap {
+    let mut merged = second;
+
+    for (id, usage) in first {
+        merged.entry(id.clone()).or_insert(*usage);
+    }
+
+    merged
+}
+
+/// Whether registering a version returned the id it already had recorded while the answer the
+/// caller planned from left that id out.
+///
+/// Registration reads through Restate's metadata store, so it returns the existing deployment
+/// id for an endpoint Restate already knows. Getting back the id the answer omitted therefore
+/// says the answer was a stale snapshot — of a node that had not loaded its schema, say — and
+/// nothing may be concluded from what else it omitted.
+pub(crate) fn answer_was_stale(
+    recorded_id: Option<&str>,
+    registered_id: &str,
+    deployments: &DeploymentUsageMap,
+) -> bool {
+    recorded_id == Some(registered_id) && !deployments.contains_key(registered_id)
+}
+
 /// When a superseded version may be torn down.
 pub(crate) const RESTATE_REMOVE_VERSION_AT_ANNOTATION: &str = "restate.dev/remove-version-at";
 
@@ -357,6 +573,8 @@ pub(crate) async fn schedule_version_removal<K>(
 where
     K: Resource<DynamicType = ()> + Clone + DeserializeOwned + Debug,
 {
+    // Computed when the deadline is written, so earlier API calls in the same pass cannot
+    // shorten this version's drain.
     let remove_at = chrono::Utc::now()
         .checked_add_signed(chrono::TimeDelta::seconds(drain_delay_seconds))
         .expect("remove_version_at in bounds");
@@ -365,7 +583,7 @@ where
         kind = %K::kind(&()),
         version = %name,
         namespace = %namespace,
-        drain_delay_seconds,
+        drain_delay_seconds = drain_delay_seconds,
         remove_at = %remove_at.to_rfc3339(),
         "Scheduling removal of old version (after drain delay)"
     );
@@ -800,6 +1018,412 @@ mod tests {
         // retaining here would skip the deregistration below it and leak the registration
         assert!(!retain_for_rollback(CleanupMode::Deleting, 0, 10));
         assert!(!retain_for_rollback(CleanupMode::Deleting, 9, 10));
+    }
+
+    fn drained() -> DeploymentUsage {
+        usage(false, 0, 0)
+    }
+
+    fn active() -> DeploymentUsage {
+        usage(true, 0, 0)
+    }
+
+    /// One row per case of the decision table, planned through the same pass the reconcilers
+    /// execute.
+    #[test]
+    fn pass_plans_follow_the_decision_table() {
+        let now = chrono::Utc::now();
+        let later = now + chrono::TimeDelta::seconds(300);
+        let earlier = now - chrono::TimeDelta::seconds(60);
+
+        let alone = |facts: VersionFacts<'_>, answers: &DeploymentUsageMap, mode, limit| {
+            let plan = plan_pass([facts], answers, mode, limit, now);
+            assert_eq!(plan.len(), 1);
+            plan[0]
+        };
+        let facts = |recorded_id, remove_at| VersionFacts {
+            recorded_id,
+            remove_at,
+            replicas: 3,
+            has_hpa: false,
+        };
+        let registered: DeploymentUsageMap = [("dp_v1".to_owned(), drained())].into();
+
+        let rows = [
+            (
+                "no recorded id",
+                facts(None, None),
+                &DeploymentUsageMap::new(),
+                CleanupMode::Rollout,
+                PlannedAction {
+                    action: VersionAction::Remove { deregister: false },
+                    caused_by_absence: false,
+                },
+            ),
+            (
+                "present, active",
+                facts(Some("dp_v1"), Some(earlier)),
+                &[("dp_v1".to_owned(), active())].into(),
+                CleanupMode::Rollout,
+                PlannedAction {
+                    action: VersionAction::Keep,
+                    caused_by_absence: false,
+                },
+            ),
+            (
+                "present, inactive, nothing scheduled",
+                facts(Some("dp_v1"), None),
+                &registered,
+                CleanupMode::Rollout,
+                PlannedAction {
+                    action: VersionAction::Schedule,
+                    caused_by_absence: false,
+                },
+            ),
+            (
+                "present, inactive, deadline ahead",
+                facts(Some("dp_v1"), Some(later)),
+                &registered,
+                CleanupMode::Rollout,
+                PlannedAction {
+                    action: VersionAction::Wait(later),
+                    caused_by_absence: false,
+                },
+            ),
+            (
+                "present, inactive, deadline passed, no history left",
+                facts(Some("dp_v1"), Some(earlier)),
+                &registered,
+                CleanupMode::Rollout,
+                PlannedAction {
+                    action: VersionAction::Remove { deregister: true },
+                    caused_by_absence: false,
+                },
+            ),
+            (
+                "absent, nothing scheduled",
+                facts(Some("dp_v1"), None),
+                &DeploymentUsageMap::new(),
+                CleanupMode::Rollout,
+                PlannedAction {
+                    action: VersionAction::Schedule,
+                    caused_by_absence: true,
+                },
+            ),
+            (
+                "absent, deadline passed",
+                facts(Some("dp_v1"), Some(earlier)),
+                &DeploymentUsageMap::new(),
+                CleanupMode::Rollout,
+                PlannedAction {
+                    // nothing left to deregister: the answer does not list it
+                    action: VersionAction::Remove { deregister: false },
+                    caused_by_absence: true,
+                },
+            ),
+        ];
+
+        for (case, facts, answers, mode, expected) in rows {
+            assert_eq!(alone(facts, answers, mode, 0), expected, "{case}");
+        }
+
+        // nothing to act on: an absent version kept by the history is not confirmed
+        assert_eq!(
+            alone(
+                VersionFacts {
+                    recorded_id: Some("dp_v1"),
+                    remove_at: Some(earlier),
+                    replicas: 0,
+                    has_hpa: false,
+                },
+                &DeploymentUsageMap::new(),
+                CleanupMode::Rollout,
+                10,
+            ),
+            PlannedAction {
+                action: VersionAction::Retain,
+                caused_by_absence: false,
+            },
+            "a zero-replica absence kept for rollback is not acted on",
+        );
+    }
+
+    /// A force deletion neither waits out the drain delay nor confirms an absence.
+    #[test]
+    fn force_deletion_plans_remove_everything_at_once() {
+        let now = chrono::Utc::now();
+        let later = now + chrono::TimeDelta::seconds(300);
+        let facts = |recorded_id| VersionFacts {
+            recorded_id,
+            remove_at: Some(later),
+            replicas: 3,
+            has_hpa: false,
+        };
+        let registered: DeploymentUsageMap = [("dp_v1".to_owned(), drained())].into();
+
+        let rows = [
+            (
+                "present, active",
+                facts(Some("dp_v1")),
+                &[("dp_v1".to_owned(), active())].into(),
+                VersionAction::Remove { deregister: true },
+            ),
+            (
+                "present, inactive",
+                facts(Some("dp_v1")),
+                &registered,
+                VersionAction::Remove { deregister: true },
+            ),
+            (
+                "absent",
+                facts(Some("dp_v1")),
+                &DeploymentUsageMap::new(),
+                VersionAction::Remove { deregister: false },
+            ),
+            (
+                "no recorded id",
+                facts(None),
+                &DeploymentUsageMap::new(),
+                VersionAction::Remove { deregister: false },
+            ),
+        ];
+
+        for (case, facts, answers, action) in rows {
+            let plan = plan_pass([facts], answers, CleanupMode::ForceDeleting, 10, now);
+            assert_eq!(
+                plan[0],
+                PlannedAction {
+                    action,
+                    caused_by_absence: false,
+                },
+                "{case}",
+            );
+        }
+    }
+
+    /// The history slots are counted by the planner itself, whoever fills them: a version
+    /// that was never registered, or one the answer lists as drained, leaves an absent
+    /// zero-replica version past its deadline with no slot — so its removal rests on an
+    /// absence and must be confirmed.
+    #[test]
+    fn history_slots_filled_by_any_version_push_the_next_one_out() {
+        let now = chrono::Utc::now();
+        let earlier = now - chrono::TimeDelta::seconds(60);
+
+        let older_absent = VersionFacts {
+            recorded_id: Some("dp_old"),
+            remove_at: Some(earlier),
+            replicas: 0,
+            has_hpa: false,
+        };
+        let setup = |newer: VersionFacts<'_>| {
+            plan_pass(
+                [
+                    VersionFacts {
+                        remove_at: Some(earlier),
+                        ..newer
+                    },
+                    older_absent,
+                ],
+                &[("dp_new".to_owned(), drained())].into(),
+                CleanupMode::Rollout,
+                1,
+                now,
+            )
+        };
+
+        // (a) a never-registered newer version is scaled down and takes the only slot
+        let plan = setup(VersionFacts {
+            recorded_id: None,
+            remove_at: None,
+            replicas: 3,
+            has_hpa: false,
+        });
+        assert_eq!(plan[0].action, VersionAction::Retain);
+        assert!(
+            !plan[0].caused_by_absence,
+            "nothing was registered to be absent"
+        );
+        assert_eq!(
+            plan[1],
+            PlannedAction {
+                action: VersionAction::Remove { deregister: false },
+                caused_by_absence: true,
+            },
+            "the older version's delete rests on the answer's silence",
+        );
+
+        // (b) so does a listed, drained newer version
+        let plan = setup(VersionFacts {
+            recorded_id: Some("dp_new"),
+            remove_at: None,
+            replicas: 3,
+            has_hpa: false,
+        });
+        assert_eq!(plan[0].action, VersionAction::Retain);
+        assert_eq!(
+            plan[1],
+            PlannedAction {
+                action: VersionAction::Remove { deregister: false },
+                caused_by_absence: true,
+            },
+        );
+    }
+
+    /// The merge rule: rows from the second answer, an id is absent only if both lack it,
+    /// and an id present only in the first keeps its first-answer row.
+    #[test]
+    fn a_second_answer_only_adds_to_the_first() {
+        let first: DeploymentUsageMap = [
+            ("dp_v1".to_owned(), active()),
+            ("dp_gone".to_owned(), drained()),
+        ]
+        .into();
+        let second: DeploymentUsageMap = [
+            ("dp_v1".to_owned(), drained()),
+            ("dp_v2".to_owned(), active()),
+        ]
+        .into();
+
+        let merged = merge_answers(&first, second);
+
+        assert_eq!(
+            merged.get("dp_v1"),
+            Some(&drained()),
+            "the second answer wins"
+        );
+        assert_eq!(merged.get("dp_v2"), Some(&active()));
+        assert_eq!(
+            merged.get("dp_gone"),
+            Some(&drained()),
+            "an id only the first answer had keeps its first-answer row, so a version it \
+             called active stays active",
+        );
+    }
+
+    /// The confirmation is only paid for when the plan would act on an absence, and it is
+    /// the merged answer the pass is then planned from.
+    #[tokio::test(start_paused = true)]
+    async fn a_second_answer_is_taken_only_when_an_absence_is_acted_on() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let asked = Arc::new(AtomicUsize::new(0));
+        let absent = |replicas| VersionFacts {
+            recorded_id: Some("dp_v1"),
+            remove_at: None,
+            replicas,
+            has_hpa: false,
+        };
+
+        let present: DeploymentUsageMap = [("dp_v1".to_owned(), drained())].into();
+        let past = |replicas| VersionFacts {
+            remove_at: Some(chrono::Utc::now() - chrono::TimeDelta::seconds(60)),
+            ..absent(replicas)
+        };
+        let (plan, answers) = planned_pass(&[past(3)], &present, CleanupMode::Rollout, 10, || {
+            let asked = asked.clone();
+            async move {
+                asked.fetch_add(1, Ordering::SeqCst);
+                Ok(DeploymentUsageMap::new())
+            }
+        })
+        .await
+        .expect("no confirmation needed");
+        assert_eq!(asked.load(Ordering::SeqCst), 0);
+        assert_eq!(plan[0].action, VersionAction::Retain);
+        assert_eq!(answers.get("dp_v1"), Some(&drained()));
+
+        let second: DeploymentUsageMap = [("dp_v1".to_owned(), active())].into();
+        let (plan, answers) = planned_pass(
+            &[absent(3)],
+            &DeploymentUsageMap::new(),
+            CleanupMode::Rollout,
+            0,
+            || {
+                let asked = asked.clone();
+                let second = second.clone();
+                async move {
+                    asked.fetch_add(1, Ordering::SeqCst);
+                    Ok(second)
+                }
+            },
+        )
+        .await
+        .expect("the second answer is taken");
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            plan[0].action,
+            VersionAction::Keep,
+            "the version the first answer omitted is not treated as absent",
+        );
+        assert_eq!(answers.get("dp_v1"), Some(&active()));
+        assert_eq!(CONFIRM_ABSENCE_DELAY, Duration::from_secs(3));
+    }
+
+    /// The delay before the second query lives in the shared path, not in a caller: measured
+    /// on tokio's clock, which auto-advances to the timer while the runtime is idle.
+    #[tokio::test(start_paused = true)]
+    async fn the_second_query_waits_for_the_confirmation_delay() {
+        use std::sync::Arc;
+        use std::sync::Mutex;
+        use tokio::time::Instant;
+
+        let started = Instant::now();
+        let asked_at = Arc::new(Mutex::new(None::<Instant>));
+        let recorded = asked_at.clone();
+        let second: DeploymentUsageMap = [("dp_v1".to_owned(), active())].into();
+        let absent = VersionFacts {
+            recorded_id: Some("dp_v1"),
+            remove_at: None,
+            replicas: 3,
+            has_hpa: false,
+        };
+
+        planned_pass(
+            &[absent],
+            &DeploymentUsageMap::new(),
+            CleanupMode::Rollout,
+            0,
+            move || {
+                *recorded.lock().expect("the clock reading is not poisoned") = Some(Instant::now());
+                let second = second.clone();
+                async move { Ok(second) }
+            },
+        )
+        .await
+        .expect("the second answer is taken");
+
+        let asked_at = asked_at
+            .lock()
+            .expect("the clock reading is not poisoned")
+            .expect("the second query was taken");
+        assert!(
+            asked_at >= started + CONFIRM_ABSENCE_DELAY,
+            "the second query must not start before the delay: {:?} into the pass",
+            asked_at - started,
+        );
+        assert!(
+            asked_at < started + CONFIRM_ABSENCE_DELAY * 2,
+            "and not later than the timer that wakes it",
+        );
+    }
+
+    /// Re-registering an endpoint Restate already had returns the id we recorded, which is
+    /// only surprising — and only evidence of a stale answer — when the answer omitted it.
+    #[test]
+    fn registering_the_id_we_already_had_means_the_answer_was_stale() {
+        let answered: DeploymentUsageMap = [("dp_v1".to_owned(), drained())].into();
+        let empty = DeploymentUsageMap::new();
+
+        assert!(answer_was_stale(Some("dp_v1"), "dp_v1", &empty));
+
+        // the answer had the id: this is the already-latest or promote case, not staleness
+        assert!(!answer_was_stale(Some("dp_v1"), "dp_v1", &answered));
+        // a first registration has no recorded id to be stale about
+        assert!(!answer_was_stale(None, "dp_v1", &empty));
+        // ...and a genuinely new deployment gets a new id
+        assert!(!answer_was_stale(Some("dp_v0"), "dp_v1", &empty));
     }
 
     #[test]

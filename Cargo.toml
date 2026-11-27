@@ -92,4 +92,5 @@ http = "1"
 # Drives real service registration and invocation lifecycle in the Docker-backed
 # RestateDeployment introspection e2e tests.
 restate-sdk = "0.11.0"
+tokio = { version = "1.48.0", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
