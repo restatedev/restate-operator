@@ -15,8 +15,8 @@ use tracing::*;
 
 use crate::controllers::restatedeployment::cleanup::{
     BlockingVersion, CleanupMode, CleanupOutcome, DeploymentUsageMap,
-    RESTATE_REMOVE_VERSION_AT_ANNOTATION, retain_for_rollback, schedule_version_removal,
-    unschedule_version_removal,
+    RESTATE_REMOVE_VERSION_AT_ANNOTATION, VersionAction, VersionFacts, planned_pass,
+    schedule_version_removal, unschedule_version_removal,
 };
 use crate::controllers::restatedeployment::controller::{
     APP_MANAGED_BY_LABEL, Context, OWNED_BY_LABEL, RESTATE_DEPLOYMENT_ID_ANNOTATION,
@@ -276,7 +276,7 @@ fn safe_encode_u32(mut val: u32) -> String {
 
 /// Delete ReplicaSets that are no longer needed
 #[allow(clippy::too_many_arguments)]
-pub async fn cleanup_old_replicasets(
+pub async fn cleanup_old_replicasets<F, Fut>(
     namespace: &str,
     ctx: &Context,
     rs_api: &Api<ReplicaSet>,
@@ -285,7 +285,12 @@ pub async fn cleanup_old_replicasets(
     mode: CleanupMode,
     deployments: &DeploymentUsageMap,
     except_rs: Option<&str>,
-) -> Result<CleanupOutcome> {
+    confirm: F,
+) -> Result<CleanupOutcome>
+where
+    F: FnOnce() -> Fut + Send,
+    Fut: std::future::Future<Output = Result<DeploymentUsageMap>> + Send,
+{
     let replicasets_cell = std::cell::Cell::new(Vec::new());
 
     let _ = ctx.replicasets_store.find(|rs| {
@@ -335,59 +340,100 @@ pub async fn cleanup_old_replicasets(
     let mut blocking = Vec::new();
     // versions a force deletion tore down with invocations still running
     let mut abandoned = Vec::new();
-    // Keep track of how many zero-scaled rs there are (for revision history limit)
-    let mut historic_count = 0;
-    let mut next_removal = None;
+    let mut next_removal: Option<chrono::DateTime<chrono::Utc>> = None;
 
-    let now = chrono::Utc::now();
+    /// Everything the planner needs to know about one version.
+    fn facts<'a>(rs: &'a ReplicaSet, ctx: &Context, namespace: &str) -> VersionFacts<'a> {
+        VersionFacts {
+            recorded_id: rs
+                .annotations()
+                .get(RESTATE_DEPLOYMENT_ID_ANNOTATION)
+                .map(String::as_str),
+            remove_at: rs
+                .annotations()
+                .get(RESTATE_REMOVE_VERSION_AT_ANNOTATION)
+                .and_then(|remove_at| {
+                    chrono::DateTime::parse_from_rfc3339(remove_at)
+                        .map(|t| t.to_utc())
+                        .ok()
+                }),
+            replicas: rs.spec.as_ref().and_then(|spec| spec.replicas).unwrap_or(1),
+            // a retained slot still has its HPA deleted, which is a write of its own
+            has_hpa: ctx
+                .hpa_store
+                .get(&ObjectRef::<HorizontalPodAutoscaler>::new(&rs.name_any()).within(namespace))
+                .is_some(),
+        }
+    }
 
-    for rs in replicasets {
+    let facts: Vec<VersionFacts<'_>> = replicasets
+        .iter()
+        .map(|rs| facts(rs, ctx, namespace))
+        .collect();
+
+    // Nothing in this pass may act on a single answer that leaves a registered id out: a
+    // node that has not loaded its schema answers with no rows at all (restate#6063), and
+    // any answer is a snapshot that omits whatever was registered after it.
+    let (plan, deployments) = planned_pass(
+        &facts,
+        deployments,
+        mode,
+        rsd.spec.revision_history_limit,
+        confirm,
+    )
+    .await?;
+
+    for (rs, planned) in replicasets.into_iter().zip(plan) {
         let rs_name = rs.name_any();
 
-        let rs_deployment_id = rs.annotations().get(RESTATE_DEPLOYMENT_ID_ANNOTATION);
-
-        // Skip active deployments
-        let deployment = rs_deployment_id
+        let rs_deployment_id = rs
+            .annotations()
+            .get(RESTATE_DEPLOYMENT_ID_ANNOTATION)
+            .cloned();
+        let usage = rs_deployment_id
+            .as_deref()
             .and_then(|rs_deployment_id| deployments.get(rs_deployment_id).copied());
-        let deployment_exists = deployment.is_some();
+        // what the planner already decided; the executor re-derives nothing
+        let action = planned.action;
 
-        if let Some(usage) = deployment.filter(|usage| usage.is_active(mode)) {
-            blocking.push(BlockingVersion {
-                deployment_id: rs_deployment_id.cloned(),
-                name: rs_name.clone(),
-                usage,
-            });
+        match action {
+            VersionAction::Keep => {
+                blocking.push(BlockingVersion {
+                    deployment_id: rs_deployment_id,
+                    name: rs_name.clone(),
+                    usage: usage.expect("an active version has a row in the answer"),
+                });
 
-            // Per-version autoscaling: a non-latest version has an operator HPA
-            // iff it is still active and autoscaling is configured. (See
-            // `plan_active_version_hpa` for the decision; the inactive case is
-            // handled unconditionally below, before scale-down.)
-            match super::autoscaling::plan_active_version_hpa(
-                rsd.spec.autoscaling.is_some(),
-                mode.is_deleting(),
-            ) {
-                HpaPlan::Ensure => {
-                    if let Some(template) = rsd.spec.autoscaling.as_ref()
-                        && let Err(err) = super::autoscaling::reconcile_version_hpa(
-                            &ctx.client,
-                            rsd,
-                            namespace,
-                            &rs_name,
-                            template,
-                        )
-                        .await
-                    {
-                        // A bad autoscaling template (rejected by the apiserver at
-                        // HPA-apply time) or a transient apply failure must not wedge
-                        // cleanup of every other version — drain scheduling, scale-down
-                        // and teardown still need to run. Surface it and carry on; this
-                        // version just stays at full replicas (no worse than no
-                        // autoscaling) until the template is fixed or the apply succeeds.
-                        warn!(
-                            "failed to apply autoscaling HPA for {rs_name} in {namespace}: {err}; \
+                // Per-version autoscaling: a non-latest version has an operator HPA
+                // iff it is still active and autoscaling is configured. (See
+                // `plan_active_version_hpa` for the decision; the inactive case is
+                // handled unconditionally below, before scale-down.)
+                match super::autoscaling::plan_active_version_hpa(
+                    rsd.spec.autoscaling.is_some(),
+                    mode.is_deleting(),
+                ) {
+                    HpaPlan::Ensure => {
+                        if let Some(template) = rsd.spec.autoscaling.as_ref()
+                            && let Err(err) = super::autoscaling::reconcile_version_hpa(
+                                &ctx.client,
+                                rsd,
+                                namespace,
+                                &rs_name,
+                                template,
+                            )
+                            .await
+                        {
+                            // A bad autoscaling template (rejected by the apiserver at
+                            // HPA-apply time) or a transient apply failure must not wedge
+                            // cleanup of every other version — drain scheduling, scale-down
+                            // and teardown still need to run. Surface it and carry on; this
+                            // version just stays at full replicas (no worse than no
+                            // autoscaling) until the template is fixed or the apply succeeds.
+                            warn!(
+                                "failed to apply autoscaling HPA for {rs_name} in {namespace}: {err}; \
                              continuing (other versions unaffected)"
-                        );
-                        let _ = ctx
+                            );
+                            let _ = ctx
                             .recorder
                             .publish(
                                 &Event {
@@ -402,66 +448,66 @@ pub async fn cleanup_old_replicasets(
                                 &rsd.object_ref(&()),
                             )
                             .await;
+                        }
                     }
-                }
-                HpaPlan::RemoveAndRestore => {
-                    // Autoscaling was disabled/removed: if we previously created an
-                    // HPA for this version, drop it and restore the version to full
-                    // replicas. Gate on the owned-HPA cache — it avoids a blind
-                    // DELETE per draining version every reconcile in the common
-                    // (no-autoscaling) case, and since the cache only holds our
-                    // managed-by-labelled HPAs it doubles as an ownership check, so
-                    // we never delete a user's hand-rolled HPA that happens to share
-                    // the ReplicaSet's name.
-                    let hpa_ref =
-                        ObjectRef::<HorizontalPodAutoscaler>::new(&rs_name).within(namespace);
-                    if ctx.hpa_store.get(&hpa_ref).is_some() {
-                        super::autoscaling::delete_version_hpa(&ctx.client, namespace, &rs_name)
-                            .await?;
-                        rs_api
-                            .patch_scale(
+                    HpaPlan::RemoveAndRestore => {
+                        // Autoscaling was disabled/removed: if we previously created an
+                        // HPA for this version, drop it and restore the version to full
+                        // replicas. Gate on the owned-HPA cache so we only call the API
+                        // when an HPA actually exists.
+                        let hpa_ref =
+                            ObjectRef::<HorizontalPodAutoscaler>::new(&rs_name).within(namespace);
+                        if ctx.hpa_store.get(&hpa_ref).is_some() {
+                            super::autoscaling::delete_version_hpa(
+                                &ctx.client,
+                                namespace,
                                 &rs_name,
-                                &PatchParams::apply("restate-operator/scale-restore").force(),
-                                &Patch::Apply(serde_json::json!({
-                                    "apiVersion": Scale::api_version(&()),
-                                    "kind": Scale::kind(&()),
-                                    "spec": { "replicas": rsd.spec.replicas }
-                                })),
                             )
                             .await?;
+                            rs_api
+                                .patch_scale(
+                                    &rs_name,
+                                    &PatchParams::apply("restate-operator/scale-restore").force(),
+                                    &Patch::Apply(serde_json::json!({
+                                        "apiVersion": Scale::api_version(&()),
+                                        "kind": Scale::kind(&()),
+                                        "spec": { "replicas": rsd.spec.replicas }
+                                    })),
+                                )
+                                .await?;
+                        }
                     }
+                    HpaPlan::Skip => {}
                 }
-                HpaPlan::Skip => {}
+
+                // it was scheduled for removal but looks active again, so reset the timer
+                unschedule_version_removal(rs_api, &rs).await?;
+
+                continue;
             }
+            VersionAction::Schedule => {
+                // the deadline is computed when it is written, so the API calls above
+                // cannot shorten this version's drain
+                let remove_at = schedule_version_removal(
+                    rs_api,
+                    namespace,
+                    &rs_name,
+                    rsd.spec.restate.drain_delay_seconds(),
+                )
+                .await?;
 
-            // it was scheduled for removal but looks active again, so reset the timer
-            unschedule_version_removal(rs_api, &rs).await?;
+                next_removal =
+                    Some(next_removal.map_or(remove_at, |soonest| soonest.min(remove_at)));
 
-            continue;
-        }
+                continue;
+            }
+            VersionAction::Wait(remove_at) => {
+                next_removal =
+                    Some(next_removal.map_or(remove_at, |soonest| soonest.min(remove_at)));
 
-        let current_remove_at = rs
-            .annotations()
-            .get(RESTATE_REMOVE_VERSION_AT_ANNOTATION)
-            .and_then(|remove_at| {
-                chrono::DateTime::parse_from_rfc3339(remove_at)
-                    .map(|t| t.to_utc())
-                    .ok()
-            });
-
-        // a force deletion doesn't wait out the drain delay, so every version it gets
-        // this far with is due for removal now
-        let current_remove_at_in_past =
-            current_remove_at.is_some_and(|c| c < now) || mode.skips_drain_delay();
-
-        match (
-            current_remove_at,
-            current_remove_at_in_past,
-            deployment_exists,
-        ) {
-            (_, true, _) | (_, _, false) => {
-                // we are past the remove at time, or the endpoint was removed by other means; can now scale it down
-
+                continue;
+            }
+            VersionAction::Retain | VersionAction::Remove { .. } => {
                 // Remove any operator HPA first: its minReplicas floor (>= 1) would fight
                 // the scale to zero below, and would hold the version at the floor through
                 // the revision-history retention window. Gate on the owned-HPA cache so we
@@ -499,23 +545,23 @@ pub async fn cleanup_old_replicasets(
                         .await?;
                 }
 
-                // If we are here, there is a 0 sized replicaset which should be subject to the history limit
-                if retain_for_rollback(mode, historic_count, rsd.spec.revision_history_limit) {
-                    historic_count += 1;
-                    // we haven't hit that limit yet, so we don't need to delete this rs
+                if action == VersionAction::Retain {
+                    // the planner already counted it against the revision history
                     continue;
                 }
 
-                if let Some(usage) = deployment.filter(|usage| usage.in_flight_invocations() > 0) {
+                if let Some(usage) = usage.filter(|usage| usage.in_flight_invocations() > 0) {
                     abandoned.push(BlockingVersion {
-                        deployment_id: rs_deployment_id.cloned(),
+                        deployment_id: rs_deployment_id.clone(),
                         name: rs_name.clone(),
                         usage,
                     });
                 }
 
-                if deployment_exists {
-                    let rs_deployment_id = rs_deployment_id.unwrap();
+                if let VersionAction::Remove { deregister: true } = action {
+                    let rs_deployment_id = rs_deployment_id
+                        .as_deref()
+                        .expect("only a listed deployment can be deregistered");
 
                     debug!(
                         "Force-deleting Restate deployment {rs_deployment_id} as its associated with old ReplicaSet {rs_name} in namespace {namespace}"
@@ -541,35 +587,6 @@ pub async fn cleanup_old_replicasets(
 
                 debug!("Deleting old ReplicaSet {rs_name} in namespace {namespace}");
                 rs_api.delete(&rs_name, &Default::default()).await?;
-
-                continue;
-            }
-            (Some(remove_at), false, true) => {
-                // endpoint exists and remove at time is in the future, ensure we keep track of the soonest such time
-                next_removal = match next_removal {
-                    None => Some(remove_at),
-                    Some(next_removal) if next_removal > remove_at => Some(remove_at),
-                    els => els,
-                };
-
-                continue;
-            }
-            (None, _, true) => {
-                // endpoint exists and there's no valid remove_version_at annotation, create one
-                let remove_at = schedule_version_removal(
-                    rs_api,
-                    namespace,
-                    &rs_name,
-                    rsd.spec.restate.drain_delay_seconds(),
-                )
-                .await?;
-
-                // ensure we keep track of the soonest remove_at
-                next_removal = match next_removal {
-                    None => Some(remove_at),
-                    Some(next_removal) if next_removal > remove_at => Some(remove_at),
-                    els => els,
-                };
 
                 continue;
             }
@@ -819,6 +836,15 @@ mod tests {
         const NAMESPACE: &str = "apps";
         const RSD_UID: &str = "uid-123";
         const VERSION: &str = "greeter-old";
+        /// The version being rolled out: excluded from the sweep, but its recorded id is
+        /// what dates the answer cleanup is given.
+        const CURRENT: &str = "greeter-new";
+        const NEVER_REGISTERED: &str = "greeter-fresh";
+        const CURRENT_DEPLOYMENT_ID: &str = "dp_current";
+        /// The scale patch, as the apiserver stub records it.
+        fn scale_of(version: &str) -> String {
+            format!("PATCH /apis/apps/v1/namespaces/{NAMESPACE}/replicasets/{version}/scale")
+        }
 
         /// One request the reconciler made.
         #[derive(Clone)]
@@ -1001,6 +1027,10 @@ mod tests {
         /// Stand-in for the Restate admin API: records the request line into the same
         /// call log as the apiserver stub, and answers 200 to everything.
         async fn admin_stub(calls: Calls) -> url::Url {
+            admin_stub_with_delay(calls, std::time::Duration::ZERO).await
+        }
+
+        async fn admin_stub_with_delay(calls: Calls, delay: std::time::Duration) -> url::Url {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1012,6 +1042,7 @@ mod tests {
                 while let Ok((mut socket, _)) = listener.accept().await {
                     let calls = calls.clone();
                     tokio::spawn(async move {
+                        tokio::time::sleep(delay).await;
                         let mut buf = [0u8; 2048];
                         let read = socket.read(&mut buf).await.unwrap_or(0);
                         if let Some(request_line) =
@@ -1040,9 +1071,17 @@ mod tests {
         }
 
         fn rsd(autoscaling: bool, deleting: bool) -> RestateDeployment {
+            rsd_with_history(10, autoscaling, deleting)
+        }
+
+        fn rsd_with_history(
+            revision_history_limit: i32,
+            autoscaling: bool,
+            deleting: bool,
+        ) -> RestateDeployment {
             let spec = serde_json::from_value(json!({
                 "replicas": 3,
-                "revisionHistoryLimit": 10,
+                "revisionHistoryLimit": revision_history_limit,
                 "template": {
                     "metadata": null,
                     "spec": { "containers": [{ "name": "app", "image": "greeter:v1" }] }
@@ -1066,15 +1105,37 @@ mod tests {
             rsd
         }
 
+        const OLDER: &str = "2026-01-01T00:00:00Z";
+        /// An older version, when a test needs two of them.
+        const OLDER_VERSION: &str = "greeter-older";
+        const NEWER: &str = "2026-01-02T00:00:00Z";
+
         fn version(
             deployment_id: &str,
             remove_at: Option<chrono::DateTime<chrono::Utc>>,
         ) -> ReplicaSet {
+            versioned(VERSION, Some(deployment_id), remove_at, 3, OLDER)
+        }
+
+        /// A version that was never registered carries no deployment-id annotation.
+        fn unregistered_version() -> ReplicaSet {
+            versioned(VERSION, None, None, 3, OLDER)
+        }
+
+        fn versioned(
+            name: &str,
+            deployment_id: Option<&str>,
+            remove_at: Option<chrono::DateTime<chrono::Utc>>,
+            replicas: i32,
+            created: &str,
+        ) -> ReplicaSet {
             let mut annotations = serde_json::Map::new();
-            annotations.insert(
-                RESTATE_DEPLOYMENT_ID_ANNOTATION.into(),
-                json!(deployment_id),
-            );
+            if let Some(deployment_id) = deployment_id {
+                annotations.insert(
+                    RESTATE_DEPLOYMENT_ID_ANNOTATION.into(),
+                    json!(deployment_id),
+                );
+            }
             if let Some(remove_at) = remove_at {
                 annotations.insert(
                     RESTATE_REMOVE_VERSION_AT_ANNOTATION.into(),
@@ -1086,9 +1147,9 @@ mod tests {
                 "apiVersion": "apps/v1",
                 "kind": "ReplicaSet",
                 "metadata": {
-                    "name": VERSION,
+                    "name": name,
                     "namespace": NAMESPACE,
-                    "creationTimestamp": "2026-01-01T00:00:00Z",
+                    "creationTimestamp": created,
                     "annotations": annotations,
                     "ownerReferences": [{
                         "apiVersion": "restate.dev/v1beta1",
@@ -1098,7 +1159,7 @@ mod tests {
                         "controller": true,
                     }],
                 },
-                "spec": { "replicas": 3 },
+                "spec": { "replicas": replicas },
             }))
             .expect("test ReplicaSet deserializes")
         }
@@ -1122,13 +1183,80 @@ mod tests {
             [(deployment_id.to_owned(), usage)].into()
         }
 
+        /// A second answer, counted so a test can assert whether the query was taken at all.
+        struct SecondAnswer {
+            answer: DeploymentUsageMap,
+            asked: Arc<Mutex<usize>>,
+        }
+
+        impl SecondAnswer {
+            fn empty() -> Self {
+                Self::of(DeploymentUsageMap::new())
+            }
+
+            fn of(answer: DeploymentUsageMap) -> Self {
+                Self {
+                    answer,
+                    asked: Arc::new(Mutex::new(0)),
+                }
+            }
+
+            fn asked(&self) -> usize {
+                *self.asked.lock().expect("the counter is not poisoned")
+            }
+
+            /// The capability the reconciler calls when something rests on an absence. No
+            /// delay: the wait lives in the caller's closure, not in the rule.
+            fn confirm(&self) -> impl FnOnce() -> std::future::Ready<Result<DeploymentUsageMap>> {
+                let answer = self.answer.clone();
+                let asked = self.asked.clone();
+                move || {
+                    *asked.lock().expect("the counter is not poisoned") += 1;
+                    std::future::ready(Ok(answer))
+                }
+            }
+        }
+
+        fn answer_of(
+            entries: impl IntoIterator<Item = (&'static str, DeploymentUsage)>,
+        ) -> DeploymentUsageMap {
+            entries
+                .into_iter()
+                .map(|(id, usage)| (id.to_owned(), usage))
+                .collect()
+        }
+
+        fn active_row() -> DeploymentUsage {
+            DeploymentUsage {
+                latest_for_service: true,
+                ..Default::default()
+            }
+        }
+
+        fn pinned_row() -> DeploymentUsage {
+            DeploymentUsage {
+                pinned_invocations: 1,
+                ..Default::default()
+            }
+        }
+
         /// The autoscaler comes off immediately before the scale to zero, in the same
         /// branch: its `minReplicas` floor of 1 would otherwise fight the scale-down and
         /// hold the version at that floor for the whole retention window.
-        #[tokio::test]
+        #[tokio::test(start_paused = true)]
         async fn autoscaler_is_removed_immediately_before_the_scale_to_zero() {
             let rsd = rsd(true, false);
-            let harness = harness(vec![version("dp_gone", None)], vec![version_hpa()]);
+            let harness = harness(
+                vec![version(
+                    "dp_gone",
+                    // it drained once already, so its deadline has passed
+                    Some(chrono::Utc::now() - chrono::TimeDelta::seconds(60)),
+                )],
+                vec![version_hpa()],
+            );
+
+            // both answers leave it out: the absence is confirmed
+            let second = SecondAnswer::empty();
 
             let CleanupOutcome {
                 blocking,
@@ -1141,14 +1269,14 @@ mod tests {
                 RSD_UID,
                 &rsd,
                 CleanupMode::Rollout,
-                // the endpoint was deregistered by other means, so the version is
-                // scaled down on this pass rather than waiting out a drain
                 &DeploymentUsageMap::new(),
                 None,
+                second.confirm(),
             )
             .await
             .expect("cleanup succeeds");
 
+            assert_eq!(second.asked(), 1);
             assert!(blocking.is_empty());
             assert_eq!(next_removal, None);
             assert_eq!(
@@ -1157,15 +1285,14 @@ mod tests {
                     format!(
                         "DELETE /apis/autoscaling/v2/namespaces/{NAMESPACE}/horizontalpodautoscalers/{VERSION}"
                     ),
-                    format!(
-                        "PATCH /apis/apps/v1/namespaces/{NAMESPACE}/replicasets/{VERSION}/scale"
-                    ),
+                    scale_of(VERSION),
                 ],
             );
         }
 
         /// ...and not before that. A version waiting out its drain deadline is still
-        /// serving traffic, so it keeps the autoscaler it was given.
+        /// serving traffic, so it keeps the autoscaler it was given, and an answer that
+        /// lists it costs no second query.
         #[tokio::test]
         async fn draining_version_keeps_its_autoscaler_until_the_deadline() {
             let rsd = rsd(true, false);
@@ -1175,6 +1302,7 @@ mod tests {
                 vec![version_hpa()],
             );
 
+            let second = SecondAnswer::empty();
             let CleanupOutcome {
                 blocking,
                 next_removal,
@@ -1189,10 +1317,12 @@ mod tests {
                 // registered, superseded, and nothing in flight: drained but not yet due
                 &usage_of("dp_draining", DeploymentUsage::default()),
                 None,
+                second.confirm(),
             )
             .await
             .expect("cleanup succeeds");
 
+            assert_eq!(second.asked(), 0, "nothing rests on an absence");
             assert!(blocking.is_empty());
             assert_eq!(next_removal, Some(remove_at));
             assert_eq!(
@@ -1222,6 +1352,7 @@ mod tests {
                 unpinned_invocations: 0,
             };
 
+            let second = SecondAnswer::empty();
             let CleanupOutcome {
                 blocking,
                 abandoned,
@@ -1235,10 +1366,12 @@ mod tests {
                 CleanupMode::ForceDeleting,
                 &usage_of("dp_busy", busy),
                 None,
+                second.confirm(),
             )
             .await
             .expect("cleanup succeeds");
 
+            assert_eq!(second.asked(), 0, "a force deletion confirms nothing");
             assert!(blocking.is_empty(), "nothing holds a force deletion");
             assert_eq!(
                 abandoned,
@@ -1254,9 +1387,7 @@ mod tests {
                     format!(
                         "DELETE /apis/autoscaling/v2/namespaces/{NAMESPACE}/horizontalpodautoscalers/{VERSION}"
                     ),
-                    format!(
-                        "PATCH /apis/apps/v1/namespaces/{NAMESPACE}/replicasets/{VERSION}/scale"
-                    ),
+                    scale_of(VERSION),
                     format!("DELETE /apis/apps/v1/namespaces/{NAMESPACE}/replicasets/{VERSION}"),
                 ],
                 "no remove-version-at patch: the drain delay is skipped entirely"
@@ -1285,6 +1416,7 @@ mod tests {
                 unpinned_invocations: 0,
             };
 
+            let second = SecondAnswer::empty();
             let CleanupOutcome { blocking, .. } = cleanup_old_replicasets(
                 NAMESPACE,
                 &harness.ctx,
@@ -1294,10 +1426,12 @@ mod tests {
                 CleanupMode::Deleting,
                 &usage_of("dp_busy", busy),
                 None,
+                second.confirm(),
             )
             .await
             .expect("cleanup succeeds");
 
+            assert_eq!(second.asked(), 0);
             assert_eq!(
                 blocking,
                 vec![BlockingVersion {
@@ -1325,6 +1459,7 @@ mod tests {
 
             // superseded with nothing in flight, so this pass stamps a deadline
             let stamping = harness(vec![version("dp_super", None)], vec![]);
+            let second = SecondAnswer::empty();
             let CleanupOutcome { next_removal, .. } = cleanup_old_replicasets(
                 NAMESPACE,
                 &stamping.ctx,
@@ -1334,10 +1469,12 @@ mod tests {
                 CleanupMode::Rollout,
                 &usage_of("dp_super", DeploymentUsage::default()),
                 None,
+                second.confirm(),
             )
             .await
             .expect("cleanup succeeds");
 
+            assert_eq!(second.asked(), 0, "the row is in the answer");
             assert!(next_removal.is_some(), "the version is left to drain");
             assert_eq!(stamping.calls.matching(VERSION), vec![patch_of(VERSION)]);
             assert_eq!(stamping.calls.field_managers(VERSION), vec![MANAGER]);
@@ -1348,11 +1485,8 @@ mod tests {
 
             // a version still holding an invocation sheds its deadline, same manager
             let clearing = harness(vec![version("dp_pinned", Some(chrono::Utc::now()))], vec![]);
-            let pinned = DeploymentUsage {
-                latest_for_service: false,
-                pinned_invocations: 1,
-                unpinned_invocations: 0,
-            };
+            let pinned = pinned_row();
+            let second = SecondAnswer::empty();
             let CleanupOutcome { blocking, .. } = cleanup_old_replicasets(
                 NAMESPACE,
                 &clearing.ctx,
@@ -1362,23 +1496,564 @@ mod tests {
                 CleanupMode::Rollout,
                 &usage_of("dp_pinned", pinned),
                 None,
+                second.confirm(),
             )
             .await
             .expect("cleanup succeeds");
 
-            assert_eq!(
-                blocking,
-                vec![BlockingVersion {
-                    name: VERSION.into(),
-                    deployment_id: Some("dp_pinned".into()),
-                    usage: pinned,
-                }],
-            );
+            assert_eq!(blocking.len(), 1);
             assert_eq!(clearing.calls.matching(VERSION), vec![patch_of(VERSION)]);
             assert_eq!(clearing.calls.field_managers(VERSION), vec![MANAGER]);
             assert_eq!(
                 clearing.calls.patch_types(VERSION),
                 vec!["application/apply-patch+yaml"],
+            );
+        }
+
+        /// The incident: a node that had not loaded its schema answered `/query` with no
+        /// rows. One second answer is all it takes — nothing is scheduled, scaled or deleted
+        /// on the strength of the first, whether the version is live or already at zero.
+        #[tokio::test(start_paused = true)]
+        async fn a_first_answer_with_no_rows_removes_nothing() {
+            let rsd = rsd(false, false);
+            let harness = harness(
+                vec![
+                    version("dp_old", None),
+                    // already scaled to 0 by an earlier drain, but still registered
+                    versioned(OLDER_VERSION, Some("dp_zero"), None, 0, OLDER),
+                ],
+                vec![],
+            );
+
+            let second = SecondAnswer::of(answer_of([
+                ("dp_old", active_row()),
+                ("dp_zero", pinned_row()),
+            ]));
+
+            let CleanupOutcome {
+                blocking,
+                next_removal,
+                ..
+            } = cleanup_old_replicasets(
+                NAMESPACE,
+                &harness.ctx,
+                &harness.rs_api,
+                RSD_UID,
+                &rsd,
+                CleanupMode::Rollout,
+                &DeploymentUsageMap::new(),
+                None,
+                second.confirm(),
+            )
+            .await
+            .expect("cleanup succeeds");
+
+            assert_eq!(second.asked(), 1, "the absence was confirmed");
+            assert_eq!(blocking.len(), 2, "both are still needed");
+            assert_eq!(
+                harness.calls.matching("replicasets"),
+                Vec::<String>::new(),
+                "neither is scaled, deleted, or given a deadline",
+            );
+            assert!(next_removal.is_some(), "and they are polled for the drain");
+        }
+
+        /// A rollback re-adopts an older version as the current one, so the answer the first
+        /// query ran against predates the registration of the version above it — and lists
+        /// only the re-adopted id. The confirming answer lists both.
+        #[tokio::test(start_paused = true)]
+        async fn a_rollback_does_not_drain_the_version_registered_after_it() {
+            let rsd = rsd(false, false);
+            let harness = harness(
+                vec![
+                    versioned(CURRENT, Some(CURRENT_DEPLOYMENT_ID), None, 3, OLDER),
+                    versioned(VERSION, Some("dp_new"), None, 3, NEWER),
+                ],
+                vec![],
+            );
+
+            let second = SecondAnswer::of(answer_of([
+                (CURRENT_DEPLOYMENT_ID, DeploymentUsage::default()),
+                ("dp_new", active_row()),
+            ]));
+
+            let CleanupOutcome { blocking, .. } = cleanup_old_replicasets(
+                NAMESPACE,
+                &harness.ctx,
+                &harness.rs_api,
+                RSD_UID,
+                &rsd,
+                CleanupMode::Rollout,
+                // the snapshot predates the newer registration, so it lists only the old one
+                &usage_of(CURRENT_DEPLOYMENT_ID, DeploymentUsage::default()),
+                Some(CURRENT),
+                second.confirm(),
+            )
+            .await
+            .expect("cleanup succeeds");
+
+            assert_eq!(second.asked(), 1);
+            assert_eq!(blocking.len(), 1);
+            assert_eq!(
+                harness.calls.matching(VERSION),
+                Vec::<String>::new(),
+                "the newer version is neither scaled nor given a deadline",
+            );
+        }
+
+        /// `drainDelaySeconds: 0` is not what protects the version: the confirming answer is.
+        #[tokio::test(start_paused = true)]
+        async fn a_zero_drain_delay_still_confirms_before_removing() {
+            let mut rsd = rsd(false, false);
+            rsd.spec.restate.drain_delay_seconds = Some(0);
+
+            let harness = harness(vec![version("dp_old", None)], vec![]);
+            let second = SecondAnswer::of(answer_of([("dp_old", active_row())]));
+
+            let CleanupOutcome { blocking, .. } = cleanup_old_replicasets(
+                NAMESPACE,
+                &harness.ctx,
+                &harness.rs_api,
+                RSD_UID,
+                &rsd,
+                CleanupMode::Rollout,
+                &DeploymentUsageMap::new(),
+                None,
+                second.confirm(),
+            )
+            .await
+            .expect("cleanup succeeds");
+
+            assert_eq!(second.asked(), 1);
+            assert_eq!(blocking.len(), 1);
+            assert_eq!(
+                harness.calls.matching("replicasets"),
+                Vec::<String>::new(),
+                "with a zero delay the confirming answer is all that holds it",
+            );
+        }
+
+        /// A version already at zero, past its deadline and kept by the revision history costs
+        /// nothing this pass, so the steady state pays no second query for it.
+        #[tokio::test]
+        async fn a_retained_zero_replica_absence_costs_no_second_query() {
+            let rsd = rsd_with_history(10, false, false);
+            let harness = harness(
+                vec![versioned(
+                    VERSION,
+                    Some("dp_gone"),
+                    Some(chrono::Utc::now() - chrono::TimeDelta::seconds(60)),
+                    0,
+                    OLDER,
+                )],
+                vec![],
+            );
+            let second = SecondAnswer::empty();
+
+            let CleanupOutcome {
+                blocking,
+                next_removal,
+                ..
+            } = cleanup_old_replicasets(
+                NAMESPACE,
+                &harness.ctx,
+                &harness.rs_api,
+                RSD_UID,
+                &rsd,
+                CleanupMode::Rollout,
+                &DeploymentUsageMap::new(),
+                None,
+                second.confirm(),
+            )
+            .await
+            .expect("cleanup succeeds");
+
+            assert_eq!(
+                second.asked(),
+                0,
+                "a retained zero-replica version is not acted on, so nothing needs confirming",
+            );
+            assert!(blocking.is_empty());
+            assert_eq!(next_removal, None);
+            assert_eq!(
+                harness.calls.matching(VERSION),
+                Vec::<String>::new(),
+                "nothing is touched: no deadline, no scale, no delete",
+            );
+        }
+
+        /// ...unless an operator HPA still targets it: executing the retention deletes that
+        /// HPA, which is a write an absent id alone would explain, so it is confirmed first.
+        #[tokio::test(start_paused = true)]
+        async fn a_retained_absence_holding_an_hpa_confirms_before_deleting_it() {
+            let rsd = rsd_with_history(10, false, false);
+            let harness = harness(
+                vec![versioned(
+                    VERSION,
+                    Some("dp_gone"),
+                    Some(chrono::Utc::now() - chrono::TimeDelta::seconds(60)),
+                    0,
+                    OLDER,
+                )],
+                vec![version_hpa()],
+            );
+            let second = SecondAnswer::empty();
+
+            let CleanupOutcome { blocking, .. } = cleanup_old_replicasets(
+                NAMESPACE,
+                &harness.ctx,
+                &harness.rs_api,
+                RSD_UID,
+                &rsd,
+                CleanupMode::Rollout,
+                &DeploymentUsageMap::new(),
+                None,
+                second.confirm(),
+            )
+            .await
+            .expect("cleanup succeeds");
+
+            assert_eq!(
+                second.asked(),
+                1,
+                "the HPA delete rests on the absence, so it is confirmed first",
+            );
+            assert!(blocking.is_empty());
+            assert_eq!(
+                harness.calls.matching(VERSION),
+                vec![format!(
+                    "DELETE /apis/autoscaling/v2/namespaces/{NAMESPACE}/horizontalpodautoscalers/{VERSION}"
+                )],
+                "the HPA goes, and the retained ReplicaSet stays",
+            );
+        }
+
+        /// ...but the same version beyond the history limit would be deleted, so that does
+        /// confirm first.
+        #[tokio::test(start_paused = true)]
+        async fn a_zero_replica_absence_past_the_history_limit_confirms_before_deleting() {
+            let rsd = rsd_with_history(0, false, false);
+            let harness = harness(
+                vec![versioned(
+                    VERSION,
+                    Some("dp_gone"),
+                    Some(chrono::Utc::now() - chrono::TimeDelta::seconds(60)),
+                    0,
+                    OLDER,
+                )],
+                vec![],
+            );
+            let second = SecondAnswer::empty();
+
+            cleanup_old_replicasets(
+                NAMESPACE,
+                &harness.ctx,
+                &harness.rs_api,
+                RSD_UID,
+                &rsd,
+                CleanupMode::Rollout,
+                &DeploymentUsageMap::new(),
+                None,
+                second.confirm(),
+            )
+            .await
+            .expect("cleanup succeeds");
+
+            assert_eq!(second.asked(), 1, "the delete rests on the absence");
+            assert_eq!(
+                harness.calls.matching(VERSION),
+                vec![format!(
+                    "DELETE /apis/apps/v1/namespaces/{NAMESPACE}/replicasets/{VERSION}"
+                )],
+                "and it is deleted, without a deregistration",
+            );
+        }
+
+        /// A history slot a never-registered version fills still leaves the absent version
+        /// below it due for deletion, which rests on an absence — so it is not deleted on the
+        /// strength of one answer.
+        #[tokio::test(start_paused = true)]
+        async fn a_history_slot_filled_by_a_never_registered_version_still_confirms() {
+            let rsd = rsd_with_history(1, false, false);
+            let harness = harness(
+                vec![
+                    // newest, never registered, so it is scaled down and kept for rollback
+                    versioned(NEVER_REGISTERED, None, None, 3, NEWER),
+                    // older, absent from every answer, already at zero and due
+                    versioned(
+                        VERSION,
+                        Some("dp_gone"),
+                        Some(chrono::Utc::now() - chrono::TimeDelta::seconds(60)),
+                        0,
+                        OLDER,
+                    ),
+                ],
+                vec![],
+            );
+
+            let second = SecondAnswer::of(answer_of([("dp_gone", active_row())]));
+            let CleanupOutcome { blocking, .. } = cleanup_old_replicasets(
+                NAMESPACE,
+                &harness.ctx,
+                &harness.rs_api,
+                RSD_UID,
+                &rsd,
+                CleanupMode::Rollout,
+                &DeploymentUsageMap::new(),
+                None,
+                second.confirm(),
+            )
+            .await
+            .expect("cleanup succeeds");
+
+            assert_eq!(
+                second.asked(),
+                1,
+                "the delete rests on the absence, so it is confirmed first",
+            );
+            assert_eq!(blocking.len(), 1, "the confirming answer lists the version");
+            assert_eq!(
+                harness.calls.field_managers(VERSION),
+                vec!["restate-operator/remove-version-at"],
+                "it is not scaled or deleted: the only write clears its stale deadline",
+            );
+            assert_eq!(
+                harness.calls.field_managers(NEVER_REGISTERED),
+                vec!["restate-operator/scale-down"],
+                "the never-registered one is scaled down, and kept",
+            );
+        }
+
+        /// A deadline may pass while the pass is executing a later version; the plan was
+        /// made before, and is executed as planned: no removal is re-decided mid-pass.
+        #[tokio::test]
+        async fn a_deadline_expiring_between_planning_and_execution_causes_no_removal() {
+            let rsd = rsd_with_history(0, false, false);
+            let soon = chrono::Utc::now() + chrono::TimeDelta::milliseconds(500);
+            let harness = harness(
+                vec![
+                    // newest: drained and due, so it is torn down first — slowly
+                    versioned(
+                        NEVER_REGISTERED,
+                        Some("dp_due"),
+                        Some(chrono::Utc::now() - chrono::TimeDelta::seconds(60)),
+                        3,
+                        NEWER,
+                    ),
+                    // older: its deadline is still ahead when the pass is planned
+                    versioned(VERSION, Some("dp_waiting"), Some(soon), 3, OLDER),
+                ],
+                vec![],
+            );
+
+            let mut rsd = rsd;
+            rsd.spec.restate.register.url = Some(
+                admin_stub_with_delay(harness.calls.clone(), std::time::Duration::from_secs(1))
+                    .await,
+            );
+
+            let second = SecondAnswer::empty();
+            let CleanupOutcome { next_removal, .. } = cleanup_old_replicasets(
+                NAMESPACE,
+                &harness.ctx,
+                &harness.rs_api,
+                RSD_UID,
+                &rsd,
+                CleanupMode::Rollout,
+                &DeploymentUsageMap::from([("dp_due".to_owned(), DeploymentUsage::default())]),
+                None,
+                second.confirm(),
+            )
+            .await
+            .expect("cleanup succeeds");
+
+            assert!(
+                chrono::Utc::now() > soon,
+                "the deadline passed while the pass ran",
+            );
+            assert_eq!(second.asked(), 0);
+            assert_eq!(
+                harness.calls.matching(VERSION),
+                Vec::<String>::new(),
+                "the planned Wait is executed as it was planned: nothing is touched",
+            );
+            assert_eq!(next_removal, Some(soon), "it is still waited for");
+        }
+
+        /// A confirmed absence is what the drain delay exists for: the deadline goes on this
+        /// pass, and the teardown happens at it without a deregistration.
+        #[tokio::test(start_paused = true)]
+        async fn a_confirmed_absence_drains_then_is_removed() {
+            let rsd = rsd_with_history(0, false, false);
+            let scheduling = harness(vec![version("dp_gone", None)], vec![]);
+
+            // the decision clock is chrono; the pause only makes the confirmation delay instant
+            let confirmed_at = Arc::new(Mutex::new(None));
+            let recorded = confirmed_at.clone();
+            let confirm = move || {
+                *recorded.lock().expect("the clock reading is not poisoned") =
+                    Some(chrono::Utc::now());
+                std::future::ready(Ok(DeploymentUsageMap::new()))
+            };
+
+            let CleanupOutcome { next_removal, .. } = cleanup_old_replicasets(
+                NAMESPACE,
+                &scheduling.ctx,
+                &scheduling.rs_api,
+                RSD_UID,
+                &rsd,
+                CleanupMode::Rollout,
+                &DeploymentUsageMap::new(),
+                None,
+                confirm,
+            )
+            .await
+            .expect("cleanup succeeds");
+
+            let confirmed_at = confirmed_at
+                .lock()
+                .expect("the clock reading is not poisoned")
+                .expect("the pass confirmed the absence");
+            let remove_at = next_removal.expect("the drained version is scheduled");
+            assert!(
+                remove_at >= confirmed_at + chrono::TimeDelta::seconds(300),
+                "the deadline is a full drain delay after the decision, not before it",
+            );
+            assert_eq!(
+                scheduling.calls.field_managers(VERSION),
+                vec!["restate-operator/remove-version-at"],
+                "a deadline, and nothing else",
+            );
+
+            // the deadline has passed, and the second answer still leaves it out
+            let harness = harness(
+                vec![version(
+                    "dp_gone",
+                    Some(chrono::Utc::now() - chrono::TimeDelta::seconds(1)),
+                )],
+                vec![],
+            );
+            let second = SecondAnswer::empty();
+            let CleanupOutcome { abandoned, .. } = cleanup_old_replicasets(
+                NAMESPACE,
+                &harness.ctx,
+                &harness.rs_api,
+                RSD_UID,
+                &rsd,
+                CleanupMode::Rollout,
+                &DeploymentUsageMap::new(),
+                None,
+                second.confirm(),
+            )
+            .await
+            .expect("cleanup succeeds");
+
+            assert!(abandoned.is_empty(), "there is no work to walk over");
+            assert_eq!(
+                harness.calls.matching(VERSION),
+                vec![
+                    scale_of(VERSION),
+                    format!("DELETE /apis/apps/v1/namespaces/{NAMESPACE}/replicasets/{VERSION}"),
+                ],
+                "scaled down and torn down at the deadline, with no new deadline",
+            );
+            assert_eq!(
+                harness.calls.matching("/deployments/"),
+                Vec::<String>::new(),
+                "a deployment the answer does not list is not deregistered",
+            );
+        }
+
+        /// Only a pass that would act on an absence pays for the second query: a
+        /// never-registered version is removed at once without one.
+        #[tokio::test]
+        async fn a_second_query_is_taken_only_when_something_depends_on_an_absence() {
+            let rsd = rsd_with_history(0, false, false);
+            let harness = harness(
+                vec![
+                    version("dp_live", None),
+                    // never registered: no deployment-id annotation at all
+                    versioned(NEVER_REGISTERED, None, None, 3, OLDER),
+                ],
+                vec![],
+            );
+            let second = SecondAnswer::empty();
+
+            let CleanupOutcome { blocking, .. } = cleanup_old_replicasets(
+                NAMESPACE,
+                &harness.ctx,
+                &harness.rs_api,
+                RSD_UID,
+                &rsd,
+                CleanupMode::Rollout,
+                &usage_of("dp_live", active_row()),
+                None,
+                second.confirm(),
+            )
+            .await
+            .expect("cleanup succeeds");
+
+            assert_eq!(
+                second.asked(),
+                0,
+                "a never-registered version is not an absence anyone could confirm",
+            );
+            assert_eq!(blocking.len(), 1, "the registered version is left alone");
+            assert_eq!(
+                harness.calls.matching(NEVER_REGISTERED),
+                vec![
+                    scale_of(NEVER_REGISTERED),
+                    format!(
+                        "DELETE /apis/apps/v1/namespaces/{NAMESPACE}/replicasets/{NEVER_REGISTERED}"
+                    ),
+                ],
+                "and the never-registered one is removed on this pass",
+            );
+        }
+
+        /// The version moves on: a registered version whose deadline has passed and which
+        /// both answers still leave out is removed without being deregistered.
+        #[tokio::test]
+        async fn a_version_that_was_never_registered_is_removed_at_once() {
+            // no revision history to keep it for, so the teardown lands in this pass
+            let rsd = rsd_with_history(0, false, false);
+            let harness = harness(vec![unregistered_version()], vec![]);
+
+            let second = SecondAnswer::empty();
+            let CleanupOutcome {
+                blocking,
+                next_removal,
+                ..
+            } = cleanup_old_replicasets(
+                NAMESPACE,
+                &harness.ctx,
+                &harness.rs_api,
+                RSD_UID,
+                &rsd,
+                CleanupMode::Rollout,
+                // not even an empty answer makes a difference: with no recorded id there is
+                // nothing that could have been left out
+                &DeploymentUsageMap::new(),
+                None,
+                second.confirm(),
+            )
+            .await
+            .expect("cleanup succeeds");
+
+            assert_eq!(second.asked(), 0);
+            assert!(blocking.is_empty());
+            assert_eq!(next_removal, None, "no drain delay is waited out");
+            assert_eq!(
+                harness.calls.matching(VERSION),
+                vec![
+                    scale_of(VERSION),
+                    format!("DELETE /apis/apps/v1/namespaces/{NAMESPACE}/replicasets/{VERSION}"),
+                ],
+            );
+            assert_eq!(
+                harness.calls.matching("/deployments/"),
+                Vec::<String>::new(),
+                "there is no registration to deregister",
             );
         }
     }
