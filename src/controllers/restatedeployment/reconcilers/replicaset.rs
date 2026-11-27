@@ -382,8 +382,11 @@ where
         confirm,
     )
     .await?;
+    // The executor may delete a retained version's HPA only if the planner saw it: one that
+    // reached the cache after planning was not confirmed, and waits for the next pass.
+    let planned_hpas: Vec<bool> = facts.iter().map(|facts| facts.has_hpa).collect();
 
-    for (rs, planned) in replicasets.into_iter().zip(plan) {
+    for ((rs, planned), planned_hpa) in replicasets.into_iter().zip(plan).zip(planned_hpas) {
         let rs_name = rs.name_any();
 
         let rs_deployment_id = rs
@@ -513,7 +516,11 @@ where
                 // the revision-history retention window. Gate on the owned-HPA cache so we
                 // only call the API when an HPA actually exists.
                 let hpa_ref = ObjectRef::<HorizontalPodAutoscaler>::new(&rs_name).within(namespace);
-                if ctx.hpa_store.get(&hpa_ref).is_some() {
+                let delete_hpa = match action {
+                    VersionAction::Retain => planned_hpa,
+                    _ => ctx.hpa_store.get(&hpa_ref).is_some(),
+                };
+                if delete_hpa {
                     super::autoscaling::delete_version_hpa(&ctx.client, namespace, &rs_name)
                         .await?;
                 }
